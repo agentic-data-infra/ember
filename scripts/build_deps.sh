@@ -3,7 +3,8 @@
 # wrapper flags in third-party/generated/deps.bzl.
 #
 # Ember uses a single Velox checkout: Axiom's velox/ submodule directory is
-# replaced by a symlink to $VELOX_SRC.
+# replaced by a symlink to $VELOX_SRC. Velox's Spark SQL functions are enabled
+# so Ember can give Spark semantics.
 set -euo pipefail
 
 EMBER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,6 +23,7 @@ cmake -S "$AXIOM_SRC" -B "$BUILD_DIR" -GNinja \
   -DCMAKE_PROJECT_INCLUDE="$EMBER_DIR/scripts/axiom_preload.cmake" \
   -DAXIOM_BUILD_TESTING=ON \
   -DAXIOM_BUILD_TEST_UTILS=ON \
+  -DVELOX_ENABLE_SPARK_FUNCTIONS=ON \
   -DVELOX_MONO_LIBRARY=ON \
   -DVELOX_BUILD_SHARED=OFF \
   -DCMAKE_C_COMPILER_LAUNCHER=ccache \

@@ -26,6 +26,12 @@ buck2 test //...
 Re-run `scripts/build_deps.sh` (or just `scripts/gen_third_party.py`) whenever
 Velox or Axiom change.
 
+## Running WordCount
+
+```
+buck2 run //examples:word_count -- path/to/text/file/or/directory
+```
+
 ## Layout
 
 See [ember/README.md](ember/README.md).

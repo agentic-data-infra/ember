@@ -1,0 +1,5 @@
+cxx_binary(
+    name = "word_count",
+    srcs = ["WordCount.cpp"],
+    deps = ["//ember/api:api"],
+)
