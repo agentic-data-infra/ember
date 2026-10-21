@@ -1,0 +1,14 @@
+# Ember's user-facing Dataframe API. Headers are exported under "ember/", so
+# programs include e.g. "ember/Session.h".
+
+cxx_library(
+    name = "api",
+    srcs = glob(["*.cpp"]),
+    header_namespace = "ember",
+    exported_headers = glob(["*.h"]),
+    # The in-process exchange used by Axiom's LocalRunner lives in Velox's
+    # exec test utilities, so the API links the testing libraries until
+    # Ember's own shuffle replaces it.
+    exported_deps = ["//third-party:testing"],
+    visibility = ["PUBLIC"],
+)
