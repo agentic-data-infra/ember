@@ -1,0 +1,11 @@
+cxx_test(
+    name = "scheduler_test",
+    srcs = ["SchedulerTest.cpp"],
+    deps = [
+        "//ember/api:api",
+        "//ember/driver:driver",
+        "//ember/tests:test_main",
+    ],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+)

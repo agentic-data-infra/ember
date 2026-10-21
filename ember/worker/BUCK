@@ -1,0 +1,10 @@
+# Executor side: runs serialized tasks as Velox tasks.
+
+cxx_library(
+    name = "worker",
+    srcs = glob(["*.cpp"]),
+    header_namespace = "ember/worker",
+    exported_headers = glob(["*.h"]),
+    exported_deps = ["//ember/common:common"],
+    visibility = ["PUBLIC"],
+)

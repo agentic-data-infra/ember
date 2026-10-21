@@ -426,7 +426,8 @@ std::string Dataframe::explainString() const {
   auto compiled = compile();
   return "== Logical Plan ==\n" +
       lp::PlanPrinter::toText(*compiled->logicalPlan) +
-      "\n== Physical Plan ==\n" + compiled->physicalPlan->toString(false);
+      "\n== Physical Plan ==\n" + compiled->physicalPlan->toString(false) +
+      "\n== Stages ==\n" + session_->explainStages(compiled->physicalPlan);
 }
 
 void Dataframe::explain() const {
