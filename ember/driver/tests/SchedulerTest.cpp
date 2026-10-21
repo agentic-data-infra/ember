@@ -1,0 +1,438 @@
+// Ember's scheduler and shuffle end to end: stage plans, task messages,
+// retries, byte-range splits and spills, and agreement with Axiom's
+// in-process LocalRunner.
+
+#include <gtest/gtest.h>
+
+#include <filesystem>
+#include <fstream>
+#include <random>
+
+#include "axiom/runner/LocalRunner.h"
+#include "ember/Session.h"
+#include "ember/driver/DagScheduler.h"
+#include "ember/driver/LocalBackend.h"
+#include "ember/functions.h"
+#include "ember/shuffle/ShuffleConfig.h"
+#include "ember/shuffle/ShuffleRead.h"
+#include "ember/shuffle/ShuffleWrite.h"
+#include "velox/common/base/tests/GTestUtils.h"
+#include "velox/exec/tests/utils/LocalExchangeSource.h"
+
+namespace ember::driver {
+namespace {
+
+using namespace ember::functions;
+namespace axiom_connector = facebook::axiom::connector;
+namespace core = facebook::velox::core;
+namespace fs = std::filesystem;
+namespace runner = facebook::axiom::runner;
+namespace velox = facebook::velox;
+
+// Wraps a backend: counts launches and fails the attempts 'fail' picks.
+class FlakyBackend : public SchedulerBackend {
+ public:
+  using FailIf = std::function<bool(const TaskDescription&)>;
+
+  FlakyBackend(std::shared_ptr<SchedulerBackend> backend, FailIf fail)
+      : backend_{std::move(backend)}, fail_{std::move(fail)} {}
+
+  int32_t totalSlots() const override {
+    return backend_->totalSlots();
+  }
+
+  void launchTask(std::string task, ResultCallback onResult) override {
+    auto description = TaskDescription::deserialize(task);
+    {
+      std::lock_guard<std::mutex> l(mutex_);
+      ++launches_[description.stageId];
+    }
+    if (fail_ != nullptr && fail_(description)) {
+      TaskResult result;
+      result.taskId = description.taskId();
+      result.state = TaskState::kFailed;
+      result.error = "injected failure";
+      onResult(result.serialize());
+      return;
+    }
+    backend_->launchTask(std::move(task), std::move(onResult));
+  }
+
+  void removeShuffle(int32_t shuffleId) override {
+    backend_->removeShuffle(shuffleId);
+  }
+
+  void stop() override {
+    backend_->stop();
+  }
+
+  int32_t launches(int32_t stageId) {
+    std::lock_guard<std::mutex> l(mutex_);
+    return launches_[stageId];
+  }
+
+  int32_t totalLaunches() {
+    std::lock_guard<std::mutex> l(mutex_);
+    int32_t total = 0;
+    for (const auto& [stage, count] : launches_) {
+      total += count;
+    }
+    return total;
+  }
+
+ private:
+  const std::shared_ptr<SchedulerBackend> backend_;
+  const FailIf fail_;
+  std::mutex mutex_;
+  std::map<int32_t, int32_t> launches_;
+};
+
+class SchedulerTest : public testing::Test {
+ protected:
+  static void SetUpTestCase() {
+    ember_ = Session::builder()
+                 .appName("SchedulerTest")
+                 .master("local[4]")
+                 .getOrCreate();
+    // Axiom's LocalRunner reads its exchanges in memory.
+    velox::exec::ExchangeSource::registerFactory(
+        velox::exec::test::createLocalExchangeSource);
+  }
+
+  static void TearDownTestCase() {
+    ember_->stop();
+    ember_.reset();
+  }
+
+  void SetUp() override {
+    dir_ = fs::temp_directory_path() /
+        fmt::format("ember_scheduler_test_{}", ::getpid());
+    fs::remove_all(dir_);
+    fs::create_directories(dir_ / "input");
+    rootPool_ = velox::memory::memoryManager()->addRootPool();
+    pool_ = rootPool_->addLeafChild("results");
+  }
+
+  void TearDown() override {
+    fs::remove_all(dir_);
+  }
+
+  // A scheduler over its own local executor, with 'config'.
+  std::pair<std::unique_ptr<DagScheduler>, std::shared_ptr<FlakyBackend>>
+  scheduler(
+      std::map<std::string, std::string> config = {},
+      FlakyBackend::FailIf fail = nullptr) {
+    auto backend = std::make_shared<FlakyBackend>(
+        std::make_shared<LocalBackend>(LocalBackendOptions{
+            .numSlots = 4,
+            .numThreads = 8,
+            .localDirectory = (dir_ / "local").string()}),
+        std::move(fail));
+    auto dag = std::make_unique<DagScheduler>(
+        backend,
+        DagSchedulerOptions{
+            .appName = "SchedulerTest",
+            .parallelism = 4,
+            .config = std::move(config)});
+    return {std::move(dag), backend};
+  }
+
+  // Random words over several files; returns the input directory.
+  std::string writeCorpus(int32_t numFiles, int32_t linesPerFile) {
+    const std::vector<std::string> vocabulary = {
+        "the", "quick", "Brown", "fox", "JUMPS", "over", "lazy", "dog",
+        "ember", "velox", "axiom", "x1", "snake_case", "a"};
+    std::mt19937 rng(7);
+    for (int32_t f = 0; f < numFiles; ++f) {
+      std::ofstream out(dir_ / "input" / fmt::format("part-{}.txt", f));
+      for (int32_t l = 0; l < linesPerFile; ++l) {
+        const auto numWords = rng() % 10;
+        for (uint32_t w = 0; w < numWords; ++w) {
+          out << vocabulary[rng() % vocabulary.size()] << (w % 3 ? " " : ", ");
+        }
+        out << "\n";
+      }
+    }
+    return (dir_ / "input").string() + "/";
+  }
+
+  static Dataframe wordCount(const std::string& path) {
+    return ember_->read()
+        .text(path)
+        .select(explode(split(lower(col("value")), R"(\W+)")).as("word"))
+        .filter(col("word") != "")
+        .groupBy("word")
+        .count()
+        .orderBy(col("count").desc(), col("word"));
+  }
+
+  Dataframe people() {
+    return ember_->createDataframe(
+        velox::ROW(
+            {"name", "dept", "salary"},
+            {velox::VARCHAR(), velox::VARCHAR(), velox::BIGINT()}),
+        {{"alice", "eng", 100L},
+         {"bob", "eng", 80L},
+         {"carol", "sales", 70L},
+         {"dave", "sales", 50L},
+         {"erin", "hr", 60L}});
+  }
+
+  // Rows as strings, in result order.
+  static std::vector<std::string> toStrings(
+      const std::vector<velox::RowVectorPtr>& batches) {
+    std::vector<std::string> rows;
+    for (const auto& batch : batches) {
+      for (velox::vector_size_t i = 0; i < batch->size(); ++i) {
+        rows.push_back(batch->toString(i));
+      }
+    }
+    return rows;
+  }
+
+  static std::vector<std::string> sorted(std::vector<std::string> rows) {
+    std::sort(rows.begin(), rows.end());
+    return rows;
+  }
+
+  // Runs 'df' with Axiom's LocalRunner and its in-memory exchanges.
+  std::vector<velox::RowVectorPtr> runWithLocalRunner(const Dataframe& df) {
+    auto executor = std::make_unique<folly::CPUThreadPoolExecutor>(8);
+    auto queryId = fmt::format("local_runner_{}", ++localRunnerQueries_);
+    auto queryCtx = core::QueryCtx::create(
+        executor.get(),
+        core::QueryConfig({}),
+        {},
+        velox::cache::AsyncDataCache::getInstance(),
+        nullptr,
+        nullptr,
+        queryId);
+    auto connectorContext = std::make_shared<axiom_connector::ConnectorContext>(
+        queryId,
+        "test",
+        axiom_connector::ConnectorProperties{},
+        axiom_connector::ConnectorContext::noopStatWriterProvider());
+    auto localRunner = std::make_shared<runner::LocalRunner>(
+        std::make_shared<runner::RunnerSession>(
+            connectorContext,
+            std::make_shared<velox::NoopRuntimeStatWriter>(),
+            runner::Properties{}),
+        df.physicalPlan(),
+        facebook::axiom::optimizer::FinishWrite{},
+        queryCtx,
+        std::make_shared<runner::ConnectorSplitSourceFactory>(),
+        queryCtx->pool()->addLeafChild("runner"),
+        "");
+    std::vector<velox::RowVectorPtr> results;
+    localRunner->drain([&](velox::RowVectorPtr batch) {
+      results.push_back(std::dynamic_pointer_cast<velox::RowVector>(
+          velox::BaseVector::copy(*batch, pool_.get())));
+    });
+    localRunner.reset();
+    executor->join();
+    return results;
+  }
+
+  static inline std::optional<Session> ember_;
+  fs::path dir_;
+  std::shared_ptr<velox::memory::MemoryPool> rootPool_;
+  std::shared_ptr<velox::memory::MemoryPool> pool_;
+  int32_t localRunnerQueries_{0};
+};
+
+TEST_F(SchedulerTest, wordCountStages) {
+  auto path = writeCorpus(1, 10);
+  auto [dag, backend] = scheduler();
+  auto stages = dag->stagePlan(*wordCount(path).physicalPlan());
+  ASSERT_EQ(stages.stages.size(), 3) << stages.toString();
+
+  // Map stage: scan to partial count, written to a shuffle on 'word'.
+  const auto& map = stages.stages[0];
+  EXPECT_FALSE(map.numTasks.has_value());
+  EXPECT_EQ(map.scans.size(), 1);
+  auto write = std::dynamic_pointer_cast<const shuffle::ShuffleWriteNode>(map.plan);
+  ASSERT_NE(write, nullptr) << map.plan->toString(true, true);
+  EXPECT_EQ(write->shuffleId(), *map.shuffleId);
+  EXPECT_EQ(write->numPartitions(), 4);
+
+  // Reduce stage: final count and sort, one task per partition.
+  const auto& reduce = stages.stages[1];
+  EXPECT_EQ(reduce.numTasks, 4);
+  EXPECT_EQ(reduce.parents, std::vector<int32_t>{map.stageId});
+  ASSERT_EQ(reduce.shuffleInputs.size(), 1);
+  EXPECT_EQ(reduce.shuffleInputs[0].shuffleId, *map.shuffleId);
+
+  // Result stage: merges the sorted reduce outputs.
+  const auto& result = stages.resultStage();
+  EXPECT_EQ(result.numTasks, 1);
+  auto read = std::dynamic_pointer_cast<const shuffle::ShuffleReadNode>(result.plan);
+  ASSERT_NE(read, nullptr) << result.plan->toString(true, true);
+  EXPECT_TRUE(read->isMerge());
+
+  // The task binary deserializes to the same plan, again.
+  for (const auto& stage : stages.stages) {
+    auto copy = velox::ISerializable::deserialize<core::PlanNode>(
+        folly::parseJson(folly::toJson(stage.fragment)), pool_.get());
+    EXPECT_EQ(copy->toString(true, true), stage.plan->toString(true, true));
+  }
+}
+
+TEST_F(SchedulerTest, taskMessagesRoundTrip) {
+  TaskDescription task;
+  task.jobId = "job_1";
+  task.stageId = 3;
+  task.stageAttempt = 1;
+  task.partition = 2;
+  task.attempt = 1;
+  task.fragment = folly::dynamic::object("name", "ValuesNode");
+  task.splits["0"] = {folly::dynamic::object("name", "FileRangeSplit")};
+  task.splits["6"] = {};
+  task.resultTask = true;
+  task.config = {{"ember.x", "y"}};
+  auto copy = TaskDescription::deserialize(task.serialize());
+  EXPECT_EQ(copy.taskId(), "ember://job_1/3.1/2.1");
+  EXPECT_EQ(copy.fragment, task.fragment);
+  EXPECT_EQ(copy.splits, task.splits);
+  EXPECT_TRUE(copy.resultTask);
+  EXPECT_EQ(copy.config, task.config);
+
+  TaskResult result;
+  result.taskId = copy.taskId();
+  result.state = TaskState::kFailed;
+  result.error = "boom";
+  result.userError = true;
+  result.mapStatus = shuffle::MapStatus{"executor-1", {10, 0, 7}};
+  result.resultPages = {"page one", std::string("\0binary\0", 8)};
+  result.outputRows = 42;
+  auto resultCopy = TaskResult::deserialize(result.serialize());
+  EXPECT_EQ(resultCopy.taskId, result.taskId);
+  EXPECT_EQ(resultCopy.state, TaskState::kFailed);
+  EXPECT_EQ(resultCopy.error, "boom");
+  EXPECT_TRUE(resultCopy.userError);
+  EXPECT_EQ(resultCopy.mapStatus->location, "executor-1");
+  EXPECT_EQ(
+      resultCopy.mapStatus->partitionLengths, (std::vector<int64_t>{10, 0, 7}));
+  EXPECT_EQ(resultCopy.resultPages, result.resultPages);
+  EXPECT_EQ(resultCopy.outputRows, 42);
+}
+
+TEST_F(SchedulerTest, matchesLocalRunner) {
+  auto path = writeCorpus(3, 500);
+  auto depts = ember_->createDataframe(
+      velox::ROW({"dept", "floor"}, {velox::VARCHAR(), velox::BIGINT()}),
+      {{"eng", 3L}, {"sales", 1L}, {"ops", 9L}});
+  std::vector<std::pair<std::string, Dataframe>> queries = {
+      {"wordCount", wordCount(path)},
+      {"lines", ember_->read().text(path).filter(length(col("value")) > 20)},
+      {"join", people().join(depts, {"dept"}, "full").select("name", "floor")},
+      {"unionDistinct", people().unionAll(people()).select("dept").distinct()},
+      {"aggregate",
+       people()
+           .groupBy("dept")
+           .agg(sum(col("salary")).as("total"), count(col("name")).as("n"))
+           .orderBy(col("total").desc())
+           .limit(2)},
+  };
+  for (const auto& [name, df] : queries) {
+    SCOPED_TRACE(name);
+    auto expected = toStrings(runWithLocalRunner(df));
+    auto actual = toStrings(df.collectBatches());
+    ASSERT_FALSE(expected.empty());
+    EXPECT_EQ(sorted(actual), sorted(expected));
+  }
+  // Sorted outputs agree in order too.
+  EXPECT_EQ(
+      toStrings(wordCount(path).collectBatches()),
+      toStrings(runWithLocalRunner(wordCount(path))));
+}
+
+TEST_F(SchedulerTest, byteRangeSplitsAndSpills) {
+  auto path = writeCorpus(2, 3000);
+  auto plan = wordCount(path).physicalPlan();
+  auto expected = toStrings(wordCount(path).collectBatches());
+
+  // Text files cut into 4KB ranges; every shuffle page spills.
+  auto [dag, backend] = scheduler(
+      {{DagScheduler::kMaxSplitBytes, "4096"},
+       {std::string(shuffle::kSpillThreshold), "1"}});
+  auto actual = toStrings(dag->runJob(*plan, pool_.get()));
+  EXPECT_EQ(actual, expected);
+
+  // One map task per range.
+  int64_t numRanges = 0;
+  for (const auto& entry : fs::directory_iterator(dir_ / "input")) {
+    numRanges += (entry.file_size() + 4095) / 4096;
+  }
+  const auto stages = dag->stagePlan(*plan);
+  EXPECT_EQ(backend->launches(stages.stages[0].stageId), numRanges);
+  EXPECT_GT(numRanges, 10);
+}
+
+TEST_F(SchedulerTest, everyLineReadOnceWhateverTheRangeSize) {
+  auto path = dir_ / "input" / "lines.txt";
+  std::ofstream(path, std::ios::binary)
+      << "first line\r\n\n\nab\nlonger line that spans many ranges\r\n"
+      << "x\n\r\nlast line without newline";
+  auto lines = ember_->read().text(path.string());
+  auto plan = lines.physicalPlan();
+  auto expected = sorted(toStrings(lines.collectBatches()));
+  ASSERT_EQ(expected.size(), 8);
+  for (auto rangeBytes : {1, 2, 3, 5, 7, 11, 13, 64}) {
+    SCOPED_TRACE(rangeBytes);
+    auto [dag, backend] =
+        scheduler({{DagScheduler::kMaxSplitBytes, std::to_string(rangeBytes)}});
+    EXPECT_EQ(sorted(toStrings(dag->runJob(*plan, pool_.get()))), expected);
+  }
+}
+
+TEST_F(SchedulerTest, retriesFailedTasks) {
+  auto path = writeCorpus(2, 200);
+  auto df = wordCount(path);
+  auto expected = toStrings(df.collectBatches());
+
+  // Every first attempt fails.
+  auto [dag, backend] = scheduler(
+      {}, [](const TaskDescription& task) { return task.attempt == 0; });
+  EXPECT_EQ(toStrings(dag->runJob(*df.physicalPlan(), pool_.get())), expected);
+  // Two map tasks (one per file), four reduce tasks, one result task, each
+  // run twice.
+  EXPECT_EQ(backend->totalLaunches(), 2 * (2 + 4 + 1));
+}
+
+TEST_F(SchedulerTest, failsAfterMaxAttempts) {
+  auto path = writeCorpus(1, 10);
+  auto df = wordCount(path);
+  auto [dag, backend] = scheduler({}, [](const TaskDescription& task) {
+    return task.resultTask;
+  });
+  VELOX_ASSERT_THROW(
+      dag->runJob(*df.physicalPlan(), pool_.get()),
+      "failed 4 times. Last error: injected failure");
+  const auto stages = dag->stagePlan(*df.physicalPlan());
+  EXPECT_EQ(backend->launches(stages.resultStage().stageId), 4);
+
+  // The scheduler runs the next job normally.
+  auto [healthy, healthyBackend] = scheduler();
+  EXPECT_FALSE(healthy->runJob(*df.physicalPlan(), pool_.get()).empty());
+}
+
+TEST_F(SchedulerTest, userErrorsAreNotRetried) {
+  auto df = people().selectExpr({"salary / (salary - salary) AS n"});
+  auto [dag, backend] = scheduler();
+  EXPECT_THROW(
+      dag->runJob(*df.physicalPlan(), pool_.get()), velox::VeloxUserError);
+  EXPECT_EQ(backend->totalLaunches(), 1);
+  EXPECT_THROW(df.collect(), velox::VeloxUserError);
+}
+
+TEST_F(SchedulerTest, shuffleFilesAreRemovedAfterTheJob) {
+  auto path = writeCorpus(2, 100);
+  auto [dag, backend] = scheduler();
+  dag->runJob(*wordCount(path).physicalPlan(), pool_.get());
+  for (const auto& entry : fs::recursive_directory_iterator(dir_ / "local")) {
+    EXPECT_FALSE(entry.is_regular_file()) << entry.path();
+  }
+}
+
+} // namespace
+} // namespace ember::driver

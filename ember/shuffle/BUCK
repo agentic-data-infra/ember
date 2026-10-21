@@ -1,0 +1,11 @@
+# File-based sort shuffle: ShuffleWrite/ShuffleRead operators, data and index
+# files per map task, and the block transport.
+
+cxx_library(
+    name = "shuffle",
+    srcs = glob(["*.cpp"]),
+    header_namespace = "ember/shuffle",
+    exported_headers = glob(["*.h"]),
+    exported_deps = ["//third-party:velox_axiom"],
+    visibility = ["PUBLIC"],
+)

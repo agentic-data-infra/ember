@@ -7,8 +7,9 @@
 //   Dataframe lines = ember.read().text(path);
 //
 // For now every master runs in-process: "local[N]" plans N-way parallel
-// stages, which Axiom's LocalRunner executes as Velox tasks. The driver and
-// worker processes of later steps take over execution behind the same API.
+// stages, which Ember's scheduler runs on one local executor with N task
+// slots, with a file shuffle between stages. Worker processes take over
+// execution behind the same API in a later step.
 
 #pragma once
 
@@ -20,8 +21,8 @@
 #include "ember/Dataframe.h"
 #include "ember/DataframeReader.h"
 
-namespace folly {
-class CPUThreadPoolExecutor;
+namespace ember::driver {
+class DagScheduler;
 }
 
 namespace facebook::axiom::optimizer {
@@ -63,6 +64,9 @@ class SessionState {
     return eagerAnalysis_;
   }
 
+  /// Config key: directory for shuffle files. Defaults to <tmp>/ember.
+  static constexpr const char* kLocalDirectory = "ember.local.dir";
+
   /// Connector that reads files (text, parquet).
   static const std::string& fileConnectorId();
 
@@ -73,8 +77,13 @@ class SessionState {
   facebook::axiom::optimizer::PlanAndStats optimize(
       const facebook::axiom::logical_plan::LogicalPlanNodePtr& plan);
 
-  /// Runs an optimized plan, returning all result batches.
+  /// Runs an optimized plan through Ember's scheduler, returning all result
+  /// batches.
   std::vector<facebook::velox::RowVectorPtr> execute(
+      const facebook::axiom::optimizer::MultiFragmentPlanPtr& plan);
+
+  /// The stages 'plan' runs as, with their shuffle reads and writes.
+  std::string explainStages(
       const facebook::axiom::optimizer::MultiFragmentPlanPtr& plan);
 
   void stop();
@@ -87,7 +96,7 @@ class SessionState {
   const std::map<std::string, std::string> config_;
   const int32_t parallelism_;
   const bool eagerAnalysis_;
-  std::unique_ptr<folly::CPUThreadPoolExecutor> executor_;
+  std::unique_ptr<driver::DagScheduler> scheduler_;
   std::shared_ptr<facebook::velox::memory::MemoryPool> rootPool_;
   // Holds collected results, which outlive each query's pools.
   std::shared_ptr<facebook::velox::memory::MemoryPool> resultPool_;

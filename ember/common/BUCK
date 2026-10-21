@@ -1,0 +1,14 @@
+# Setup shared by the driver and executors: functions, the file connector and
+# its text format, plan serialization. Headers are exported under "ember/".
+
+cxx_library(
+    name = "common",
+    srcs = glob(["*.cpp"]),
+    header_namespace = "ember",
+    exported_headers = glob(["*.h"]),
+    exported_deps = [
+        "//ember/shuffle:shuffle",
+        "//third-party:velox_axiom",
+    ],
+    visibility = ["PUBLIC"],
+)

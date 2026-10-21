@@ -1,0 +1,10 @@
+# Driver side: cuts plans into stages and schedules their tasks.
+
+cxx_library(
+    name = "driver",
+    srcs = glob(["*.cpp"]),
+    header_namespace = "ember/driver",
+    exported_headers = glob(["*.h"]),
+    exported_deps = ["//ember/worker:worker"],
+    visibility = ["PUBLIC"],
+)

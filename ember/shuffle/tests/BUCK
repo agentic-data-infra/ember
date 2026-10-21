@@ -1,0 +1,10 @@
+cxx_test(
+    name = "file_shuffle_test",
+    srcs = ["FileShuffleTest.cpp"],
+    deps = [
+        "//ember/shuffle:shuffle",
+        "//ember/tests:test_main",
+    ],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+)

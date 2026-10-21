@@ -1,70 +1,30 @@
 #include "ember/Session.h"
 
-#include <folly/Singleton.h>
-#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <filesystem>
+
 #include <folly/system/HardwareConcurrency.h>
 
 #include "axiom/connectors/ConnectorMetadataRegistry.h"
 #include "axiom/connectors/SchemaResolver.h"
-#include "axiom/connectors/file/FileConnector.h"
-#include "axiom/connectors/file/core/FileConnectorMetadata.h"
-#include "axiom/connectors/file/parquet/ParquetFileHandler.h"
 #include "axiom/optimizer/OptimizerSession.h"
 #include "axiom/optimizer/QueryGraphContext.h"
 #include "axiom/optimizer/v2/Optimize.h"
-#include "axiom/runner/LocalRunner.h"
 #include "ember/FunctionRegistry.h"
-#include "ember/TextFileHandler.h"
-#include "velox/common/file/FileSystems.h"
+#include "ember/Runtime.h"
+#include "ember/driver/DagScheduler.h"
+#include "ember/driver/LocalBackend.h"
 #include "velox/common/memory/HashStringAllocator.h"
-#include "velox/exec/Exchange.h"
-#include "velox/exec/tests/utils/LocalExchangeSource.h"
 #include "velox/expression/Expr.h"
 #include "velox/functions/prestosql/coercion/PrestoCoercions.h"
-#include "velox/serializers/PrestoSerializer.h"
 
 namespace ember {
 
 namespace lp = facebook::axiom::logical_plan;
 namespace optimizer = facebook::axiom::optimizer;
-namespace runner = facebook::axiom::runner;
 namespace axiom_connector = facebook::axiom::connector;
 namespace velox = facebook::velox;
 
 namespace {
-
-// Process-wide setup, shared by all sessions.
-void initializeProcess() {
-  static std::once_flag once;
-  std::call_once(once, [] {
-    // Ember programs need not call folly::Init; this is the part Velox needs.
-    folly::SingletonVault::singleton()->registrationComplete();
-    if (!velox::memory::MemoryManager::testInstance()) {
-      velox::memory::initializeMemoryManager(
-          velox::memory::MemoryManager::Options{});
-    }
-    velox::filesystems::registerLocalFileSystem();
-    registerFunctions();
-
-    // Exchanges between fragments run in-process until Ember's shuffle
-    // replaces them.
-    if (!velox::isRegisteredNamedVectorSerde("Presto")) {
-      velox::serializer::presto::PrestoVectorSerde::registerNamedVectorSerde();
-    }
-    velox::exec::ExchangeSource::registerFactory(
-        velox::exec::test::createLocalExchangeSource);
-
-    axiom_connector::file::registerParquetHandler();
-    registerTextFileHandler();
-    auto connector = std::make_shared<axiom_connector::file::FileConnector>(
-        SessionState::fileConnectorId());
-    velox::connector::registerConnector(connector);
-    axiom_connector::ConnectorMetadataRegistry::global().insert(
-        connector->connectorId(),
-        std::make_shared<axiom_connector::file::FileConnectorMetadata>(
-            connector.get()));
-  });
-}
 
 int32_t parseParallelism(const std::string& master) {
   if (master == "local") {
@@ -103,10 +63,25 @@ SessionState::SessionState(
       eagerAnalysis_{
           config_.contains("ember.eager_analysis") &&
           config_.at("ember.eager_analysis") == "true"} {
-  initializeProcess();
+  initializeRuntime();
+  std::string localDirectory;
+  if (auto it = config_.find(kLocalDirectory); it != config_.end()) {
+    localDirectory = it->second;
+  } else {
+    localDirectory = (std::filesystem::temp_directory_path() / "ember").string();
+  }
   // Drivers are cooperative, but leave headroom for blocked ones.
-  executor_ = std::make_unique<folly::CPUThreadPoolExecutor>(
-      std::max(4, 2 * parallelism_));
+  auto backend =
+      std::make_shared<driver::LocalBackend>(driver::LocalBackendOptions{
+          .numSlots = parallelism_,
+          .numThreads = std::max(4, 2 * parallelism_),
+          .localDirectory = localDirectory});
+  scheduler_ = std::make_unique<driver::DagScheduler>(
+      std::move(backend),
+      driver::DagSchedulerOptions{
+          .appName = appName_,
+          .parallelism = parallelism_,
+          .config = config_});
   rootPool_ = velox::memory::memoryManager()->addRootPool(
       fmt::format("ember_{}", appName_));
   resultPool_ = rootPool_->addLeafChild("results");
@@ -119,7 +94,7 @@ SessionState::~SessionState() {
 }
 
 const std::string& SessionState::fileConnectorId() {
-  static const std::string kId = "ember_file";
+  static const std::string kId = kFileConnectorId;
   return kId;
 }
 
@@ -206,42 +181,26 @@ optimizer::PlanAndStats optimizePlan(
 
 optimizer::PlanAndStats SessionState::optimize(
     const lp::LogicalPlanNodePtr& plan) {
-  auto env = makeQueryEnv(
-      nextQueryId(), appName_, executor_.get(), config_);
+  auto env = makeQueryEnv(nextQueryId(), appName_, nullptr, config_);
   return optimizePlan(plan, env, parallelism_, optimizerPool_);
 }
 
 std::vector<velox::RowVectorPtr> SessionState::execute(
     const optimizer::MultiFragmentPlanPtr& plan) {
-  VELOX_USER_CHECK_NOT_NULL(executor_, "Session {} is stopped", appName_);
-  // Each run is a new query; task ids come from its query id, so a compiled
-  // plan can run any number of times.
-  auto env = makeQueryEnv(
-      nextQueryId(), appName_, executor_.get(), config_);
+  VELOX_USER_CHECK_NOT_NULL(scheduler_, "Session {} is stopped", appName_);
+  return scheduler_->runJob(*plan, resultPool_.get());
+}
 
-  auto localRunner = std::make_shared<runner::LocalRunner>(
-      std::make_shared<runner::RunnerSession>(
-          env.connectorContext, env.statsWriter, runner::Properties{}),
-      plan,
-      /*finishWrite=*/optimizer::FinishWrite{},
-      env.queryCtx,
-      std::make_shared<runner::ConnectorSplitSourceFactory>(),
-      env.queryCtx->pool()->addLeafChild("runner"),
-      /*baseSpillDirectory=*/"");
-
-  std::vector<velox::RowVectorPtr> results;
-  localRunner->drain([&](velox::RowVectorPtr batch) {
-    // Copy out of the runner's pools, which go away with the runner.
-    results.push_back(std::dynamic_pointer_cast<velox::RowVector>(
-        velox::BaseVector::copy(*batch, resultPool_.get())));
-  });
-  return results;
+std::string SessionState::explainStages(
+    const optimizer::MultiFragmentPlanPtr& plan) {
+  VELOX_USER_CHECK_NOT_NULL(scheduler_, "Session {} is stopped", appName_);
+  return scheduler_->stagePlan(*plan).toString();
 }
 
 void SessionState::stop() {
-  if (executor_ != nullptr) {
-    executor_->join();
-    executor_.reset();
+  if (scheduler_ != nullptr) {
+    scheduler_->backend().stop();
+    scheduler_.reset();
   }
 }
 

@@ -3,6 +3,7 @@
 #include <mutex>
 
 #include "axiom/connectors/file/core/FileDataSources.h"
+#include "ember/FileSerde.h"
 #include "velox/common/file/FileSystems.h"
 #include "velox/vector/FlatVector.h"
 
@@ -33,8 +34,24 @@ class TextDataSource : public file::StreamingDataSource {
                 ->openFileForRead(filePath);
     fileSize_ = file_->size();
     offset_ = 0;
+    end_ = fileSize_;
     buffer_.clear();
     bufferPos_ = 0;
+
+    // A range owns the lines that start in it: skip the line that starts
+    // before it, and finish the last line past its end.
+    if (auto range = std::dynamic_pointer_cast<FileRangeSplit>(split_)) {
+      if (range->length >= 0) {
+        end_ = std::min<uint64_t>(fileSize_, range->start + range->length);
+      }
+      if (range->start > 0) {
+        offset_ = std::min<uint64_t>(fileSize_, range->start - 1);
+        const auto end = end_;
+        end_ = fileSize_;
+        nextLine();
+        end_ = end;
+      }
+    }
   }
 
   std::optional<velox::RowVectorPtr> readBatch(uint64_t size) override {
@@ -73,9 +90,13 @@ class TextDataSource : public file::StreamingDataSource {
   }
 
  private:
-  // Returns the next line without its terminator, or nullopt at end of file.
+  // Returns the next line without its terminator, or nullopt at the end of
+  // the range.
   // The view is valid until the next call.
   std::optional<std::string_view> nextLine() {
+    if (offset_ - buffer_.size() + bufferPos_ >= end_) {
+      return std::nullopt;
+    }
     while (true) {
       auto newline = buffer_.find('\n', bufferPos_);
       if (newline != std::string::npos) {
@@ -107,6 +128,8 @@ class TextDataSource : public file::StreamingDataSource {
   std::unique_ptr<velox::ReadFile> file_;
   uint64_t fileSize_{0};
   uint64_t offset_{0};
+  // Lines that start at or after 'end_' belong to the next range.
+  uint64_t end_{0};
   std::string buffer_;
   size_t bufferPos_{0};
 };
