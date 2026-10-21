@@ -1,0 +1,29 @@
+# Velox and Axiom, built with CMake (see scripts/build_deps.sh) and wrapped as
+# prebuilt libraries. Flags come from third-party/generated/deps.bzl, which
+# scripts/gen_third_party.py derives from the CMake build.
+
+load(
+    "//third-party/generated:deps.bzl",
+    "LINKER_FLAGS",
+    "PREPROCESSOR_FLAGS",
+    "TEST_LINKER_FLAGS",
+)
+
+# Velox, Axiom and their system dependencies (folly, glog, boost, ...).
+prebuilt_cxx_library(
+    name = "velox_axiom",
+    header_only = True,
+    exported_preprocessor_flags = PREPROCESSOR_FLAGS,
+    exported_linker_flags = LINKER_FLAGS,
+    visibility = ["PUBLIC"],
+)
+
+# googletest/gmock plus the Velox and Axiom test utilities (e.g. the Velox
+# exec PlanBuilder and AssertQueryBuilder).
+prebuilt_cxx_library(
+    name = "testing",
+    header_only = True,
+    exported_linker_flags = TEST_LINKER_FLAGS,
+    exported_deps = [":velox_axiom"],
+    visibility = ["PUBLIC"],
+)

@@ -1,0 +1,21 @@
+# Smoke tests for the Velox and Axiom build integration.
+
+cxx_library(
+    name = "test_main",
+    srcs = ["Main.cpp"],
+    exported_deps = ["//third-party:testing"],
+    link_whole = True,
+    visibility = ["PUBLIC"],
+)
+
+cxx_test(
+    name = "velox_smoke_test",
+    srcs = ["VeloxSmokeTest.cpp"],
+    deps = [":test_main"],
+)
+
+cxx_test(
+    name = "axiom_smoke_test",
+    srcs = ["AxiomSmokeTest.cpp"],
+    deps = [":test_main"],
+)
