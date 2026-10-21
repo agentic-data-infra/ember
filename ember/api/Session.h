@@ -6,10 +6,16 @@
 //                    .getOrCreate();
 //   Dataframe lines = ember.read().text(path);
 //
-// For now every master runs in-process: "local[N]" plans N-way parallel
-// stages, which Ember's scheduler runs on one local executor with N task
-// slots, with a file shuffle between stages. Worker processes take over
-// execution behind the same API in a later step.
+// Masters:
+//   local, local[N], local[*]  run in this process: N-way parallel stages on
+//                              one local executor with N task slots.
+//   ember://host:port          this program is the driver. It serves at
+//                              'port'; ember-worker processes, started
+//                              separately (on any host) with
+//                              --driver=host:port, register there and run the
+//                              tasks. The session waits for
+//                              "ember.cluster.workers" workers (default 1).
+// Either way stages exchange data through the file shuffle.
 
 #pragma once
 
@@ -49,7 +55,8 @@ class SessionState {
   }
 
   /// Parallelism from the master URL: local = 1, local[N] = N,
-  /// local[*] = number of cores.
+  /// local[*] = number of cores; for a cluster, the workers' slots at start,
+  /// unless "ember.default.parallelism" sets it.
   int32_t parallelism() const {
     return parallelism_;
   }
@@ -66,6 +73,15 @@ class SessionState {
 
   /// Config key: directory for shuffle files. Defaults to <tmp>/ember.
   static constexpr const char* kLocalDirectory = "ember.local.dir";
+  /// Config key: tasks per stage, overriding what the master implies.
+  static constexpr const char* kDefaultParallelism = "ember.default.parallelism";
+  /// Config key: workers to wait for before running anything.
+  static constexpr const char* kClusterWorkers = "ember.cluster.workers";
+  /// Config key: how long to wait for them, in ms (default 60000).
+  static constexpr const char* kRegistrationTimeoutMs =
+      "ember.cluster.registration_timeout_ms";
+  /// Config key: interface the driver serves on (default all).
+  static constexpr const char* kDriverBindHost = "ember.driver.bind_host";
 
   /// Connector that reads files (text, parquet).
   static const std::string& fileConnectorId();
@@ -94,7 +110,7 @@ class SessionState {
   const std::string appName_;
   const std::string master_;
   const std::map<std::string, std::string> config_;
-  const int32_t parallelism_;
+  int32_t parallelism_;
   const bool eagerAnalysis_;
   std::unique_ptr<driver::DagScheduler> scheduler_;
   std::shared_ptr<facebook::velox::memory::MemoryPool> rootPool_;

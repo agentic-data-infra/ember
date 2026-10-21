@@ -1,10 +1,14 @@
-# Executor side: runs serialized tasks as Velox tasks.
+# Executor side: runs serialized tasks as Velox tasks, and the worker process
+# that serves them and shuffle blocks over RPC.
 
 cxx_library(
     name = "worker",
     srcs = glob(["*.cpp"]),
     header_namespace = "ember/worker",
     exported_headers = glob(["*.h"]),
-    exported_deps = ["//ember/common:common"],
+    exported_deps = [
+        "//ember/common:common",
+        "//ember/rpc:rpc",
+    ],
     visibility = ["PUBLIC"],
 )

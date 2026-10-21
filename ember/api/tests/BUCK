@@ -15,6 +15,7 @@ cxx_test(
     deps = [
         "//ember/api:api",
         "//ember/tests:test_main",
+        "//ember/tests:wordcount_util",
     ],
     # Archives must precede the prebuilt Velox/Axiom libraries they use.
     link_ordering = "topological",

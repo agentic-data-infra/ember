@@ -1,0 +1,10 @@
+# Ember's processes.
+
+cxx_binary(
+    name = "ember_worker",
+    srcs = ["EmberWorker.cpp"],
+    deps = ["//ember/worker:worker"],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+    visibility = ["PUBLIC"],
+)

@@ -72,6 +72,8 @@ class ShuffleBlockStore : public std::enable_shared_from_this<ShuffleBlockStore>
   static void registerStore(std::shared_ptr<ShuffleBlockStore> store);
   static void unregisterStore(const std::string& location);
   static std::shared_ptr<ShuffleBlockStore> lookup(const std::string& location);
+  /// lookup(), or null if no store is registered at 'location'.
+  static std::shared_ptr<ShuffleBlockStore> find(const std::string& location);
 
   /// Used by writers: renames the temporary files into place unless an
   /// earlier attempt committed. Returns false if one did.
