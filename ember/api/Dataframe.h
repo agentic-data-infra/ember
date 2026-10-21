@@ -1,17 +1,17 @@
 // Dataframe: an immutable, lazily evaluated relation.
 //
 // A Dataframe is a cheap value: a session plus a shared, immutable chain of
-// plan steps. Each transformation returns a new Dataframe and runs nothing;
-// the Axiom logical plan is built from the chain (and validated, so errors
-// surface where the transformation is written).
-// Actions (collect, count, show) hand the plan to the session, which optimizes
-// it into a multi-fragment Velox plan and runs it.
+// plan steps. Each transformation appends one step, in constant time, and
+// builds and runs nothing. compile() builds the Axiom logical plan from the
+// chain and optimizes it into a multi-fragment Velox plan, once; actions
+// (collect, count, show) compile and then run the plan.
 
 #pragma once
 
 #include <functional>
 #include <iosfwd>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -68,15 +68,46 @@ class Row {
   std::vector<facebook::velox::Variant> values_;
 };
 
+/// The plans of a Dataframe, built by Dataframe::compile().
+struct CompiledPlan {
+  /// Axiom logical plan, with output columns named as in 'schema'.
+  facebook::axiom::logical_plan::LogicalPlanNodePtr logicalPlan;
+  facebook::velox::RowTypePtr schema;
+  /// Optimized plan: Velox plan fragments, one per stage.
+  facebook::axiom::optimizer::MultiFragmentPlanPtr physicalPlan;
+};
+
 /// One immutable step of a Dataframe's plan: applies an operation to the
-/// builder that replays the steps before it.
-struct PlanStep {
+/// builder that replays the steps before it. Caches the plans built from the
+/// chain ending here, shared by every copy of the Dataframe.
+class PlanStep {
+ public:
   using Apply = std::function<void(
       facebook::axiom::logical_plan::PlanBuilder& builder,
       const facebook::axiom::logical_plan::PlanBuilder::Context& context)>;
 
-  std::shared_ptr<const PlanStep> parent;
-  Apply apply;
+  PlanStep(std::shared_ptr<const PlanStep> parent, Apply apply)
+      : parent_{std::move(parent)}, apply_{std::move(apply)} {}
+
+  const std::shared_ptr<const PlanStep>& parent() const {
+    return parent_;
+  }
+
+  const Apply& apply() const {
+    return apply_;
+  }
+
+ private:
+  friend class Dataframe;
+
+  const std::shared_ptr<const PlanStep> parent_;
+  const Apply apply_;
+
+  mutable std::mutex mutex_;
+  // Logical plan and schema only.
+  mutable std::shared_ptr<const CompiledPlan> analyzed_;
+  // All plans.
+  mutable std::shared_ptr<const CompiledPlan> compiled_;
 };
 
 class Dataframe {
@@ -85,77 +116,77 @@ class Dataframe {
       std::shared_ptr<SessionState> session,
       std::shared_ptr<const PlanStep> step);
 
-  // Transformations.
+  // Transformations. Each returns a new Dataframe; the receiver is unchanged.
 
-  Dataframe select(const std::vector<Column>& columns) const;
+  [[nodiscard]] Dataframe select(const std::vector<Column>& columns) const;
 
   template <typename... T>
-  Dataframe select(const Column& first, const T&... rest) const {
+  [[nodiscard]] Dataframe select(const Column& first, const T&... rest) const {
     return select(std::vector<Column>{first, Column(rest)...});
   }
 
   /// SQL expression strings, e.g. selectExpr({"lower(value) AS v"}).
-  Dataframe selectExpr(const std::vector<std::string>& exprs) const;
+  [[nodiscard]] Dataframe selectExpr(const std::vector<std::string>& exprs) const;
 
   /// Alias of select, for Koski familiarity.
-  Dataframe map(const std::vector<Column>& columns) const {
+  [[nodiscard]] Dataframe map(const std::vector<Column>& columns) const {
     return select(columns);
   }
 
-  Dataframe filter(const Column& condition) const;
+  [[nodiscard]] Dataframe filter(const Column& condition) const;
   /// A SQL condition, e.g. filter("salary > 50").
-  Dataframe filter(const std::string& condition) const;
-  Dataframe filter(const char* condition) const {
+  [[nodiscard]] Dataframe filter(const std::string& condition) const;
+  [[nodiscard]] Dataframe filter(const char* condition) const {
     return filter(std::string(condition));
   }
-  Dataframe where(const Column& condition) const {
+  [[nodiscard]] Dataframe where(const Column& condition) const {
     return filter(condition);
   }
-  Dataframe where(const std::string& condition) const {
+  [[nodiscard]] Dataframe where(const std::string& condition) const {
     return filter(condition);
   }
-  Dataframe where(const char* condition) const {
+  [[nodiscard]] Dataframe where(const char* condition) const {
     return filter(std::string(condition));
   }
 
   /// Adds column 'name', or replaces it if it exists.
-  Dataframe withColumn(const std::string& name, const Column& column) const;
-  Dataframe withColumnRenamed(
+  [[nodiscard]] Dataframe withColumn(const std::string& name, const Column& column) const;
+  [[nodiscard]] Dataframe withColumnRenamed(
       const std::string& existing,
       const std::string& name) const;
-  Dataframe drop(const std::vector<std::string>& names) const;
+  [[nodiscard]] Dataframe drop(const std::vector<std::string>& names) const;
 
-  GroupedData groupBy(const std::vector<Column>& columns) const;
+  [[nodiscard]] GroupedData groupBy(const std::vector<Column>& columns) const;
 
   template <typename... T>
-  GroupedData groupBy(const Column& first, const T&... rest) const;
+  [[nodiscard]] GroupedData groupBy(const Column& first, const T&... rest) const;
 
   /// Aggregates over the whole Dataframe: groupBy().agg(...).
-  Dataframe agg(const std::vector<Column>& aggregates) const;
+  [[nodiscard]] Dataframe agg(const std::vector<Column>& aggregates) const;
 
-  Dataframe orderBy(const std::vector<Column>& columns) const;
+  [[nodiscard]] Dataframe orderBy(const std::vector<Column>& columns) const;
 
   template <typename... T>
-  Dataframe orderBy(const Column& first, const T&... rest) const {
+  [[nodiscard]] Dataframe orderBy(const Column& first, const T&... rest) const {
     return orderBy(std::vector<Column>{first, Column(rest)...});
   }
 
-  Dataframe sort(const std::vector<Column>& columns) const {
+  [[nodiscard]] Dataframe sort(const std::vector<Column>& columns) const {
     return orderBy(columns);
   }
 
-  Dataframe limit(int64_t n) const;
-  Dataframe distinct() const;
+  [[nodiscard]] Dataframe limit(int64_t n) const;
+  [[nodiscard]] Dataframe distinct() const;
 
   /// Union by position, keeping duplicates.
-  Dataframe unionAll(const Dataframe& other) const;
-  Dataframe union_(const Dataframe& other) const {
+  [[nodiscard]] Dataframe unionAll(const Dataframe& other) const;
+  [[nodiscard]] Dataframe union_(const Dataframe& other) const {
     return unionAll(other);
   }
 
   /// Equi-join on columns with the same names on both sides. 'how' is one of
   /// inner, left, right, full (or outer).
-  Dataframe join(
+  [[nodiscard]] Dataframe join(
       const Dataframe& right,
       const std::vector<std::string>& usingColumns,
       const std::string& how = "inner") const;
@@ -175,17 +206,27 @@ class Dataframe {
   void show(int32_t numRows = 20, bool truncate = true) const;
   std::string showString(int32_t numRows = 20, bool truncate = true) const;
 
-  // Schema and plans.
+  // Compilation, schema and plans.
 
+  /// Builds the logical plan and optimizes it into a Velox plan. Actions call
+  /// it before running; the result is cached, so later calls (and later
+  /// actions on this Dataframe or its copies) do not build it again.
+  /// Errors in the transformations surface here, unless the session sets
+  /// "ember.eager_analysis" to "true", which checks each transformation.
+  std::shared_ptr<const CompiledPlan> compile() const;
+
+  /// Builds only the logical plan and schema (cached like compile()).
   facebook::velox::RowTypePtr schema() const;
   std::vector<std::string> columns() const;
   void printSchema() const;
 
-  /// The Axiom logical plan, with output columns named as in schema().
+  /// compile()->logicalPlan, building only the logical plan.
   facebook::axiom::logical_plan::LogicalPlanNodePtr logicalPlan() const;
 
-  /// The optimized plan: Velox plan fragments, one per stage.
-  facebook::axiom::optimizer::MultiFragmentPlanPtr physicalPlan() const;
+  /// compile()->physicalPlan.
+  facebook::axiom::optimizer::MultiFragmentPlanPtr physicalPlan() const {
+    return compile()->physicalPlan;
+  }
 
   /// Logical plan and the optimized multi-fragment Velox plan.
   std::string explainString() const;
@@ -204,10 +245,11 @@ class Dataframe {
   facebook::axiom::logical_plan::PlanBuilder builder(
       const facebook::axiom::logical_plan::PlanBuilder::Context& context) const;
 
+  // Builds (once) the logical plan and schema.
+  std::shared_ptr<const CompiledPlan> analyze() const;
+
   std::shared_ptr<SessionState> session_;
   std::shared_ptr<const PlanStep> step_;
-  // Output type of the built plan, computed (and validated) on construction.
-  facebook::velox::RowTypePtr schema_;
 };
 
 /// Result of groupBy: aggregations over groups.
@@ -216,19 +258,19 @@ class GroupedData {
   GroupedData(Dataframe df, std::vector<Column> keys)
       : df_{std::move(df)}, keys_{std::move(keys)} {}
 
-  Dataframe agg(const std::vector<Column>& aggregates) const;
+  [[nodiscard]] Dataframe agg(const std::vector<Column>& aggregates) const;
 
   template <typename... T>
-  Dataframe agg(const Column& first, const T&... rest) const {
+  [[nodiscard]] Dataframe agg(const Column& first, const T&... rest) const {
     return agg(std::vector<Column>{first, Column(rest)...});
   }
 
   /// Adds a "count" column with the number of rows in each group.
-  Dataframe count() const;
-  Dataframe sum(const std::vector<std::string>& columns) const;
-  Dataframe avg(const std::vector<std::string>& columns) const;
-  Dataframe min(const std::vector<std::string>& columns) const;
-  Dataframe max(const std::vector<std::string>& columns) const;
+  [[nodiscard]] Dataframe count() const;
+  [[nodiscard]] Dataframe sum(const std::vector<std::string>& columns) const;
+  [[nodiscard]] Dataframe avg(const std::vector<std::string>& columns) const;
+  [[nodiscard]] Dataframe min(const std::vector<std::string>& columns) const;
+  [[nodiscard]] Dataframe max(const std::vector<std::string>& columns) const;
 
  private:
   Dataframe aggEach(

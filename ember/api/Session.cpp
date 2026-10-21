@@ -99,7 +99,10 @@ SessionState::SessionState(
     : appName_{std::move(appName)},
       master_{std::move(master)},
       config_{std::move(config)},
-      parallelism_{parseParallelism(master_)} {
+      parallelism_{parseParallelism(master_)},
+      eagerAnalysis_{
+          config_.contains("ember.eager_analysis") &&
+          config_.at("ember.eager_analysis") == "true"} {
   initializeProcess();
   // Drivers are cooperative, but leave headroom for blocked ones.
   executor_ = std::make_unique<folly::CPUThreadPoolExecutor>(
@@ -209,17 +212,18 @@ optimizer::PlanAndStats SessionState::optimize(
 }
 
 std::vector<velox::RowVectorPtr> SessionState::execute(
-    const lp::LogicalPlanNodePtr& plan) {
+    const optimizer::MultiFragmentPlanPtr& plan) {
   VELOX_USER_CHECK_NOT_NULL(executor_, "Session {} is stopped", appName_);
+  // Each run is a new query; task ids come from its query id, so a compiled
+  // plan can run any number of times.
   auto env = makeQueryEnv(
       nextQueryId(), appName_, executor_.get(), config_);
-  auto planAndStats = optimizePlan(plan, env, parallelism_, optimizerPool_);
 
   auto localRunner = std::make_shared<runner::LocalRunner>(
       std::make_shared<runner::RunnerSession>(
           env.connectorContext, env.statsWriter, runner::Properties{}),
-      planAndStats.plan,
-      std::move(planAndStats.finishWrite),
+      plan,
+      /*finishWrite=*/optimizer::FinishWrite{},
       env.queryCtx,
       std::make_shared<runner::ConnectorSplitSourceFactory>(),
       env.queryCtx->pool()->addLeafChild("runner"),
@@ -292,22 +296,22 @@ Dataframe Session::createDataframe(
   }
   return Dataframe(
       state_,
-      std::make_shared<const PlanStep>(PlanStep{
+      std::make_shared<const PlanStep>(
           nullptr,
           [type, values = std::move(values)](
               lp::PlanBuilder& builder, const auto& /*context*/) {
             builder.values(type, values);
-          }}));
+          }));
 }
 
 Dataframe Session::createDataframe(
     const std::vector<velox::RowVectorPtr>& data) const {
   return Dataframe(
       state_,
-      std::make_shared<const PlanStep>(PlanStep{
+      std::make_shared<const PlanStep>(
           nullptr, [data](lp::PlanBuilder& builder, const auto& /*context*/) {
             builder.values(data);
-          }}));
+          }));
 }
 
 void Session::stop() {

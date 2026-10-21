@@ -110,31 +110,54 @@ Dataframe::Dataframe(
     : session_{std::move(session)}, step_{std::move(step)} {
   VELOX_CHECK_NOT_NULL(session_);
   VELOX_CHECK_NOT_NULL(step_);
-  schema_ = logicalPlan()->outputType();
+  if (session_->eagerAnalysis()) {
+    analyze();
+  }
 }
 
 lp::PlanBuilder Dataframe::builder(
     const lp::PlanBuilder::Context& context) const {
   std::vector<const PlanStep*> steps;
   for (const auto* step = step_.get(); step != nullptr;
-       step = step->parent.get()) {
+       step = step->parent().get()) {
     steps.push_back(step);
   }
   lp::PlanBuilder builder(context);
   for (auto it = steps.rbegin(); it != steps.rend(); ++it) {
-    (*it)->apply(builder, context);
+    (*it)->apply()(builder, context);
   }
   return builder;
 }
 
+std::shared_ptr<const CompiledPlan> Dataframe::analyze() const {
+  std::lock_guard<std::mutex> l(step_->mutex_);
+  if (step_->analyzed_ == nullptr) {
+    auto plan = builder(session_->planContext()).build();
+    step_->analyzed_ = std::make_shared<const CompiledPlan>(
+        CompiledPlan{plan, plan->outputType(), nullptr});
+  }
+  return step_->analyzed_;
+}
+
+std::shared_ptr<const CompiledPlan> Dataframe::compile() const {
+  auto analyzed = analyze();
+  std::lock_guard<std::mutex> l(step_->mutex_);
+  if (step_->compiled_ == nullptr) {
+    step_->compiled_ = std::make_shared<const CompiledPlan>(CompiledPlan{
+        analyzed->logicalPlan,
+        analyzed->schema,
+        session_->optimize(analyzed->logicalPlan).plan});
+  }
+  return step_->compiled_;
+}
+
 lp::LogicalPlanNodePtr Dataframe::logicalPlan() const {
-  return builder(session_->planContext()).build();
+  return analyze()->logicalPlan;
 }
 
 Dataframe Dataframe::then(PlanStep::Apply apply) const {
   return Dataframe(
-      session_,
-      std::make_shared<const PlanStep>(PlanStep{step_, std::move(apply)}));
+      session_, std::make_shared<const PlanStep>(step_, std::move(apply)));
 }
 
 Dataframe Dataframe::select(const std::vector<Column>& columns) const {
@@ -189,19 +212,22 @@ Dataframe Dataframe::filter(const std::string& condition) const {
   return filter(functions::expr(condition));
 }
 
+// withColumn, withColumnRenamed and drop depend on the input's columns, which
+// are only known once the plan is built, so they map columns at build time.
+
 Dataframe Dataframe::withColumn(const std::string& name, const Column& column)
     const {
-  if (!schema_->containsChild(name)) {
-    return then([expr = column.expr().as(name)](auto& builder, const auto&) {
-      builder.with({expr});
-    });
-  }
-  std::vector<lp::ExprApi> projections;
-  for (const auto& existing : schema_->names()) {
-    projections.push_back(
-        existing == name ? column.expr().as(name) : lp::Col(existing));
-  }
-  return then([projections](auto& builder, const auto&) {
+  return then([name, expr = column.expr()](auto& builder, const auto&) {
+    if (!builder.hasColumn(name)) {
+      builder.with({expr.as(name)});
+      return;
+    }
+    std::vector<lp::ExprApi> projections;
+    for (const auto& input : builder.findOrAssignOutputNames()) {
+      projections.push_back(
+          input.outputName() == name ? expr.as(name)
+                                     : input.toCol().as(input.outputName()));
+    }
     builder.project(projections);
   });
 }
@@ -209,24 +235,25 @@ Dataframe Dataframe::withColumn(const std::string& name, const Column& column)
 Dataframe Dataframe::withColumnRenamed(
     const std::string& existing,
     const std::string& name) const {
-  std::vector<lp::ExprApi> projections;
-  for (const auto& column : schema_->names()) {
-    projections.push_back(
-        column == existing ? lp::Col(column).as(name) : lp::Col(column));
-  }
-  return then([projections](auto& builder, const auto&) {
+  return then([existing, name](auto& builder, const auto&) {
+    std::vector<lp::ExprApi> projections;
+    for (const auto& input : builder.findOrAssignOutputNames()) {
+      projections.push_back(input.toCol().as(
+          input.outputName() == existing ? name : input.outputName()));
+    }
     builder.project(projections);
   });
 }
 
 Dataframe Dataframe::drop(const std::vector<std::string>& names) const {
-  std::vector<lp::ExprApi> projections;
-  for (const auto& column : schema_->names()) {
-    if (std::find(names.begin(), names.end(), column) == names.end()) {
-      projections.push_back(lp::Col(column));
+  return then([names](auto& builder, const auto&) {
+    std::vector<lp::ExprApi> projections;
+    for (const auto& input : builder.findOrAssignOutputNames()) {
+      if (std::find(names.begin(), names.end(), input.outputName()) ==
+          names.end()) {
+        projections.push_back(input.toCol().as(input.outputName()));
+      }
     }
-  }
-  return then([projections](auto& builder, const auto&) {
     builder.project(projections);
   });
 }
@@ -278,12 +305,13 @@ Dataframe Dataframe::join(
 }
 
 std::vector<velox::RowVectorPtr> Dataframe::collectBatches() const {
-  auto batches = session_->execute(logicalPlan());
+  auto compiled = compile();
+  auto batches = session_->execute(compiled->physicalPlan);
   // Name result columns as in schema().
   for (auto& batch : batches) {
     batch = std::make_shared<velox::RowVector>(
         batch->pool(),
-        schema_,
+        compiled->schema,
         batch->nulls(),
         batch->size(),
         batch->children());
@@ -314,10 +342,11 @@ int64_t Dataframe::count() const {
 
 std::string Dataframe::showString(int32_t numRows, bool truncate) const {
   constexpr size_t kTruncateWidth = 20;
-  const auto numColumns = schema_->size();
+  const auto schema = this->schema();
+  const auto numColumns = schema->size();
 
   std::vector<std::vector<std::string>> cells;
-  cells.push_back(schema_->names());
+  cells.push_back(schema->names());
   bool hasMore = false;
   for (const auto& batch : limit(numRows + 1).collectBatches()) {
     for (velox::vector_size_t i = 0; i < batch->size(); ++i) {
@@ -376,31 +405,28 @@ void Dataframe::show(int32_t numRows, bool truncate) const {
 }
 
 velox::RowTypePtr Dataframe::schema() const {
-  return schema_;
+  return analyze()->schema;
 }
 
 std::vector<std::string> Dataframe::columns() const {
-  return schema_->names();
+  return schema()->names();
 }
 
 void Dataframe::printSchema() const {
+  const auto schema = this->schema();
   std::cout << "root\n";
-  for (size_t i = 0; i < schema_->size(); ++i) {
-    std::cout << " |-- " << schema_->nameOf(i) << ": "
-              << schemaTypeName(*schema_->childAt(i)) << " (nullable = true)\n";
+  for (size_t i = 0; i < schema->size(); ++i) {
+    std::cout << " |-- " << schema->nameOf(i) << ": "
+              << schemaTypeName(*schema->childAt(i)) << " (nullable = true)\n";
   }
   std::cout << std::endl;
 }
 
-facebook::axiom::optimizer::MultiFragmentPlanPtr Dataframe::physicalPlan()
-    const {
-  return session_->optimize(logicalPlan()).plan;
-}
-
 std::string Dataframe::explainString() const {
-  auto plan = logicalPlan();
-  return "== Logical Plan ==\n" + lp::PlanPrinter::toText(*plan) +
-      "\n== Physical Plan ==\n" + session_->optimize(plan).plan->toString(false);
+  auto compiled = compile();
+  return "== Logical Plan ==\n" +
+      lp::PlanPrinter::toText(*compiled->logicalPlan) +
+      "\n== Physical Plan ==\n" + compiled->physicalPlan->toString(false);
 }
 
 void Dataframe::explain() const {

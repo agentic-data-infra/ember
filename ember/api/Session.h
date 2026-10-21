@@ -57,6 +57,12 @@ class SessionState {
     return config_;
   }
 
+  /// Config "ember.eager_analysis" = "true": every transformation builds its
+  /// plan right away, so errors surface where they are written.
+  bool eagerAnalysis() const {
+    return eagerAnalysis_;
+  }
+
   /// Connector that reads files (text, parquet).
   static const std::string& fileConnectorId();
 
@@ -67,9 +73,9 @@ class SessionState {
   facebook::axiom::optimizer::PlanAndStats optimize(
       const facebook::axiom::logical_plan::LogicalPlanNodePtr& plan);
 
-  /// Optimizes and runs 'plan', returning all result batches.
+  /// Runs an optimized plan, returning all result batches.
   std::vector<facebook::velox::RowVectorPtr> execute(
-      const facebook::axiom::logical_plan::LogicalPlanNodePtr& plan);
+      const facebook::axiom::optimizer::MultiFragmentPlanPtr& plan);
 
   void stop();
 
@@ -80,6 +86,7 @@ class SessionState {
   const std::string master_;
   const std::map<std::string, std::string> config_;
   const int32_t parallelism_;
+  const bool eagerAnalysis_;
   std::unique_ptr<folly::CPUThreadPoolExecutor> executor_;
   std::shared_ptr<facebook::velox::memory::MemoryPool> rootPool_;
   // Holds collected results, which outlive each query's pools.

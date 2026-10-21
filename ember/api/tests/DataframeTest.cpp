@@ -103,6 +103,9 @@ TEST_F(DataframeTest, withColumnReplacesExisting) {
 TEST_F(DataframeTest, renameAndDrop) {
   auto df = people().withColumnRenamed("dept", "team").drop({"salary"});
   EXPECT_EQ(df.columns(), (std::vector<std::string>{"name", "team"}));
+  auto rows = df.filter(col("team") == "hr").collect();
+  ASSERT_EQ(rows.size(), 1);
+  EXPECT_EQ(rows[0], Row({Variant("erin"), Variant("hr")}));
 }
 
 TEST_F(DataframeTest, groupByAggregates) {
@@ -247,11 +250,54 @@ TEST_F(DataframeTest, dataFramesAreImmutableValues) {
   EXPECT_EQ(copy.count(), 2);
 }
 
-TEST_F(DataframeTest, analysisErrorsAtTransformation) {
-  EXPECT_THROW(people().select("nope"), facebook::velox::VeloxUserError);
-  EXPECT_THROW(
-      people().select(call("no_such_function", col("name"))),
-      facebook::velox::VeloxUserError);
+TEST_F(DataframeTest, errorsSurfaceAtCompile) {
+  // Transformations only record steps; the plan is built by compile().
+  auto missingColumn = people().select("nope");
+  EXPECT_THROW(missingColumn.compile(), facebook::velox::VeloxUserError);
+  EXPECT_THROW(missingColumn.collect(), facebook::velox::VeloxUserError);
+
+  auto missingFunction = people().select(call("no_such_function", col("name")));
+  EXPECT_THROW(missingFunction.schema(), facebook::velox::VeloxUserError);
+}
+
+TEST_F(DataframeTest, eagerAnalysisReportsErrorsAtTransformation) {
+  auto state = std::make_shared<SessionState>(
+      "eager", "local[2]",
+      std::map<std::string, std::string>{{"ember.eager_analysis", "true"}});
+  auto df = DataframeReader(state).text("/dev/null");
+  EXPECT_EQ(df.columns(), (std::vector<std::string>{"value"}));
+  EXPECT_THROW(df.select("nope"), facebook::velox::VeloxUserError);
+}
+
+TEST_F(DataframeTest, compileIsCachedAndShared) {
+  auto df = people().filter(col("salary") > 60).select("name");
+  auto compiled = df.compile();
+  ASSERT_NE(compiled->physicalPlan, nullptr);
+  EXPECT_EQ(df.compile(), compiled);
+
+  // Copies share the cache; actions run the cached plan, repeatedly.
+  auto copy = df;
+  EXPECT_EQ(copy.compile(), compiled);
+  EXPECT_EQ(df.collect().size(), 3);
+  EXPECT_EQ(copy.collect().size(), 3);
+  EXPECT_EQ(df.compile(), compiled);
+  EXPECT_EQ(df.physicalPlan(), compiled->physicalPlan);
+
+  // A derived Dataframe compiles its own plan.
+  auto derived = df.limit(1);
+  EXPECT_NE(derived.compile(), compiled);
+  EXPECT_EQ(derived.collect().size(), 1);
+}
+
+TEST_F(DataframeTest, longChainsBuildOnce) {
+  auto df = people().select("salary");
+  for (int i = 0; i < 200; ++i) {
+    df = df.withColumn("salary", col("salary") + 1);
+  }
+  auto rows = df.orderBy("salary").collect();
+  ASSERT_EQ(rows.size(), 5);
+  EXPECT_EQ(rows[0].getLong(0), 250);
+  EXPECT_EQ(df.columns(), (std::vector<std::string>{"salary"}));
 }
 
 TEST_F(DataframeTest, columnLiteral) {

@@ -32,13 +32,13 @@ Dataframe scan(
     const std::string& path) {
   return Dataframe(
       session,
-      std::make_shared<const PlanStep>(PlanStep{
+      std::make_shared<const PlanStep>(
           nullptr,
           [format, table = tablePath(path)](
               lp::PlanBuilder& builder, const auto& /*context*/) {
             builder.tableScan(
                 SessionState::fileConnectorId(), format, table);
-          }}));
+          }));
 }
 
 } // namespace
