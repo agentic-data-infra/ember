@@ -1,6 +1,6 @@
-// Spark-style column functions (org.apache.spark.sql.functions). Each one is
-// a thin builder over a Velox function call; Ember registers Velox's Spark SQL
-// function package, so semantics follow Spark (e.g. split takes a regex).
+// Column functions. Each one is a thin builder over a Velox function call;
+// Ember registers Velox's sparksql function package for these semantics
+// (e.g. split takes a regex).
 // call() reaches any registered Velox function, including UDFs.
 
 #pragma once
@@ -17,10 +17,10 @@ using ember::lit;
 Column col(const std::string& name);
 Column column(const std::string& name);
 
-/// A SQL expression string, as Spark's expr(): e.g. expr("lower(value) AS v").
+/// A SQL expression string, e.g. expr("lower(value) AS v").
 Column expr(const std::string& sql);
 
-/// Calls the registered function 'name', e.g. a UDF (Spark's call_function).
+/// Calls the registered function 'name', e.g. a UDF.
 Column call(const std::string& name, const std::vector<Column>& args);
 
 template <typename... T>
@@ -59,7 +59,7 @@ Column coalesce(const std::vector<Column>& columns);
 
 // Aggregates.
 Column count(const Column& value);
-/// count(*); Spark spells it count("*") or count(lit(1)).
+/// count(*); count(col("*")) means the same.
 Column countAll();
 Column countDistinct(const Column& value);
 Column sum(const Column& value);

@@ -1,6 +1,6 @@
-// DataFrameReader: spark.read().text(path) and friends. A path is a file or a
+// DataFrameReader: ember.read().text(path) and friends. A path is a file or a
 // directory; a directory is read as one table of all its data files (names
-// starting with "_" or "." are skipped, as in Spark).
+// starting with "_" or "." are skipped).
 
 #pragma once
 

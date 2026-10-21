@@ -1,4 +1,4 @@
-// Column: a DataFrame expression, as in Spark. Wraps an (untyped) Axiom
+// Column: a DataFrame expression. Wraps an (untyped) Axiom
 // expression; types are resolved when the expression is added to a DataFrame.
 
 #pragma once
@@ -30,7 +30,7 @@ Column lit(facebook::velox::Variant value);
 
 class Column {
  public:
-  /// Sort direction of a column used in orderBy. Spark's defaults: ascending
+  /// Sort direction of a column used in orderBy. Defaults: ascending
   /// sorts put nulls first, descending sorts put them last.
   struct SortOrder {
     bool ascending{true};

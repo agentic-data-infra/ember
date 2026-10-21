@@ -1,5 +1,5 @@
 // Text files for Axiom's file connector: one row per line, in a single
-// VARCHAR column "value", as Spark's spark.read.text. Lines end at "\n" or
+// VARCHAR column "value". Lines end at "\n" or
 // "\r\n"; the terminator is not part of the value.
 
 #pragma once

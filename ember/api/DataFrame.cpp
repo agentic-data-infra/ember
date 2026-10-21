@@ -50,8 +50,8 @@ lp::JoinType joinType(const std::string& how) {
   VELOX_USER_FAIL("Unsupported join type: {}", how);
 }
 
-// Spark's names for printSchema.
-std::string sparkTypeName(const velox::Type& type) {
+// Type names for printSchema.
+std::string schemaTypeName(const velox::Type& type) {
   switch (type.kind()) {
     case velox::TypeKind::VARCHAR:
       return "string";
@@ -72,10 +72,10 @@ std::string sparkTypeName(const velox::Type& type) {
     case velox::TypeKind::VARBINARY:
       return "binary";
     case velox::TypeKind::ARRAY:
-      return "array<" + sparkTypeName(*type.childAt(0)) + ">";
+      return "array<" + schemaTypeName(*type.childAt(0)) + ">";
     case velox::TypeKind::MAP:
-      return "map<" + sparkTypeName(*type.childAt(0)) + "," +
-          sparkTypeName(*type.childAt(1)) + ">";
+      return "map<" + schemaTypeName(*type.childAt(0)) + "," +
+          schemaTypeName(*type.childAt(1)) + ">";
     default: {
       auto name = type.toString();
       std::transform(name.begin(), name.end(), name.begin(), ::tolower);
@@ -156,7 +156,7 @@ DataFrame DataFrame::select(const std::vector<Column>& columns) const {
   std::vector<lp::ExprApi> projections;
   for (const auto& column : columns) {
     if (column.isExplode()) {
-      // Spark names an unaliased explode output "col".
+      // An unaliased explode output is named "col".
       const auto alias = column.alias().value_or("col");
       unnested =
           lp::ExprApi(column.expr().expr(), std::nullopt).unnestAs(alias);
@@ -352,7 +352,7 @@ std::string DataFrame::showString(int32_t numRows, bool truncate) const {
     out << "|";
     for (size_t c = 0; c < numColumns; ++c) {
       const auto pad = std::string(widths[c] - row[c].size(), ' ');
-      // Spark right-aligns truncated tables and left-aligns the others.
+      // Truncated tables are right-aligned, the others left-aligned.
       out << (truncate ? pad + row[c] : row[c] + pad) << "|";
     }
     out << "\n";
@@ -387,7 +387,7 @@ void DataFrame::printSchema() const {
   std::cout << "root\n";
   for (size_t i = 0; i < schema_->size(); ++i) {
     std::cout << " |-- " << schema_->nameOf(i) << ": "
-              << sparkTypeName(*schema_->childAt(i)) << " (nullable = true)\n";
+              << schemaTypeName(*schema_->childAt(i)) << " (nullable = true)\n";
   }
   std::cout << std::endl;
 }

@@ -108,7 +108,7 @@ SessionState::SessionState(
       fmt::format("ember_{}", appName_));
   resultPool_ = rootPool_->addLeafChild("results");
   optimizerPool_ = rootPool_->addLeafChild("optimizer");
-  functionHook_ = sparkFunctionHook();
+  functionHook_ = functionRewriteHook();
 }
 
 SessionState::~SessionState() {
@@ -191,7 +191,7 @@ optimizer::PlanAndStats optimizePlan(
 
   optimizer::MultiFragmentPlan::Options options;
   options.queryId = env.queryCtx->queryId();
-  // One task per core for each stage, single-threaded like a Spark task.
+  // One task per core for each stage, single-threaded.
   options.maxRemotePartitions = parallelism;
   options.maxLocalPartitions = 1;
   return optimizer::v2::Optimizer(

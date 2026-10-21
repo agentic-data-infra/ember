@@ -3,8 +3,8 @@
 # wrapper flags in third-party/generated/deps.bzl.
 #
 # Ember uses a single Velox checkout: Axiom's velox/ submodule directory is
-# replaced by a symlink to $VELOX_SRC. Velox's Spark SQL functions are enabled
-# so Ember can give Spark semantics.
+# replaced by a symlink to $VELOX_SRC. Velox's sparksql functions are enabled
+# for Ember's function semantics.
 set -euo pipefail
 
 EMBER_DIR="$(cd "$(dirname "$0")/.." && pwd)"

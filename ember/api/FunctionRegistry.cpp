@@ -61,14 +61,14 @@ void registerFunctions() {
     velox::functions::prestosql::registerAllScalarFunctions();
     velox::aggregate::prestosql::registerAllAggregateFunctions();
     velox::window::prestosql::registerAllWindowFunctions();
-    velox::functions::sparksql::registerFunctions(kSparkPrefix);
+    velox::functions::sparksql::registerFunctions(kFunctionPrefix);
     velox::functions::aggregate::sparksql::registerAggregateFunctions(
-        kSparkPrefix);
+        kFunctionPrefix);
     facebook::axiom::optimizer::FunctionRegistry::registerPrestoFunctions();
   });
 }
 
-lp::ExprResolver::FunctionRewriteHook sparkFunctionHook() {
+lp::ExprResolver::FunctionRewriteHook functionRewriteHook() {
   auto keepPresto =
       std::make_shared<const folly::F14FastSet<std::string>>(
           optimizerFunctions());
@@ -78,17 +78,17 @@ lp::ExprResolver::FunctionRewriteHook sparkFunctionHook() {
     if (keepPresto->contains(name)) {
       return nullptr;
     }
-    auto sparkName = kSparkPrefix + name;
+    auto prefixedName = kFunctionPrefix + name;
     std::vector<velox::TypePtr> argTypes;
     argTypes.reserve(args.size());
     for (const auto& arg : args) {
       argTypes.push_back(arg->type());
     }
-    auto type = velox::resolveFunction(sparkName, argTypes);
+    auto type = velox::resolveFunction(prefixedName, argTypes);
     if (type == nullptr) {
       return nullptr;
     }
-    return std::make_shared<lp::CallExpr>(type, std::move(sparkName), args);
+    return std::make_shared<lp::CallExpr>(type, std::move(prefixedName), args);
   };
 }
 

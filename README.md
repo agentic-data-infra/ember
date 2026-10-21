@@ -1,7 +1,7 @@
 # ember
 Data processing for agent -- not humans!
 
-Ember is a C++ data processing framework with a Spark-style DataFrame API.
+Ember is a C++ data processing framework with a DataFrame API.
 DataFrame programs are compiled by [Axiom](https://github.com/facebookincubator/axiom)
 into multi-stage Velox plans that run on a driver and a set of workers.
 

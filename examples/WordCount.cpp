@@ -1,5 +1,5 @@
 // DataFrameWordCount: counts the words of a text file (or a directory of text
-// files), as Spark's JavaWordCount/DataFrame examples.
+// files).
 //
 //   buck2 run //examples:word_count -- <path>
 
@@ -17,12 +17,12 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  auto spark = Session::builder()
+  auto ember = Session::builder()
                    .appName("DataFrameWordCount")
                    .master("local[*]")
                    .getOrCreate();
 
-  DataFrame lines = spark.read().text(argv[1]); // one column: "value"
+  DataFrame lines = ember.read().text(argv[1]); // one column: "value"
 
   DataFrame words =
       lines.select(explode(split(lower(col("value")), R"(\W+)")).as("word"))
@@ -32,5 +32,5 @@ int main(int argc, char** argv) {
       words.groupBy("word").count().orderBy(col("count").desc());
 
   counts.show(20, /*truncate=*/false);
-  spark.stop();
+  ember.stop();
 }

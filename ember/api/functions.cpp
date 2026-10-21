@@ -40,7 +40,7 @@ Column column(const std::string& name) {
 
 Column expr(const std::string& sql) {
   lp::ExprApi parsed = lp::Sql(sql);
-  // explode(...) in SQL text is a generator, as in Spark's selectExpr.
+  // explode(...) in SQL text is a generator, as in selectExpr.
   const auto* call =
       dynamic_cast<const core::CallExpr*>(parsed.expr().get());
   if (call != nullptr && call->name() == "explode" &&
@@ -108,7 +108,7 @@ Column regexp_replace(
 }
 
 Column size(const Column& collection) {
-  // spark.sql.legacy.sizeOfNull defaults to true: size(null) is -1.
+  // legacySizeOfNull = true: size(null) is -1.
   return fn("size", {collection, lit(true)});
 }
 

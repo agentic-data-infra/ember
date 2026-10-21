@@ -28,20 +28,20 @@ struct TimesTwoFunction {
 class DataFrameTest : public testing::Test {
  protected:
   static void SetUpTestCase() {
-    spark_ = Session::builder()
+    ember_ = Session::builder()
                  .appName("DataFrameTest")
                  .master("local[4]")
                  .getOrCreate();
   }
 
   static void TearDownTestCase() {
-    spark_->stop();
-    spark_.reset();
+    ember_->stop();
+    ember_.reset();
   }
 
   // Columns: name (varchar), dept (varchar), salary (bigint).
   DataFrame people() {
-    return spark_->createDataFrame(
+    return ember_->createDataFrame(
         ROW({"name", "dept", "salary"}, {VARCHAR(), VARCHAR(), BIGINT()}),
         {{"alice", "eng", 100L},
          {"bob", "eng", 80L},
@@ -60,7 +60,7 @@ class DataFrameTest : public testing::Test {
     return result;
   }
 
-  static inline std::optional<Session> spark_;
+  static inline std::optional<Session> ember_;
 };
 
 TEST_F(DataFrameTest, selectFilterWithColumn) {
@@ -135,7 +135,7 @@ TEST_F(DataFrameTest, unionAndJoin) {
   auto all = people().unionAll(people());
   EXPECT_EQ(all.count(), 10);
 
-  auto depts = spark_->createDataFrame(
+  auto depts = ember_->createDataFrame(
       ROW({"dept", "floor"}, {VARCHAR(), BIGINT()}),
       {{"eng", 3L}, {"sales", 1L}});
   auto joined =
@@ -149,7 +149,7 @@ TEST_F(DataFrameTest, unionAndJoin) {
 }
 
 TEST_F(DataFrameTest, explode) {
-  auto df = spark_->createDataFrame(
+  auto df = ember_->createDataFrame(
       ROW({"id", "tags"}, {BIGINT(), ARRAY(VARCHAR())}),
       {{1L, Variant::array({Variant("a"), Variant("b")})},
        {2L, Variant::array({Variant("c")})}});
@@ -167,8 +167,8 @@ TEST_F(DataFrameTest, explode) {
   EXPECT_EQ(strings(sql.collect()), (std::vector<std::string>{"a", "b", "c"}));
 }
 
-TEST_F(DataFrameTest, splitTakesRegexAsInSpark) {
-  auto df = spark_->createDataFrame(
+TEST_F(DataFrameTest, splitTakesRegex) {
+  auto df = ember_->createDataFrame(
       ROW({"s"}, {VARCHAR()}), {{"one1two22three"}, {"a.b"}});
   auto rows = df.select(explode(split(col("s"), R"(\d+)")).as("part"))
                   .collect();
@@ -199,7 +199,7 @@ TEST_F(DataFrameTest, udfThroughCall) {
 }
 
 TEST_F(DataFrameTest, nullsSortFirstAscendingAndLastDescending) {
-  auto df = spark_->createDataFrame(
+  auto df = ember_->createDataFrame(
       ROW({"x"}, {BIGINT()}), {{2L}, {Variant::null(facebook::velox::TypeKind::BIGINT)}, {1L}});
   auto asc = df.orderBy(col("x")).collect();
   EXPECT_TRUE(asc[0].isNullAt(0));
@@ -208,7 +208,7 @@ TEST_F(DataFrameTest, nullsSortFirstAscendingAndLastDescending) {
   EXPECT_EQ(desc[0].getLong(0), 2);
 }
 
-TEST_F(DataFrameTest, showFormatsLikeSpark) {
+TEST_F(DataFrameTest, showFormatsTable) {
   auto df = people().select("name", "salary").orderBy("name");
   EXPECT_EQ(
       df.showString(2),
@@ -220,7 +220,7 @@ TEST_F(DataFrameTest, showFormatsLikeSpark) {
       "+-----+------+\n"
       "only showing top 2 rows\n");
 
-  auto longValue = spark_->createDataFrame(
+  auto longValue = ember_->createDataFrame(
       ROW({"s"}, {VARCHAR()}), {{"abcdefghijklmnopqrstuvwxyz"}});
   EXPECT_EQ(
       longValue.showString(20, /*truncate=*/true),

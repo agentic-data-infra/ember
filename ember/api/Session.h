@@ -1,10 +1,10 @@
-// Session: the entry point of an Ember program, as Spark's SparkSession.
+// Session: the entry point of an Ember program.
 //
-//   auto spark = Session::builder()
+//   auto ember = Session::builder()
 //                    .appName("DataFrameWordCount")
 //                    .master("local[*]")
 //                    .getOrCreate();
-//   DataFrame lines = spark.read().text(path);
+//   DataFrame lines = ember.read().text(path);
 //
 // For now every master runs in-process: "local[N]" plans N-way parallel
 // stages, which Axiom's LocalRunner executes as Velox tasks. The driver and

@@ -1,9 +1,9 @@
-// DataFrame: an immutable, lazily evaluated relation, as in Spark.
+// DataFrame: an immutable, lazily evaluated relation.
 //
 // A DataFrame is a cheap value: a session plus a shared, immutable chain of
 // plan steps. Each transformation returns a new DataFrame and runs nothing;
 // the Axiom logical plan is built from the chain (and validated, so errors
-// surface where the transformation is written, as in Spark's analysis).
+// surface where the transformation is written).
 // Actions (collect, count, show) hand the plan to the session, which optimizes
 // it into a multi-fragment Velox plan and runs it.
 
@@ -147,7 +147,7 @@ class DataFrame {
   DataFrame limit(int64_t n) const;
   DataFrame distinct() const;
 
-  /// Union by position, keeping duplicates (Spark's union / unionAll).
+  /// Union by position, keeping duplicates.
   DataFrame unionAll(const DataFrame& other) const;
   DataFrame union_(const DataFrame& other) const {
     return unionAll(other);
@@ -169,7 +169,7 @@ class DataFrame {
     return limit(n).collect();
   }
 
-  /// Prints the first 'numRows' rows as a table, as Spark's show(). With
+  /// Prints the first 'numRows' rows as a table. With
   /// 'truncate', values longer than 20 characters are cut and cells are
   /// right-aligned.
   void show(int32_t numRows = 20, bool truncate = true) const;
@@ -210,8 +210,7 @@ class DataFrame {
   facebook::velox::RowTypePtr schema_;
 };
 
-/// Result of groupBy: aggregations over groups, as Spark's
-/// RelationalGroupedDataset.
+/// Result of groupBy: aggregations over groups.
 class GroupedData {
  public:
   GroupedData(DataFrame df, std::vector<Column> keys)

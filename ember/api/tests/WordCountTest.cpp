@@ -21,15 +21,15 @@ namespace fs = std::filesystem;
 class WordCountTest : public testing::Test {
  protected:
   static void SetUpTestCase() {
-    spark_ = Session::builder()
+    ember_ = Session::builder()
                  .appName("WordCountTest")
                  .master("local[4]")
                  .getOrCreate();
   }
 
   static void TearDownTestCase() {
-    spark_->stop();
-    spark_.reset();
+    ember_->stop();
+    ember_.reset();
   }
 
   void SetUp() override {
@@ -51,7 +51,7 @@ class WordCountTest : public testing::Test {
 
   // The example program from examples/WordCount.cpp.
   static DataFrame wordCount(const std::string& path) {
-    DataFrame lines = spark_->read().text(path);
+    DataFrame lines = ember_->read().text(path);
     DataFrame words =
         lines.select(explode(split(lower(col("value")), R"(\W+)")).as("word"))
             .filter(col("word") != "");
@@ -91,7 +91,7 @@ class WordCountTest : public testing::Test {
   void writeCorpus(int32_t numFiles, int32_t linesPerFile) {
     const std::vector<std::string> vocabulary = {
         "the", "quick", "Brown", "fox", "JUMPS", "over", "lazy", "dog",
-        "ember", "velox", "axiom", "spark", "x1", "snake_case", "a"};
+        "ember", "velox", "axiom", "flare", "x1", "snake_case", "a"};
     const std::vector<std::string> separators = {
         " ", "  ", ", ", ". ", "!", " -- ", "\t", "'", "(", ") "};
     std::mt19937 rng(42);
@@ -109,7 +109,7 @@ class WordCountTest : public testing::Test {
     }
   }
 
-  static inline std::optional<Session> spark_;
+  static inline std::optional<Session> ember_;
   fs::path dir_;
 };
 
@@ -166,7 +166,7 @@ TEST_F(WordCountTest, linesSpanningReadBuffers) {
   }
   auto path = write("long.txt", content);
 
-  auto lines = spark_->read().text(path.string());
+  auto lines = ember_->read().text(path.string());
   EXPECT_EQ(lines.count(), expectedLines);
   EXPECT_EQ(
       lines.filter(length(col("value")) > 1000).count(), 3);
@@ -190,7 +190,7 @@ TEST_F(WordCountTest, planHasMapAndReduceStages) {
 TEST_F(WordCountTest, emptyInput) {
   auto path = write("empty.txt", "");
   EXPECT_EQ(wordCount(path.string()).count(), 0);
-  EXPECT_EQ(spark_->read().text(path.string()).count(), 0);
+  EXPECT_EQ(ember_->read().text(path.string()).count(), 0);
 }
 
 } // namespace
