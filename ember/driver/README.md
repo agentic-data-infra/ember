@@ -10,6 +10,7 @@ Turns an optimized plan into stages and runs them.
 | `MapOutputTracker` | Records each map task's `MapStatus` (location, bytes per partition) and gives reduce task `p` the URLs of its non-empty blocks. |
 | `SchedulerBackend` | Where tasks run: `launchTask(bytes, callback)`, `totalSlots`, `removeShuffle`. |
 | `LocalBackend` | `local[N]`: one in-process executor with N task slots. Tasks still go through serialized bytes. |
+| `ClusterBackend` | `ember://host:port`: serves RPC on the port; workers register there with their address and slots, and the backend sends each task to the worker with the most free slots as a `LaunchTask` call, whose reply is the task result. A worker whose connection breaks or that misses heartbeats is dropped, and its running tasks fail and are retried elsewhere. |
 
 Source stages run one task per split; other stages run as many tasks as the
 shuffle they read has partitions; the result stage runs one task. Stages run

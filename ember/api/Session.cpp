@@ -11,6 +11,7 @@
 #include "axiom/optimizer/v2/Optimize.h"
 #include "ember/FunctionRegistry.h"
 #include "ember/Runtime.h"
+#include "ember/driver/ClusterBackend.h"
 #include "ember/driver/DagScheduler.h"
 #include "ember/driver/LocalBackend.h"
 #include "velox/common/memory/HashStringAllocator.h"
@@ -33,7 +34,8 @@ int32_t parseParallelism(const std::string& master) {
   const std::string prefix = "local[";
   VELOX_USER_CHECK(
       master.starts_with(prefix) && master.ends_with("]"),
-      "Unsupported master: {}. Use local, local[N] or local[*].",
+      "Unsupported master: {}. Use local, local[N], local[*] or "
+    "ember://host:port.",
       master);
   auto inner = master.substr(prefix.size(), master.size() - prefix.size() - 1);
   if (inner == "*") {
@@ -45,6 +47,30 @@ int32_t parseParallelism(const std::string& master) {
       "Invalid parallelism in master: {}",
       master);
   return *parallelism;
+}
+
+constexpr std::string_view kClusterScheme = "ember://";
+
+std::string configValue(
+    const std::map<std::string, std::string>& config,
+    const char* key,
+    std::string defaultValue) {
+  auto it = config.find(key);
+  return it == config.end() ? std::move(defaultValue) : it->second;
+}
+
+int32_t configInt(
+    const std::map<std::string, std::string>& config,
+    const char* key,
+    int32_t defaultValue) {
+  auto it = config.find(key);
+  if (it == config.end()) {
+    return defaultValue;
+  }
+  auto value = folly::tryTo<int32_t>(it->second);
+  VELOX_USER_CHECK(
+      value.hasValue() && *value > 0, "Invalid {}: {}", key, it->second);
+  return *value;
 }
 
 std::mutex activeMutex;
@@ -59,7 +85,7 @@ SessionState::SessionState(
     : appName_{std::move(appName)},
       master_{std::move(master)},
       config_{std::move(config)},
-      parallelism_{parseParallelism(master_)},
+      parallelism_{0},
       eagerAnalysis_{
           config_.contains("ember.eager_analysis") &&
           config_.at("ember.eager_analysis") == "true"} {
@@ -70,12 +96,31 @@ SessionState::SessionState(
   } else {
     localDirectory = (std::filesystem::temp_directory_path() / "ember").string();
   }
-  // Drivers are cooperative, but leave headroom for blocked ones.
-  auto backend =
-      std::make_shared<driver::LocalBackend>(driver::LocalBackendOptions{
-          .numSlots = parallelism_,
-          .numThreads = std::max(4, 2 * parallelism_),
-          .localDirectory = localDirectory});
+  std::shared_ptr<driver::SchedulerBackend> backend;
+  if (master_.starts_with(kClusterScheme)) {
+    const auto address = rpc::HostAndPort::parse(
+        master_.substr(kClusterScheme.size()));
+    auto cluster =
+        std::make_shared<driver::ClusterBackend>(driver::ClusterBackendOptions{
+            .appName = appName_,
+            .bindHost = configValue(config_, kDriverBindHost, ""),
+            .port = address.port});
+    cluster->waitForWorkers(
+        configInt(config_, kClusterWorkers, 1),
+        std::chrono::milliseconds(
+            configInt(config_, kRegistrationTimeoutMs, 60'000)));
+    parallelism_ = cluster->totalSlots();
+    backend = std::move(cluster);
+  } else {
+    parallelism_ = parseParallelism(master_);
+    // Drivers are cooperative, but leave headroom for blocked ones.
+    backend =
+        std::make_shared<driver::LocalBackend>(driver::LocalBackendOptions{
+            .numSlots = parallelism_,
+            .numThreads = std::max(4, 2 * parallelism_),
+            .localDirectory = localDirectory});
+  }
+  parallelism_ = configInt(config_, kDefaultParallelism, parallelism_);
   scheduler_ = std::make_unique<driver::DagScheduler>(
       std::move(backend),
       driver::DagSchedulerOptions{

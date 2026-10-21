@@ -34,6 +34,24 @@ Velox or Axiom change.
 buck2 run //examples:word_count -- path/to/text/file/or/directory
 ```
 
+That runs in one process (`local[*]`). To run it as a driver with separate
+worker processes, start the workers pointed at the driver's address, then the
+program with master `ember://host:port` and the number of workers to wait
+for. Workers keep retrying until the driver is up, so the order does not
+matter, and they exit when the program ends.
+
+```
+buck2 build //bin:ember_worker //examples:word_count --show-output
+# On each worker host (or several times on one):
+ember_worker --driver=driver-host:7077 --slots=4
+# On the driver host:
+word_count path/to/text ember://driver-host:7077 3
+```
+
+Input paths must be readable from every worker under the same name.
+`scripts/run_local_cluster.sh -n 3 -- word_count path {master} {workers}`
+does all of this on one machine.
+
 ## Layout
 
 See [ember/README.md](ember/README.md).

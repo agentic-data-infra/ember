@@ -19,3 +19,11 @@ cxx_test(
     srcs = ["AxiomSmokeTest.cpp"],
     deps = [":test_main"],
 )
+
+cxx_library(
+    name = "wordcount_util",
+    exported_headers = ["WordCountUtil.h"],
+    header_namespace = "ember/tests",
+    exported_deps = ["//ember/api:api"],
+    visibility = ["PUBLIC"],
+)

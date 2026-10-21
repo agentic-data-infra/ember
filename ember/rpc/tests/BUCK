@@ -1,0 +1,10 @@
+cxx_test(
+    name = "rpc_test",
+    srcs = ["RpcTest.cpp"],
+    deps = [
+        "//ember/rpc:rpc",
+        "//ember/tests:test_main",
+    ],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+)

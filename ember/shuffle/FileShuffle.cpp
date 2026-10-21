@@ -398,6 +398,13 @@ std::shared_ptr<ShuffleBlockStore> ShuffleBlockStore::lookup(
   return it->second;
 }
 
+std::shared_ptr<ShuffleBlockStore> ShuffleBlockStore::find(
+    const std::string& location) {
+  std::lock_guard<std::mutex> l(storesMutex);
+  auto it = stores().find(location);
+  return it == stores().end() ? nullptr : it->second;
+}
+
 folly::SemiFuture<std::unique_ptr<folly::IOBuf>> LocalBlockTransport::fetchBlock(
     const std::string& location,
     const BlockId& id) {

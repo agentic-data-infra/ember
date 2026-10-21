@@ -1,0 +1,10 @@
+# Length-prefixed TCP RPC between the driver and workers.
+
+cxx_library(
+    name = "rpc",
+    srcs = glob(["*.cpp"]),
+    header_namespace = "ember/rpc",
+    exported_headers = glob(["*.h"]),
+    exported_deps = ["//third-party:velox_axiom"],
+    visibility = ["PUBLIC"],
+)

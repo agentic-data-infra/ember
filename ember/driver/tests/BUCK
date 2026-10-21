@@ -9,3 +9,16 @@ cxx_test(
     # Archives must precede the prebuilt Velox/Axiom libraries they use.
     link_ordering = "topological",
 )
+
+cxx_test(
+    name = "cluster_test",
+    srcs = ["ClusterTest.cpp"],
+    deps = [
+        "//ember/api:api",
+        "//ember/tests:test_main",
+        "//ember/tests:wordcount_util",
+    ],
+    env = {"EMBER_WORKER": "$(location //bin:ember_worker)"},
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+)
