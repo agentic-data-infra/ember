@@ -1,4 +1,4 @@
-// WordCount end to end: text files -> DataFrame program -> Axiom plan ->
+// WordCount end to end: text files -> Dataframe program -> Axiom plan ->
 // Velox, checked against a shell pipeline over the same files.
 
 #include <gtest/gtest.h>
@@ -50,9 +50,9 @@ class WordCountTest : public testing::Test {
   }
 
   // The example program from examples/WordCount.cpp.
-  static DataFrame wordCount(const std::string& path) {
-    DataFrame lines = ember_->read().text(path);
-    DataFrame words =
+  static Dataframe wordCount(const std::string& path) {
+    Dataframe lines = ember_->read().text(path);
+    Dataframe words =
         lines.select(explode(split(lower(col("value")), R"(\W+)")).as("word"))
             .filter(col("word") != "");
     return words.groupBy("word").count().orderBy(col("count").desc());

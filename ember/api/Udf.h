@@ -1,6 +1,6 @@
 // User-defined functions are plain Velox simple functions, registered by
 // name. Put them in a library that the driver and every worker link, and
-// register them before building DataFrames that call them:
+// register them before building Dataframes that call them:
 //
 //   template <typename T>
 //   struct TimesTwo {

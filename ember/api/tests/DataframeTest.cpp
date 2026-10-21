@@ -1,4 +1,4 @@
-// DataFrame API tests on small in-memory inputs.
+// Dataframe API tests on small in-memory inputs.
 
 #include <gtest/gtest.h>
 
@@ -25,11 +25,11 @@ struct TimesTwoFunction {
   }
 };
 
-class DataFrameTest : public testing::Test {
+class DataframeTest : public testing::Test {
  protected:
   static void SetUpTestCase() {
     ember_ = Session::builder()
-                 .appName("DataFrameTest")
+                 .appName("DataframeTest")
                  .master("local[4]")
                  .getOrCreate();
   }
@@ -40,8 +40,8 @@ class DataFrameTest : public testing::Test {
   }
 
   // Columns: name (varchar), dept (varchar), salary (bigint).
-  DataFrame people() {
-    return ember_->createDataFrame(
+  Dataframe people() {
+    return ember_->createDataframe(
         ROW({"name", "dept", "salary"}, {VARCHAR(), VARCHAR(), BIGINT()}),
         {{"alice", "eng", 100L},
          {"bob", "eng", 80L},
@@ -63,7 +63,7 @@ class DataFrameTest : public testing::Test {
   static inline std::optional<Session> ember_;
 };
 
-TEST_F(DataFrameTest, selectFilterWithColumn) {
+TEST_F(DataframeTest, selectFilterWithColumn) {
   auto df = people()
                 .filter(col("salary") >= 60)
                 .withColumn("bonus", col("salary") / 10)
@@ -77,7 +77,7 @@ TEST_F(DataFrameTest, selectFilterWithColumn) {
   EXPECT_EQ(rows[3], Row({Variant("erin"), Variant(6L)}));
 }
 
-TEST_F(DataFrameTest, typedColumnsAndSqlStringsAgree) {
+TEST_F(DataframeTest, typedColumnsAndSqlStringsAgree) {
   auto typed = people()
                    .select(upper(col("name")).as("n"), (col("salary") + 1).as("s"))
                    .filter("s > 75")
@@ -92,7 +92,7 @@ TEST_F(DataFrameTest, typedColumnsAndSqlStringsAgree) {
       (std::vector<std::string>{"ALICE", "BOB"}));
 }
 
-TEST_F(DataFrameTest, withColumnReplacesExisting) {
+TEST_F(DataframeTest, withColumnReplacesExisting) {
   auto df = people().withColumn("salary", col("salary") * 2);
   EXPECT_EQ(df.columns(), (std::vector<std::string>{"name", "dept", "salary"}));
   auto rows = df.filter(col("name") == "alice").collect();
@@ -100,12 +100,12 @@ TEST_F(DataFrameTest, withColumnReplacesExisting) {
   EXPECT_EQ(rows[0].getLong(2), 200);
 }
 
-TEST_F(DataFrameTest, renameAndDrop) {
+TEST_F(DataframeTest, renameAndDrop) {
   auto df = people().withColumnRenamed("dept", "team").drop({"salary"});
   EXPECT_EQ(df.columns(), (std::vector<std::string>{"name", "team"}));
 }
 
-TEST_F(DataFrameTest, groupByAggregates) {
+TEST_F(DataframeTest, groupByAggregates) {
   auto df = people()
                 .groupBy("dept")
                 .agg(count(col("name")).as("n"), sum(col("salary")).as("total"))
@@ -125,17 +125,17 @@ TEST_F(DataFrameTest, groupByAggregates) {
   EXPECT_EQ(maxes.collect()[2], Row({Variant("sales"), Variant(70L)}));
 }
 
-TEST_F(DataFrameTest, countLimitDistinct) {
+TEST_F(DataframeTest, countLimitDistinct) {
   EXPECT_EQ(people().count(), 5);
   EXPECT_EQ(people().limit(2).count(), 2);
   EXPECT_EQ(people().select("dept").distinct().count(), 3);
 }
 
-TEST_F(DataFrameTest, unionAndJoin) {
+TEST_F(DataframeTest, unionAndJoin) {
   auto all = people().unionAll(people());
   EXPECT_EQ(all.count(), 10);
 
-  auto depts = ember_->createDataFrame(
+  auto depts = ember_->createDataframe(
       ROW({"dept", "floor"}, {VARCHAR(), BIGINT()}),
       {{"eng", 3L}, {"sales", 1L}});
   auto joined =
@@ -148,8 +148,8 @@ TEST_F(DataFrameTest, unionAndJoin) {
   EXPECT_EQ(left.count(), 5);
 }
 
-TEST_F(DataFrameTest, explode) {
-  auto df = ember_->createDataFrame(
+TEST_F(DataframeTest, explode) {
+  auto df = ember_->createDataframe(
       ROW({"id", "tags"}, {BIGINT(), ARRAY(VARCHAR())}),
       {{1L, Variant::array({Variant("a"), Variant("b")})},
        {2L, Variant::array({Variant("c")})}});
@@ -167,8 +167,8 @@ TEST_F(DataFrameTest, explode) {
   EXPECT_EQ(strings(sql.collect()), (std::vector<std::string>{"a", "b", "c"}));
 }
 
-TEST_F(DataFrameTest, splitTakesRegex) {
-  auto df = ember_->createDataFrame(
+TEST_F(DataframeTest, splitTakesRegex) {
+  auto df = ember_->createDataframe(
       ROW({"s"}, {VARCHAR()}), {{"one1two22three"}, {"a.b"}});
   auto rows = df.select(explode(split(col("s"), R"(\d+)")).as("part"))
                   .collect();
@@ -184,7 +184,7 @@ TEST_F(DataFrameTest, splitTakesRegex) {
   EXPECT_EQ(dots[0][0], Variant(4));
 }
 
-TEST_F(DataFrameTest, udfThroughCall) {
+TEST_F(DataframeTest, udfThroughCall) {
   registerUdf<TimesTwoFunction, int64_t, int64_t>("times_two");
   auto rows = people()
                   .select(call("times_two", col("salary")).as("x"))
@@ -198,8 +198,8 @@ TEST_F(DataFrameTest, udfThroughCall) {
   EXPECT_EQ(sql.collect()[0].getLong(0), 200);
 }
 
-TEST_F(DataFrameTest, nullsSortFirstAscendingAndLastDescending) {
-  auto df = ember_->createDataFrame(
+TEST_F(DataframeTest, nullsSortFirstAscendingAndLastDescending) {
+  auto df = ember_->createDataframe(
       ROW({"x"}, {BIGINT()}), {{2L}, {Variant::null(facebook::velox::TypeKind::BIGINT)}, {1L}});
   auto asc = df.orderBy(col("x")).collect();
   EXPECT_TRUE(asc[0].isNullAt(0));
@@ -208,7 +208,7 @@ TEST_F(DataFrameTest, nullsSortFirstAscendingAndLastDescending) {
   EXPECT_EQ(desc[0].getLong(0), 2);
 }
 
-TEST_F(DataFrameTest, showFormatsTable) {
+TEST_F(DataframeTest, showFormatsTable) {
   auto df = people().select("name", "salary").orderBy("name");
   EXPECT_EQ(
       df.showString(2),
@@ -220,7 +220,7 @@ TEST_F(DataFrameTest, showFormatsTable) {
       "+-----+------+\n"
       "only showing top 2 rows\n");
 
-  auto longValue = ember_->createDataFrame(
+  auto longValue = ember_->createDataframe(
       ROW({"s"}, {VARCHAR()}), {{"abcdefghijklmnopqrstuvwxyz"}});
   EXPECT_EQ(
       longValue.showString(20, /*truncate=*/true),
@@ -238,7 +238,7 @@ TEST_F(DataFrameTest, showFormatsTable) {
       "+--------------------------+\n");
 }
 
-TEST_F(DataFrameTest, dataFramesAreImmutableValues) {
+TEST_F(DataframeTest, dataFramesAreImmutableValues) {
   auto base = people();
   auto filtered = base.filter(col("dept") == "eng");
   auto copy = filtered;
@@ -247,14 +247,14 @@ TEST_F(DataFrameTest, dataFramesAreImmutableValues) {
   EXPECT_EQ(copy.count(), 2);
 }
 
-TEST_F(DataFrameTest, analysisErrorsAtTransformation) {
+TEST_F(DataframeTest, analysisErrorsAtTransformation) {
   EXPECT_THROW(people().select("nope"), facebook::velox::VeloxUserError);
   EXPECT_THROW(
       people().select(call("no_such_function", col("name"))),
       facebook::velox::VeloxUserError);
 }
 
-TEST_F(DataFrameTest, columnLiteral) {
+TEST_F(DataframeTest, columnLiteral) {
   auto rows = people().filter("salary"_c > 90).collect();
   ASSERT_EQ(rows.size(), 1);
   EXPECT_EQ(rows[0].getString(0), "alice");

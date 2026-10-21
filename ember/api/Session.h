@@ -1,10 +1,10 @@
 // Session: the entry point of an Ember program.
 //
 //   auto ember = Session::builder()
-//                    .appName("DataFrameWordCount")
+//                    .appName("DataframeWordCount")
 //                    .master("local[*]")
 //                    .getOrCreate();
-//   DataFrame lines = ember.read().text(path);
+//   Dataframe lines = ember.read().text(path);
 //
 // For now every master runs in-process: "local[N]" plans N-way parallel
 // stages, which Axiom's LocalRunner executes as Velox tasks. The driver and
@@ -17,8 +17,8 @@
 #include <string>
 #include <vector>
 
-#include "ember/DataFrame.h"
-#include "ember/DataFrameReader.h"
+#include "ember/Dataframe.h"
+#include "ember/DataframeReader.h"
 
 namespace folly {
 class CPUThreadPoolExecutor;
@@ -30,7 +30,7 @@ struct PlanAndStats;
 
 namespace ember {
 
-/// Shared state behind a Session and its DataFrames.
+/// Shared state behind a Session and its Dataframes.
 class SessionState {
  public:
   SessionState(
@@ -113,19 +113,19 @@ class Session {
   /// The active session, if any.
   static std::optional<Session> active();
 
-  DataFrameReader read() const;
+  DataframeReader read() const;
 
-  /// A DataFrame from literal rows, backed by a Values node (Koski's
+  /// A Dataframe from literal rows, backed by a Values node (Koski's
   /// inlineTable).
-  DataFrame createDataFrame(
+  Dataframe createDataframe(
       const facebook::velox::RowTypePtr& type,
       std::vector<std::vector<facebook::velox::Variant>> rows) const;
-  DataFrame createDataFrame(
+  Dataframe createDataframe(
       const std::vector<facebook::velox::RowVectorPtr>& data) const;
-  DataFrame inlineTable(
+  Dataframe inlineTable(
       const facebook::velox::RowTypePtr& type,
       std::vector<std::vector<facebook::velox::Variant>> rows) const {
-    return createDataFrame(type, std::move(rows));
+    return createDataframe(type, std::move(rows));
   }
 
   const SessionState& state() const {

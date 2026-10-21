@@ -1,4 +1,4 @@
-// DataFrameWordCount: counts the words of a text file (or a directory of text
+// DataframeWordCount: counts the words of a text file (or a directory of text
 // files).
 //
 //   buck2 run //examples:word_count -- <path>
@@ -18,17 +18,17 @@ int main(int argc, char** argv) {
   }
 
   auto ember = Session::builder()
-                   .appName("DataFrameWordCount")
+                   .appName("DataframeWordCount")
                    .master("local[*]")
                    .getOrCreate();
 
-  DataFrame lines = ember.read().text(argv[1]); // one column: "value"
+  Dataframe lines = ember.read().text(argv[1]); // one column: "value"
 
-  DataFrame words =
+  Dataframe words =
       lines.select(explode(split(lower(col("value")), R"(\W+)")).as("word"))
           .filter(col("word") != "");
 
-  DataFrame counts =
+  Dataframe counts =
       words.groupBy("word").count().orderBy(col("count").desc());
 
   counts.show(20, /*truncate=*/false);

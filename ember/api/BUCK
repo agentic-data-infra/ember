@@ -1,4 +1,4 @@
-# Ember's user-facing DataFrame API. Headers are exported under "ember/", so
+# Ember's user-facing Dataframe API. Headers are exported under "ember/", so
 # programs include e.g. "ember/Session.h".
 
 cxx_library(

@@ -1,7 +1,7 @@
-// DataFrame: an immutable, lazily evaluated relation.
+// Dataframe: an immutable, lazily evaluated relation.
 //
-// A DataFrame is a cheap value: a session plus a shared, immutable chain of
-// plan steps. Each transformation returns a new DataFrame and runs nothing;
+// A Dataframe is a cheap value: a session plus a shared, immutable chain of
+// plan steps. Each transformation returns a new Dataframe and runs nothing;
 // the Axiom logical plan is built from the chain (and validated, so errors
 // surface where the transformation is written).
 // Actions (collect, count, show) hand the plan to the session, which optimizes
@@ -68,7 +68,7 @@ class Row {
   std::vector<facebook::velox::Variant> values_;
 };
 
-/// One immutable step of a DataFrame's plan: applies an operation to the
+/// One immutable step of a Dataframe's plan: applies an operation to the
 /// builder that replays the steps before it.
 struct PlanStep {
   using Apply = std::function<void(
@@ -79,84 +79,84 @@ struct PlanStep {
   Apply apply;
 };
 
-class DataFrame {
+class Dataframe {
  public:
-  DataFrame(
+  Dataframe(
       std::shared_ptr<SessionState> session,
       std::shared_ptr<const PlanStep> step);
 
   // Transformations.
 
-  DataFrame select(const std::vector<Column>& columns) const;
+  Dataframe select(const std::vector<Column>& columns) const;
 
   template <typename... T>
-  DataFrame select(const Column& first, const T&... rest) const {
+  Dataframe select(const Column& first, const T&... rest) const {
     return select(std::vector<Column>{first, Column(rest)...});
   }
 
   /// SQL expression strings, e.g. selectExpr({"lower(value) AS v"}).
-  DataFrame selectExpr(const std::vector<std::string>& exprs) const;
+  Dataframe selectExpr(const std::vector<std::string>& exprs) const;
 
   /// Alias of select, for Koski familiarity.
-  DataFrame map(const std::vector<Column>& columns) const {
+  Dataframe map(const std::vector<Column>& columns) const {
     return select(columns);
   }
 
-  DataFrame filter(const Column& condition) const;
+  Dataframe filter(const Column& condition) const;
   /// A SQL condition, e.g. filter("salary > 50").
-  DataFrame filter(const std::string& condition) const;
-  DataFrame filter(const char* condition) const {
+  Dataframe filter(const std::string& condition) const;
+  Dataframe filter(const char* condition) const {
     return filter(std::string(condition));
   }
-  DataFrame where(const Column& condition) const {
+  Dataframe where(const Column& condition) const {
     return filter(condition);
   }
-  DataFrame where(const std::string& condition) const {
+  Dataframe where(const std::string& condition) const {
     return filter(condition);
   }
-  DataFrame where(const char* condition) const {
+  Dataframe where(const char* condition) const {
     return filter(std::string(condition));
   }
 
   /// Adds column 'name', or replaces it if it exists.
-  DataFrame withColumn(const std::string& name, const Column& column) const;
-  DataFrame withColumnRenamed(
+  Dataframe withColumn(const std::string& name, const Column& column) const;
+  Dataframe withColumnRenamed(
       const std::string& existing,
       const std::string& name) const;
-  DataFrame drop(const std::vector<std::string>& names) const;
+  Dataframe drop(const std::vector<std::string>& names) const;
 
   GroupedData groupBy(const std::vector<Column>& columns) const;
 
   template <typename... T>
   GroupedData groupBy(const Column& first, const T&... rest) const;
 
-  /// Aggregates over the whole DataFrame: groupBy().agg(...).
-  DataFrame agg(const std::vector<Column>& aggregates) const;
+  /// Aggregates over the whole Dataframe: groupBy().agg(...).
+  Dataframe agg(const std::vector<Column>& aggregates) const;
 
-  DataFrame orderBy(const std::vector<Column>& columns) const;
+  Dataframe orderBy(const std::vector<Column>& columns) const;
 
   template <typename... T>
-  DataFrame orderBy(const Column& first, const T&... rest) const {
+  Dataframe orderBy(const Column& first, const T&... rest) const {
     return orderBy(std::vector<Column>{first, Column(rest)...});
   }
 
-  DataFrame sort(const std::vector<Column>& columns) const {
+  Dataframe sort(const std::vector<Column>& columns) const {
     return orderBy(columns);
   }
 
-  DataFrame limit(int64_t n) const;
-  DataFrame distinct() const;
+  Dataframe limit(int64_t n) const;
+  Dataframe distinct() const;
 
   /// Union by position, keeping duplicates.
-  DataFrame unionAll(const DataFrame& other) const;
-  DataFrame union_(const DataFrame& other) const {
+  Dataframe unionAll(const Dataframe& other) const;
+  Dataframe union_(const Dataframe& other) const {
     return unionAll(other);
   }
 
   /// Equi-join on columns with the same names on both sides. 'how' is one of
   /// inner, left, right, full (or outer).
-  DataFrame join(
-      const DataFrame& right,
+  Dataframe join(
+      const Dataframe& right,
       const std::vector<std::string>& usingColumns,
       const std::string& how = "inner") const;
 
@@ -198,7 +198,7 @@ class DataFrame {
  private:
   friend class GroupedData;
 
-  DataFrame then(PlanStep::Apply apply) const;
+  Dataframe then(PlanStep::Apply apply) const;
 
   // Replays the plan into a fresh builder.
   facebook::axiom::logical_plan::PlanBuilder builder(
@@ -213,34 +213,34 @@ class DataFrame {
 /// Result of groupBy: aggregations over groups.
 class GroupedData {
  public:
-  GroupedData(DataFrame df, std::vector<Column> keys)
+  GroupedData(Dataframe df, std::vector<Column> keys)
       : df_{std::move(df)}, keys_{std::move(keys)} {}
 
-  DataFrame agg(const std::vector<Column>& aggregates) const;
+  Dataframe agg(const std::vector<Column>& aggregates) const;
 
   template <typename... T>
-  DataFrame agg(const Column& first, const T&... rest) const {
+  Dataframe agg(const Column& first, const T&... rest) const {
     return agg(std::vector<Column>{first, Column(rest)...});
   }
 
   /// Adds a "count" column with the number of rows in each group.
-  DataFrame count() const;
-  DataFrame sum(const std::vector<std::string>& columns) const;
-  DataFrame avg(const std::vector<std::string>& columns) const;
-  DataFrame min(const std::vector<std::string>& columns) const;
-  DataFrame max(const std::vector<std::string>& columns) const;
+  Dataframe count() const;
+  Dataframe sum(const std::vector<std::string>& columns) const;
+  Dataframe avg(const std::vector<std::string>& columns) const;
+  Dataframe min(const std::vector<std::string>& columns) const;
+  Dataframe max(const std::vector<std::string>& columns) const;
 
  private:
-  DataFrame aggEach(
+  Dataframe aggEach(
       const std::string& function,
       const std::vector<std::string>& columns) const;
 
-  DataFrame df_;
+  Dataframe df_;
   std::vector<Column> keys_;
 };
 
 template <typename... T>
-GroupedData DataFrame::groupBy(const Column& first, const T&... rest) const {
+GroupedData Dataframe::groupBy(const Column& first, const T&... rest) const {
   return groupBy(std::vector<Column>{first, Column(rest)...});
 }
 

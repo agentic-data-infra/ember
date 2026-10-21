@@ -1,6 +1,6 @@
 cxx_test(
     name = "dataframe_test",
-    srcs = ["DataFrameTest.cpp"],
+    srcs = ["DataframeTest.cpp"],
     deps = [
         "//ember/api:api",
         "//ember/tests:test_main",

@@ -278,11 +278,11 @@ std::optional<Session> Session::active() {
   return Session(activeSession);
 }
 
-DataFrameReader Session::read() const {
-  return DataFrameReader(state_);
+DataframeReader Session::read() const {
+  return DataframeReader(state_);
 }
 
-DataFrame Session::createDataFrame(
+Dataframe Session::createDataframe(
     const velox::RowTypePtr& type,
     std::vector<std::vector<velox::Variant>> rows) const {
   std::vector<velox::Variant> values;
@@ -290,7 +290,7 @@ DataFrame Session::createDataFrame(
   for (auto& row : rows) {
     values.push_back(velox::Variant::row(std::move(row)));
   }
-  return DataFrame(
+  return Dataframe(
       state_,
       std::make_shared<const PlanStep>(PlanStep{
           nullptr,
@@ -300,9 +300,9 @@ DataFrame Session::createDataFrame(
           }}));
 }
 
-DataFrame Session::createDataFrame(
+Dataframe Session::createDataframe(
     const std::vector<velox::RowVectorPtr>& data) const {
-  return DataFrame(
+  return Dataframe(
       state_,
       std::make_shared<const PlanStep>(PlanStep{
           nullptr, [data](lp::PlanBuilder& builder, const auto& /*context*/) {

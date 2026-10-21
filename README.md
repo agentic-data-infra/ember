@@ -2,9 +2,9 @@
 Data processing for agents -- not humans!
 
 Ember is a C++ data processing framework designed for AI agents. It offers a
-Spark-like DataFrame API, uses [Axiom](https://github.com/facebookincubator/axiom)
+Spark-like Dataframe API, uses [Axiom](https://github.com/facebookincubator/axiom)
 for query compilation and [Velox](https://github.com/facebookincubator/velox) for
-query execution. DataFrame programs compile into multi-stage Velox plans that run
+query execution. Dataframe programs compile into multi-stage Velox plans that run
 on a driver and a set of workers.
 
 ## Building

@@ -1,5 +1,5 @@
-// Column: a DataFrame expression. Wraps an (untyped) Axiom
-// expression; types are resolved when the expression is added to a DataFrame.
+// Column: a Dataframe expression. Wraps an (untyped) Axiom
+// expression; types are resolved when the expression is added to a Dataframe.
 
 #pragma once
 

@@ -1,4 +1,4 @@
-#include "ember/DataFrame.h"
+#include "ember/Dataframe.h"
 
 #include <algorithm>
 #include <iostream>
@@ -104,7 +104,7 @@ std::string Row::toString() const {
   return result + "]";
 }
 
-DataFrame::DataFrame(
+Dataframe::Dataframe(
     std::shared_ptr<SessionState> session,
     std::shared_ptr<const PlanStep> step)
     : session_{std::move(session)}, step_{std::move(step)} {
@@ -113,7 +113,7 @@ DataFrame::DataFrame(
   schema_ = logicalPlan()->outputType();
 }
 
-lp::PlanBuilder DataFrame::builder(
+lp::PlanBuilder Dataframe::builder(
     const lp::PlanBuilder::Context& context) const {
   std::vector<const PlanStep*> steps;
   for (const auto* step = step_.get(); step != nullptr;
@@ -127,17 +127,17 @@ lp::PlanBuilder DataFrame::builder(
   return builder;
 }
 
-lp::LogicalPlanNodePtr DataFrame::logicalPlan() const {
+lp::LogicalPlanNodePtr Dataframe::logicalPlan() const {
   return builder(session_->planContext()).build();
 }
 
-DataFrame DataFrame::then(PlanStep::Apply apply) const {
-  return DataFrame(
+Dataframe Dataframe::then(PlanStep::Apply apply) const {
+  return Dataframe(
       session_,
       std::make_shared<const PlanStep>(PlanStep{step_, std::move(apply)}));
 }
 
-DataFrame DataFrame::select(const std::vector<Column>& columns) const {
+Dataframe Dataframe::select(const std::vector<Column>& columns) const {
   const auto numExplodes = std::count_if(
       columns.begin(), columns.end(), [](const auto& c) {
         return c.isExplode();
@@ -170,7 +170,7 @@ DataFrame DataFrame::select(const std::vector<Column>& columns) const {
   });
 }
 
-DataFrame DataFrame::selectExpr(const std::vector<std::string>& sqls) const {
+Dataframe Dataframe::selectExpr(const std::vector<std::string>& sqls) const {
   std::vector<Column> columns;
   columns.reserve(sqls.size());
   for (const auto& sql : sqls) {
@@ -179,17 +179,17 @@ DataFrame DataFrame::selectExpr(const std::vector<std::string>& sqls) const {
   return select(columns);
 }
 
-DataFrame DataFrame::filter(const Column& condition) const {
+Dataframe Dataframe::filter(const Column& condition) const {
   return then([predicate = condition.expr()](auto& builder, const auto&) {
     builder.filter(predicate);
   });
 }
 
-DataFrame DataFrame::filter(const std::string& condition) const {
+Dataframe Dataframe::filter(const std::string& condition) const {
   return filter(functions::expr(condition));
 }
 
-DataFrame DataFrame::withColumn(const std::string& name, const Column& column)
+Dataframe Dataframe::withColumn(const std::string& name, const Column& column)
     const {
   if (!schema_->containsChild(name)) {
     return then([expr = column.expr().as(name)](auto& builder, const auto&) {
@@ -206,7 +206,7 @@ DataFrame DataFrame::withColumn(const std::string& name, const Column& column)
   });
 }
 
-DataFrame DataFrame::withColumnRenamed(
+Dataframe Dataframe::withColumnRenamed(
     const std::string& existing,
     const std::string& name) const {
   std::vector<lp::ExprApi> projections;
@@ -219,7 +219,7 @@ DataFrame DataFrame::withColumnRenamed(
   });
 }
 
-DataFrame DataFrame::drop(const std::vector<std::string>& names) const {
+Dataframe Dataframe::drop(const std::vector<std::string>& names) const {
   std::vector<lp::ExprApi> projections;
   for (const auto& column : schema_->names()) {
     if (std::find(names.begin(), names.end(), column) == names.end()) {
@@ -231,15 +231,15 @@ DataFrame DataFrame::drop(const std::vector<std::string>& names) const {
   });
 }
 
-GroupedData DataFrame::groupBy(const std::vector<Column>& columns) const {
+GroupedData Dataframe::groupBy(const std::vector<Column>& columns) const {
   return GroupedData(*this, columns);
 }
 
-DataFrame DataFrame::agg(const std::vector<Column>& aggregates) const {
+Dataframe Dataframe::agg(const std::vector<Column>& aggregates) const {
   return GroupedData(*this, {}).agg(aggregates);
 }
 
-DataFrame DataFrame::orderBy(const std::vector<Column>& columns) const {
+Dataframe Dataframe::orderBy(const std::vector<Column>& columns) const {
   std::vector<lp::SortKey> keys;
   keys.reserve(columns.size());
   for (const auto& column : columns) {
@@ -249,35 +249,35 @@ DataFrame DataFrame::orderBy(const std::vector<Column>& columns) const {
   return then([keys](auto& builder, const auto&) { builder.sort(keys); });
 }
 
-DataFrame DataFrame::limit(int64_t n) const {
+Dataframe Dataframe::limit(int64_t n) const {
   return then([n](auto& builder, const auto&) { builder.limit(n); });
 }
 
-DataFrame DataFrame::distinct() const {
+Dataframe Dataframe::distinct() const {
   return then([](auto& builder, const auto&) { builder.distinct(); });
 }
 
-DataFrame DataFrame::unionAll(const DataFrame& other) const {
+Dataframe Dataframe::unionAll(const Dataframe& other) const {
   VELOX_USER_CHECK(
-      other.session_ == session_, "Cannot union DataFrames of two sessions");
+      other.session_ == session_, "Cannot union Dataframes of two sessions");
   return then([other](auto& builder, const auto& context) {
     builder.unionAll(other.builder(context));
   });
 }
 
-DataFrame DataFrame::join(
-    const DataFrame& right,
+Dataframe Dataframe::join(
+    const Dataframe& right,
     const std::vector<std::string>& usingColumns,
     const std::string& how) const {
   VELOX_USER_CHECK(
-      right.session_ == session_, "Cannot join DataFrames of two sessions");
+      right.session_ == session_, "Cannot join Dataframes of two sessions");
   return then([right, usingColumns, type = joinType(how)](
                   auto& builder, const auto& context) {
     builder.joinUsing(right.builder(context), usingColumns, type);
   });
 }
 
-std::vector<velox::RowVectorPtr> DataFrame::collectBatches() const {
+std::vector<velox::RowVectorPtr> Dataframe::collectBatches() const {
   auto batches = session_->execute(logicalPlan());
   // Name result columns as in schema().
   for (auto& batch : batches) {
@@ -291,7 +291,7 @@ std::vector<velox::RowVectorPtr> DataFrame::collectBatches() const {
   return batches;
 }
 
-std::vector<Row> DataFrame::collect() const {
+std::vector<Row> Dataframe::collect() const {
   std::vector<Row> rows;
   for (const auto& batch : collectBatches()) {
     for (velox::vector_size_t i = 0; i < batch->size(); ++i) {
@@ -306,13 +306,13 @@ std::vector<Row> DataFrame::collect() const {
   return rows;
 }
 
-int64_t DataFrame::count() const {
+int64_t Dataframe::count() const {
   auto rows = agg({functions::countAll().as("count")}).collect();
   VELOX_CHECK_EQ(rows.size(), 1);
   return rows[0].getLong(0);
 }
 
-std::string DataFrame::showString(int32_t numRows, bool truncate) const {
+std::string Dataframe::showString(int32_t numRows, bool truncate) const {
   constexpr size_t kTruncateWidth = 20;
   const auto numColumns = schema_->size();
 
@@ -371,19 +371,19 @@ std::string DataFrame::showString(int32_t numRows, bool truncate) const {
   return out.str();
 }
 
-void DataFrame::show(int32_t numRows, bool truncate) const {
+void Dataframe::show(int32_t numRows, bool truncate) const {
   std::cout << showString(numRows, truncate) << std::endl;
 }
 
-velox::RowTypePtr DataFrame::schema() const {
+velox::RowTypePtr Dataframe::schema() const {
   return schema_;
 }
 
-std::vector<std::string> DataFrame::columns() const {
+std::vector<std::string> Dataframe::columns() const {
   return schema_->names();
 }
 
-void DataFrame::printSchema() const {
+void Dataframe::printSchema() const {
   std::cout << "root\n";
   for (size_t i = 0; i < schema_->size(); ++i) {
     std::cout << " |-- " << schema_->nameOf(i) << ": "
@@ -392,33 +392,33 @@ void DataFrame::printSchema() const {
   std::cout << std::endl;
 }
 
-facebook::axiom::optimizer::MultiFragmentPlanPtr DataFrame::physicalPlan()
+facebook::axiom::optimizer::MultiFragmentPlanPtr Dataframe::physicalPlan()
     const {
   return session_->optimize(logicalPlan()).plan;
 }
 
-std::string DataFrame::explainString() const {
+std::string Dataframe::explainString() const {
   auto plan = logicalPlan();
   return "== Logical Plan ==\n" + lp::PlanPrinter::toText(*plan) +
       "\n== Physical Plan ==\n" + session_->optimize(plan).plan->toString(false);
 }
 
-void DataFrame::explain() const {
+void Dataframe::explain() const {
   std::cout << explainString() << std::endl;
 }
 
-DataFrame GroupedData::agg(const std::vector<Column>& aggregates) const {
+Dataframe GroupedData::agg(const std::vector<Column>& aggregates) const {
   return df_.then([keys = exprs(keys_), aggregates = exprs(aggregates)](
                       auto& builder, const auto&) {
     builder.aggregate(keys, aggregates);
   });
 }
 
-DataFrame GroupedData::count() const {
+Dataframe GroupedData::count() const {
   return agg({functions::countAll().as("count")});
 }
 
-DataFrame GroupedData::aggEach(
+Dataframe GroupedData::aggEach(
     const std::string& function,
     const std::vector<std::string>& columns) const {
   std::vector<Column> aggregates;
@@ -430,19 +430,19 @@ DataFrame GroupedData::aggEach(
   return agg(aggregates);
 }
 
-DataFrame GroupedData::sum(const std::vector<std::string>& columns) const {
+Dataframe GroupedData::sum(const std::vector<std::string>& columns) const {
   return aggEach("sum", columns);
 }
 
-DataFrame GroupedData::avg(const std::vector<std::string>& columns) const {
+Dataframe GroupedData::avg(const std::vector<std::string>& columns) const {
   return aggEach("avg", columns);
 }
 
-DataFrame GroupedData::min(const std::vector<std::string>& columns) const {
+Dataframe GroupedData::min(const std::vector<std::string>& columns) const {
   return aggEach("min", columns);
 }
 
-DataFrame GroupedData::max(const std::vector<std::string>& columns) const {
+Dataframe GroupedData::max(const std::vector<std::string>& columns) const {
   return aggEach("max", columns);
 }
 

@@ -1,8 +1,8 @@
-#include "ember/DataFrameReader.h"
+#include "ember/DataframeReader.h"
 
 #include <filesystem>
 
-#include "ember/DataFrame.h"
+#include "ember/Dataframe.h"
 #include "ember/Session.h"
 #include "ember/TextFileHandler.h"
 
@@ -26,11 +26,11 @@ std::string tablePath(const std::string& path) {
   return result;
 }
 
-DataFrame scan(
+Dataframe scan(
     const std::shared_ptr<SessionState>& session,
     const std::string& format,
     const std::string& path) {
-  return DataFrame(
+  return Dataframe(
       session,
       std::make_shared<const PlanStep>(PlanStep{
           nullptr,
@@ -43,15 +43,15 @@ DataFrame scan(
 
 } // namespace
 
-DataFrame DataFrameReader::text(const std::string& path) const {
+Dataframe DataframeReader::text(const std::string& path) const {
   return scan(session_, kTextSchema, path);
 }
 
-DataFrame DataFrameReader::parquet(const std::string& path) const {
+Dataframe DataframeReader::parquet(const std::string& path) const {
   return scan(session_, "parquet", path);
 }
 
-DataFrame DataFrameReader::load(const std::string& path) const {
+Dataframe DataframeReader::load(const std::string& path) const {
   return scan(session_, format_, path);
 }
 
