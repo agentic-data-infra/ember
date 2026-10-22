@@ -5,7 +5,7 @@
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <glog/logging.h>
 
-#include "ember/rpc/Messages.h"
+#include "ember/rpc/Clients.h"
 #include "ember/worker/Executor.h"
 #include "ember/worker/NetworkBlockTransport.h"
 #include "velox/common/base/Exceptions.h"
@@ -16,6 +16,32 @@ namespace {
 constexpr auto kRetryInterval = std::chrono::seconds(1);
 constexpr auto kCallTimeout = std::chrono::seconds(30);
 } // namespace
+
+class Worker::Handler : public rpc::WorkerHandler {
+ public:
+  explicit Handler(Worker* worker) : worker_{worker} {}
+
+  folly::SemiFuture<std::string> launchTask(std::string task) override {
+    return worker_->launchTask(std::move(task));
+  }
+
+  void removeShuffle(int32_t shuffleId) override {
+    worker_->removeShuffle(shuffleId);
+  }
+
+  void shutdown() override {
+    worker_->shutdown();
+  }
+
+  folly::SemiFuture<std::unique_ptr<folly::IOBuf>> fetchBlock(
+      const rpc::BlockId& block) override {
+    return worker_->fetchBlock(shuffle::BlockId{
+        block.shuffleId, block.mapId, block.reduceId});
+  }
+
+ private:
+  Worker* const worker_;
+};
 
 Worker::Worker(WorkerOptions options)
     : options_{std::move(options)},
@@ -46,40 +72,47 @@ std::string Worker::start() {
   shuffle::BlockTransport::setInstance(transport_);
   blockReaders_ = std::make_unique<folly::CPUThreadPoolExecutor>(4);
 
-  server_.setHandler(rpc::Method::kLaunchTask, [this](std::string task) {
-    return launchTask(std::move(task));
-  });
-  server_.setHandler(rpc::Method::kRemoveShuffle, [this](std::string payload) {
-    auto request = rpc::RemoveShuffle::deserialize(payload);
-    std::shared_ptr<Executor> executor;
-    {
-      std::lock_guard<std::mutex> l(mutex_);
-      executor = executor_;
-    }
-    if (executor != nullptr) {
-      executor->removeShuffle(request.shuffleId);
-    }
-    return rpc::respond("");
-  });
-  server_.setHandler(rpc::Method::kShutdown, [this](std::string /*payload*/) {
-    {
-      std::lock_guard<std::mutex> l(mutex_);
-      driverDone_ = true;
-    }
-    wakeup_.notify_all();
-    return rpc::respond("");
-  });
-  serveBlocks(
-      server_,
-      [this] { return shuffle::ShuffleBlockStore::find(address_); },
-      blockReaders_.get());
-
-  server_.start(options_.bindHost, options_.port);
+  server_.start(
+      std::make_shared<Handler>(this),
+      options_.bindHost,
+      options_.port);
   const auto host = options_.advertisedHost.empty() ? rpc::localHostName()
                                                     : options_.advertisedHost;
   address_ = rpc::HostAndPort{host, server_.port()}.toString();
   LOG(INFO) << "Worker serving at " << address_;
   return address_;
+}
+
+void Worker::removeShuffle(int32_t shuffleId) {
+  std::shared_ptr<Executor> executor;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    executor = executor_;
+  }
+  if (executor != nullptr) {
+    executor->removeShuffle(shuffleId);
+  }
+}
+
+void Worker::shutdown() {
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    driverDone_ = true;
+  }
+  wakeup_.notify_all();
+}
+
+folly::SemiFuture<std::unique_ptr<folly::IOBuf>> Worker::fetchBlock(
+    shuffle::BlockId id) {
+  return folly::via(
+             blockReaders_.get(),
+             [this, id]() -> std::unique_ptr<folly::IOBuf> {
+               auto store = shuffle::ShuffleBlockStore::find(address_);
+               VELOX_CHECK_NOT_NULL(
+                   store, "No executor serves shuffle blocks here");
+               return store->readBlock(id);
+             })
+      .semi();
 }
 
 void Worker::stop() {
@@ -108,10 +141,10 @@ void Worker::run() {
 
 bool Worker::serveDriver(std::chrono::milliseconds connectTimeout) {
   const auto deadline = std::chrono::steady_clock::now() + connectTimeout;
-  std::shared_ptr<rpc::RpcClient> driver;
+  std::shared_ptr<rpc::DriverClient> driver;
   while (driver == nullptr) {
     try {
-      driver = rpc::RpcClient::connect(options_.driver, std::chrono::seconds(5));
+      driver = rpc::DriverClient::connect(options_.driver, std::chrono::seconds(5));
     } catch (const std::exception& e) {
       if (connectTimeout.count() > 0 &&
           std::chrono::steady_clock::now() >= deadline) {
@@ -128,15 +161,14 @@ bool Worker::serveDriver(std::chrono::milliseconds connectTimeout) {
   }
 
   startExecutor();
-  rpc::RegisterWorkerReply reply;
+  rpc::RegisterWorkerResponse reply;
   try {
-    reply = rpc::RegisterWorkerReply::deserialize(
-        driver
-            ->call(
-                rpc::Method::kRegisterWorker,
-                rpc::RegisterWorker{address_, address_, options_.slots}
-                    .serialize())
-            .get(kCallTimeout));
+    reply = driver
+                ->registerWorker(rpc::RegisterWorkerRequest{
+                    .workerId = address_,
+                    .address = address_,
+                    .slots = options_.slots})
+                .get(kCallTimeout);
     LOG(INFO) << "Registered with driver " << options_.driver.toString()
               << " of " << reply.appName << ", " << options_.slots
               << " slots";
@@ -160,12 +192,7 @@ bool Worker::serveDriver(std::chrono::milliseconds connectTimeout) {
       }
     }
     try {
-      auto heartbeat = rpc::HeartbeatReply::deserialize(
-          driver
-              ->call(
-                  rpc::Method::kHeartbeat, rpc::Heartbeat{address_}.serialize())
-              .get(kCallTimeout));
-      if (!heartbeat.registered) {
+      if (!driver->heartbeat(address_).get(kCallTimeout)) {
         LOG(WARNING) << "Driver no longer knows this worker";
         break;
       }
@@ -212,8 +239,7 @@ void Worker::stopExecutor() {
   }
 }
 
-folly::SemiFuture<std::unique_ptr<folly::IOBuf>> Worker::launchTask(
-    std::string task) {
+folly::SemiFuture<std::string> Worker::launchTask(std::string task) {
   std::shared_ptr<Executor> executor;
   std::shared_ptr<folly::CPUThreadPoolExecutor> slots;
   {
@@ -225,7 +251,7 @@ folly::SemiFuture<std::unique_ptr<folly::IOBuf>> Worker::launchTask(
   return folly::via(
              slots.get(),
              [executor, task = std::move(task)] {
-               return folly::IOBuf::fromString(executor->runTask(task));
+               return executor->runTask(task);
              })
       .semi();
 }

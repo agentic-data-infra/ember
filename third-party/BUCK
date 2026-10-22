@@ -4,6 +4,7 @@
 
 load(
     "//third-party/generated:deps.bzl",
+    "FBTHRIFT_LINKER_FLAGS",
     "LINKER_FLAGS",
     "PREPROCESSOR_FLAGS",
     "TEST_LINKER_FLAGS",
@@ -24,6 +25,17 @@ prebuilt_cxx_library(
     name = "testing",
     header_only = True,
     exported_post_linker_flags = TEST_LINKER_FLAGS,
+    exported_deps = [":velox_axiom"],
+    visibility = ["PUBLIC"],
+)
+
+# fbthrift's C++ runtime: Ember's RPC (ember/rpc). The installed fbthrift is
+# the one Velox's setup scripts build with the same folly, so it shares
+# folly with Velox. Code generation: thrift_cpp_library in thrift.bzl.
+prebuilt_cxx_library(
+    name = "fbthrift",
+    header_only = True,
+    exported_post_linker_flags = FBTHRIFT_LINKER_FLAGS,
     exported_deps = [":velox_axiom"],
     visibility = ["PUBLIC"],
 )

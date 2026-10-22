@@ -1,77 +1,52 @@
-// The serving side: accepts connections and answers their requests with the
-// handler registered for each method.
-//
-// A handler gets the request payload and returns a future of the response
-// payload. It is called on the connection's reader thread, so a handler that
-// blocks or runs long (a task, a disk read) should move its work to an
-// executor and return the future. Responses go out as they complete, in any
-// order.
+// The serving side of Ember's RPC: a driver's or a worker's handler
+// (Handlers.h) on a port.
 
 #pragma once
 
-#include <atomic>
-#include <functional>
-#include <list>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <thread>
 
-#include <folly/futures/Future.h>
-#include <folly/io/IOBuf.h>
-
+#include "ember/rpc/Handlers.h"
 #include "ember/rpc/Rpc.h"
 
 namespace ember::rpc {
 
 class RpcServer {
  public:
-  using Handler = std::function<folly::SemiFuture<std::unique_ptr<folly::IOBuf>>(
-      std::string payload)>;
-
-  RpcServer() = default;
+  RpcServer();
   ~RpcServer();
 
   RpcServer(const RpcServer&) = delete;
   RpcServer& operator=(const RpcServer&) = delete;
 
-  /// Registers the handler of 'method'. Call before start().
-  void setHandler(Method method, Handler handler);
+  /// Starts serving 'handler' on 'host' (empty for all interfaces) and
+  /// 'port'; port 0 picks a free one. Throws RpcError if it cannot listen.
+  void start(
+      std::shared_ptr<DriverHandler> handler,
+      const std::string& host,
+      uint16_t port);
 
-  /// Starts serving on 'host' and 'port'; port 0 picks a free one. Throws
-  /// RpcError if it cannot listen.
-  void start(const std::string& host, uint16_t port);
+  /// start() for a worker.
+  void start(
+      std::shared_ptr<WorkerHandler> handler,
+      const std::string& host,
+      uint16_t port);
 
   /// The port served, once started.
   uint16_t port() const {
     return port_;
   }
 
-  /// Stops accepting and closes every connection. Responses still pending are
-  /// dropped.
+  /// Stops accepting and closes every connection. Calls still running are
+  /// not answered.
   void stop();
 
  private:
-  struct Connection;
+  // The running fbthrift server.
+  struct Impl;
 
-  void acceptLoop();
-  void serve(const std::shared_ptr<Connection>& connection);
-  void reapFinished();
-
-  std::map<Method, Handler> handlers_;
-  int listenFd_{-1};
+  std::unique_ptr<Impl> impl_;
   uint16_t port_{0};
-  std::atomic<bool> stopped_{false};
-  std::thread acceptor_;
-  std::mutex mutex_;
-  std::list<std::shared_ptr<Connection>> connections_;
 };
-
-/// A handler's response from bytes.
-inline folly::SemiFuture<std::unique_ptr<folly::IOBuf>> respond(
-    std::string payload) {
-  return folly::makeSemiFuture(folly::IOBuf::fromString(std::move(payload)));
-}
 
 } // namespace ember::rpc

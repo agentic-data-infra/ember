@@ -1,6 +1,5 @@
 #include "ember/worker/NetworkBlockTransport.h"
 
-#include "ember/rpc/Messages.h"
 #include "velox/common/base/Exceptions.h"
 
 namespace ember {
@@ -13,7 +12,7 @@ NetworkBlockTransport::fetchBlock(
     return shuffle::LocalBlockTransport().fetchBlock(location, id);
   }
   ++remoteFetches_;
-  std::shared_ptr<rpc::RpcClient> connection;
+  std::shared_ptr<rpc::ShuffleBlockClient> connection;
   try {
     connection = client(location);
   } catch (...) {
@@ -21,49 +20,24 @@ NetworkBlockTransport::fetchBlock(
         folly::exception_wrapper(std::current_exception()));
   }
   return connection
-      ->call(
-          rpc::Method::kFetchBlock,
-          rpc::FetchBlock{id.shuffleId, id.mapId, id.reduceId}.serialize())
+      ->fetchBlock(rpc::BlockId{
+          .shuffleId = id.shuffleId, .mapId = id.mapId, .reduceId = id.reduceId})
       .within(
           fetchTimeout_,
           std::runtime_error(fmt::format(
               "No reply from {} within {} ms",
               location,
-              fetchTimeout_.count())))
-      .deferValue([](std::string bytes) {
-        return folly::IOBuf::fromString(std::move(bytes));
-      });
+              fetchTimeout_.count())));
 }
 
-std::shared_ptr<rpc::RpcClient> NetworkBlockTransport::client(
+std::shared_ptr<rpc::ShuffleBlockClient> NetworkBlockTransport::client(
     const std::string& location) {
   std::lock_guard<std::mutex> l(mutex_);
   auto& client = clients_[location];
   if (client == nullptr || !client->isOpen()) {
-    client = rpc::RpcClient::connect(rpc::HostAndPort::parse(location));
+    client = rpc::ShuffleBlockClient::connect(rpc::HostAndPort::parse(location));
   }
   return client;
-}
-
-void serveBlocks(
-    rpc::RpcServer& server,
-    std::function<std::shared_ptr<shuffle::ShuffleBlockStore>()> getStore,
-    folly::Executor* executor) {
-  server.setHandler(
-      rpc::Method::kFetchBlock,
-      [getStore = std::move(getStore), executor](std::string payload) {
-        auto request = rpc::FetchBlock::deserialize(payload);
-        return folly::via(
-                   executor,
-                   [getStore, request]() -> std::unique_ptr<folly::IOBuf> {
-                     auto store = getStore();
-                     VELOX_CHECK_NOT_NULL(
-                         store, "No executor serves shuffle blocks here");
-                     return store->readBlock(shuffle::BlockId{
-                         request.shuffleId, request.mapId, request.reduceId});
-                   })
-            .semi();
-      });
 }
 
 } // namespace ember

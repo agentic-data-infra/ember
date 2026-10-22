@@ -4,7 +4,6 @@
 #include <folly/futures/Future.h>
 #include <glog/logging.h>
 
-#include "ember/rpc/Messages.h"
 #include "ember/worker/TaskDescription.h"
 #include "velox/common/base/Exceptions.h"
 
@@ -16,17 +15,29 @@ constexpr auto kRemoveShuffleTimeout = std::chrono::seconds(30);
 constexpr auto kMonitorInterval = std::chrono::milliseconds(500);
 } // namespace
 
+class ClusterBackend::Handler : public rpc::DriverHandler {
+ public:
+  explicit Handler(ClusterBackend* backend) : backend_{backend} {}
+
+  rpc::RegisterWorkerResponse registerWorker(
+      const rpc::RegisterWorkerRequest& request) override {
+    return backend_->registerWorker(request);
+  }
+
+  bool heartbeat(const std::string& workerId) override {
+    return backend_->heartbeat(workerId);
+  }
+
+ private:
+  ClusterBackend* const backend_;
+};
+
 ClusterBackend::ClusterBackend(ClusterBackendOptions options)
     : options_{std::move(options)},
       callbacks_{std::make_unique<folly::CPUThreadPoolExecutor>(4)},
       noWorkersSince_{std::chrono::steady_clock::now()} {
-  server_.setHandler(rpc::Method::kRegisterWorker, [this](std::string payload) {
-    return rpc::respond(registerWorker(payload));
-  });
-  server_.setHandler(rpc::Method::kHeartbeat, [this](std::string payload) {
-    return rpc::respond(heartbeat(payload));
-  });
-  server_.start(options_.bindHost, options_.port);
+  server_.start(
+      std::make_shared<Handler>(this), options_.bindHost, options_.port);
   monitor_ = std::thread([this] { monitor(); });
   LOG(INFO) << "Driver of " << options_.appName << " listening on port "
             << server_.port();
@@ -36,11 +47,13 @@ ClusterBackend::~ClusterBackend() {
   stop();
 }
 
-std::string ClusterBackend::registerWorker(const std::string& payload) {
-  auto request = rpc::RegisterWorker::deserialize(payload);
-  VELOX_CHECK_GT(request.slots, 0, "Worker {} offers no slots", request.address);
+rpc::RegisterWorkerResponse ClusterBackend::registerWorker(
+    const rpc::RegisterWorkerRequest& request) {
+  VELOX_CHECK_GT(
+      request.slots, 0, "Worker {} offers no slots", request.address);
   // Tasks go to the worker over a connection of their own.
-  auto client = rpc::RpcClient::connect(rpc::HostAndPort::parse(request.address));
+  auto client =
+      rpc::WorkerClient::connect(rpc::HostAndPort::parse(request.address));
   auto worker = std::make_shared<WorkerInfo>();
   worker->id = request.workerId;
   worker->address = request.address;
@@ -65,20 +78,19 @@ std::string ClusterBackend::registerWorker(const std::string& payload) {
             << worker->slots << " slots";
   changed_.notify_all();
   dispatch();
-  return rpc::RegisterWorkerReply{
-      options_.appName, options_.heartbeatInterval.count()}
-      .serialize();
+  return rpc::RegisterWorkerResponse{
+      .appName = options_.appName,
+      .heartbeatIntervalMs = options_.heartbeatInterval.count()};
 }
 
-std::string ClusterBackend::heartbeat(const std::string& payload) {
-  auto request = rpc::Heartbeat::deserialize(payload);
+bool ClusterBackend::heartbeat(const std::string& workerId) {
   std::lock_guard<std::mutex> l(mutex_);
-  auto it = workers_.find(request.workerId);
+  auto it = workers_.find(workerId);
   if (it == workers_.end()) {
-    return rpc::HeartbeatReply{false}.serialize();
+    return false;
   }
   it->second->lastHeartbeat = std::chrono::steady_clock::now();
-  return rpc::HeartbeatReply{true}.serialize();
+  return true;
 }
 
 void ClusterBackend::waitForWorkers(
@@ -154,8 +166,8 @@ void ClusterBackend::dispatch() {
     }
   }
   for (auto& [worker, task] : launches) {
-    auto bytes = task.task;
-    worker->client->call(rpc::Method::kLaunchTask, std::move(bytes))
+    auto result = worker->client->launchTask(task.task);
+    std::move(result)
         .via(callbacks_.get())
         .thenTry([this, worker, task = std::move(task)](
                      folly::Try<std::string> result) mutable {
@@ -256,17 +268,16 @@ void ClusterBackend::setExecutorListener(ExecutorListener listener) {
 }
 
 void ClusterBackend::removeShuffle(int32_t shuffleId) {
-  std::vector<std::shared_ptr<rpc::RpcClient>> clients;
+  std::vector<std::shared_ptr<rpc::WorkerClient>> clients;
   {
     std::lock_guard<std::mutex> l(mutex_);
     for (const auto& [id, worker] : workers_) {
       clients.push_back(worker->client);
     }
   }
-  std::vector<folly::SemiFuture<std::string>> calls;
-  const auto request = rpc::RemoveShuffle{shuffleId}.serialize();
+  std::vector<folly::SemiFuture<folly::Unit>> calls;
   for (const auto& client : clients) {
-    calls.push_back(client->call(rpc::Method::kRemoveShuffle, request));
+    calls.push_back(client->removeShuffle(shuffleId));
   }
   for (auto& call : calls) {
     auto result = std::move(call).getTry(kRemoveShuffleTimeout);
@@ -292,9 +303,9 @@ void ClusterBackend::stop() {
   changed_.notify_all();
   monitor_.join();
 
-  std::vector<folly::SemiFuture<std::string>> calls;
+  std::vector<folly::SemiFuture<folly::Unit>> calls;
   for (const auto& [id, worker] : workers) {
-    calls.push_back(worker->client->call(rpc::Method::kShutdown, ""));
+    calls.push_back(worker->client->shutdown());
   }
   for (auto& call : calls) {
     std::move(call).getTry(kShutdownTimeout);

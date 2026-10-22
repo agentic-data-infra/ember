@@ -13,7 +13,9 @@ Ember builds with [Buck2](https://buck2.build). Velox and Axiom build with CMake
 and are wrapped as prebuilt libraries.
 
 Prerequisites: GCC 11+, Velox's system dependencies (`velox/scripts/setup-ubuntu.sh`),
-ninja, ccache, and buck2 on `PATH`.
+ninja, ccache, and buck2 on `PATH`. Ember's RPC uses the fbthrift (and its
+`thrift1` compiler) that Velox's setup script installs, built with the same
+folly as Velox.
 
 ```
 # Build Axiom + Velox (uses ~/source/axiom and ~/source/velox by default) and

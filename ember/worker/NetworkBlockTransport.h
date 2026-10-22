@@ -1,4 +1,5 @@
-// Fetches shuffle blocks from other workers over RPC (kFetchBlock).
+// Fetches shuffle blocks from other workers over RPC
+// (rpc::ShuffleBlockClient).
 //
 // A block's location is the "host:port" of the worker that wrote it. Blocks
 // held by an executor in this process are read from its store directly,
@@ -14,8 +15,7 @@
 #include <memory>
 #include <mutex>
 
-#include "ember/rpc/RpcClient.h"
-#include "ember/rpc/RpcServer.h"
+#include "ember/rpc/Clients.h"
 #include "ember/shuffle/FileShuffle.h"
 
 namespace ember {
@@ -37,20 +37,13 @@ class NetworkBlockTransport : public shuffle::BlockTransport {
   }
 
  private:
-  std::shared_ptr<rpc::RpcClient> client(const std::string& location);
+  std::shared_ptr<rpc::ShuffleBlockClient> client(const std::string& location);
 
   const bool fetchLocalBlocks_;
   const std::chrono::milliseconds fetchTimeout_;
   std::mutex mutex_;
-  std::map<std::string, std::shared_ptr<rpc::RpcClient>> clients_;
+  std::map<std::string, std::shared_ptr<rpc::ShuffleBlockClient>> clients_;
   std::atomic<int64_t> remoteFetches_{0};
 };
-
-/// Serves kFetchBlock on 'server' from the store 'getStore' returns at the
-/// time of the request, reading blocks on 'executor'.
-void serveBlocks(
-    rpc::RpcServer& server,
-    std::function<std::shared_ptr<shuffle::ShuffleBlockStore>()> getStore,
-    folly::Executor* executor);
 
 } // namespace ember
