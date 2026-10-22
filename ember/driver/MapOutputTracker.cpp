@@ -71,6 +71,15 @@ void MapOutputTracker::markLocationAvailable(const std::string& location) {
   lostLocations_.erase(location);
 }
 
+std::optional<int32_t> MapOutputTracker::numMaps(int32_t shuffleId) const {
+  std::lock_guard<std::mutex> l(mutex_);
+  auto it = outputs_.find(shuffleId);
+  if (it == outputs_.end()) {
+    return std::nullopt;
+  }
+  return static_cast<int32_t>(it->second.size());
+}
+
 bool MapOutputTracker::isComplete(int32_t shuffleId) const {
   std::lock_guard<std::mutex> l(mutex_);
   for (const auto& status : outputs_.at(shuffleId)) {

@@ -459,7 +459,7 @@ TEST_F(SchedulerTest, recomputesShuffleOutputsThatCannotBeFetched) {
         attempts.push_back(info);
         if (!mapStage.has_value()) {
           mapStage = info.stageId;
-          backend.removeShuffle(info.stageId);
+          backend.removeShuffle(*info.shuffleId);
         }
       });
   EXPECT_EQ(toStrings(dag->runJob(*df.physicalPlan(), pool_.get())), expected);
@@ -522,7 +522,7 @@ TEST_F(SchedulerTest, failsAfterMaxStageAttempts) {
           mapStage = info.stageId;
         }
         if (info.stageId == *mapStage) {
-          backend.removeShuffle(info.stageId);
+          backend.removeShuffle(*info.shuffleId);
         }
       });
   VELOX_ASSERT_THROW(
@@ -546,11 +546,104 @@ TEST_F(SchedulerTest, userErrorsAreNotRetried) {
 
 TEST_F(SchedulerTest, shuffleFilesAreRemovedAfterTheJob) {
   auto path = writeCorpus(2, 100);
-  auto [dag, backend] = scheduler();
+  auto [dag, backend] = scheduler({{DagScheduler::kReuseOutputs, "false"}});
   dag->runJob(*wordCount(path).physicalPlan(), pool_.get());
   for (const auto& entry : fs::recursive_directory_iterator(dir_ / "local")) {
     EXPECT_FALSE(entry.is_regular_file()) << entry.path();
   }
+}
+
+TEST_F(SchedulerTest, storedOutputsAreKeptAfterTheJob) {
+  auto path = writeCorpus(2, 100);
+  auto [dag, backend] = scheduler();
+  dag->runJob(*wordCount(path).physicalPlan(), pool_.get());
+  int32_t files = 0;
+  for (const auto& entry : fs::recursive_directory_iterator(dir_ / "local")) {
+    files += entry.is_regular_file();
+  }
+  EXPECT_GT(files, 0);
+}
+
+// The second run of a job reads the stored output of its last map stage; the
+// stages before it do not run.
+TEST_F(SchedulerTest, reusesStoredOutputs) {
+  auto path = writeCorpus(2, 200);
+  auto df = wordCount(path);
+  auto expected = toStrings(df.collectBatches());
+
+  std::vector<StageAttemptInfo> attempts;
+  auto [dag, backend] = scheduler(
+      {}, nullptr, [&](const StageAttemptInfo& info, FlakyBackend&) {
+        attempts.push_back(info);
+      });
+  const auto plan = df.physicalPlan();
+  EXPECT_EQ(toStrings(dag->runJob(*plan, pool_.get())), expected);
+  const auto launches = backend->totalLaunches();
+  const auto firstAttempts = attempts.size();
+
+  const auto stages = dag->stagePlan(*plan);
+  ASSERT_EQ(stages.stages.size(), 3);
+  auto explain = dag->explain(*plan);
+  EXPECT_NE(explain.find(", not needed]"), std::string::npos) << explain;
+  EXPECT_NE(explain.find(", reused]"), std::string::npos) << explain;
+
+  EXPECT_EQ(toStrings(dag->runJob(*plan, pool_.get())), expected);
+  EXPECT_EQ(backend->totalLaunches(), launches + 1);
+  // Both map stages are reported reused, then the result stage runs.
+  ASSERT_EQ(attempts.size(), firstAttempts + 3);
+  EXPECT_TRUE(attempts[firstAttempts].reused);
+  EXPECT_TRUE(attempts[firstAttempts + 1].reused);
+  EXPECT_EQ(attempts[firstAttempts + 1].stageKey, stages.stages[1].key);
+  EXPECT_FALSE(attempts[firstAttempts + 2].reused);
+
+  // Without reuse, everything runs again.
+  auto [fresh, freshBackend] =
+      scheduler({{DagScheduler::kReuseOutputs, "false"}});
+  fresh->runJob(*plan, pool_.get());
+  fresh->runJob(*plan, pool_.get());
+  EXPECT_EQ(freshBackend->totalLaunches(), 2 * launches);
+}
+
+// Stored outputs lost with their executor are recomputed.
+TEST_F(SchedulerTest, recomputesLostStoredOutputs) {
+  auto path = writeCorpus(2, 200);
+  auto df = wordCount(path);
+  auto expected = toStrings(df.collectBatches());
+
+  std::string location;
+  auto [dag, backend] = scheduler(
+      {}, nullptr, [&](const StageAttemptInfo& info, FlakyBackend&) {
+        if (!info.outputLocations.empty()) {
+          location = info.outputLocations.begin()->second;
+        }
+      });
+  const auto plan = df.physicalPlan();
+  EXPECT_EQ(toStrings(dag->runJob(*plan, pool_.get())), expected);
+  const auto launches = backend->totalLaunches();
+  ASSERT_FALSE(location.empty());
+
+  backend->restartExecutor(location);
+  EXPECT_EQ(toStrings(dag->runJob(*plan, pool_.get())), expected);
+  EXPECT_EQ(backend->totalLaunches(), 2 * launches);
+
+  // Stored again: the next run reuses them.
+  EXPECT_EQ(toStrings(dag->runJob(*plan, pool_.get())), expected);
+  EXPECT_EQ(backend->totalLaunches(), 2 * launches + 1);
+}
+
+// Query config that can change results is part of the key; Ember's own config
+// is not.
+TEST_F(SchedulerTest, keysCoverQueryConfig) {
+  auto path = writeCorpus(1, 10);
+  const auto plan = wordCount(path).physicalPlan();
+  auto keyWith = [&](std::map<std::string, std::string> config) {
+    auto [dag, backend] = scheduler(std::move(config));
+    return dag->stagePlan(*plan).resultStage().key;
+  };
+  const auto base = keyWith({});
+  ASSERT_TRUE(base.has_value());
+  EXPECT_NE(keyWith({{"session_timezone", "Asia/Tokyo"}}), base);
+  EXPECT_EQ(keyWith({{DagScheduler::kReuseOutputs, "true"}}), base);
 }
 
 } // namespace

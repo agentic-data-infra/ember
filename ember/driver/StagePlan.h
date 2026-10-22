@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -37,8 +38,9 @@ struct Stage {
   /// Stages whose shuffle output this stage reads.
   std::vector<int32_t> parents;
 
-  /// Shuffle this stage writes (map stages only). Shuffle ids are the ids of
-  /// the stages writing them.
+  /// Shuffle this stage writes (map stages only). Shuffle ids start as the
+  /// ids of the stages writing them; the scheduler renumbers them to be
+  /// unique in its session (StagePlan::renumberShuffles).
   std::optional<int32_t> shuffleId;
 
   /// Scans of the original fragment, which the driver enumerates splits for.
@@ -71,13 +73,24 @@ struct StagePlan {
     return stages.back();
   }
 
-  /// One line per stage plus its plan, as explain() shows it.
-  std::string toString() const;
+  /// One line per stage plus its plan, as explain() shows it. 'note' adds to
+  /// a keyed stage's key, e.g. that it reuses stored output.
+  std::string toString(
+      const std::function<std::string(const Stage&)>& note = nullptr) const;
+
+  /// Changes shuffle ids, in the stages' fields and their task binaries, per
+  /// 'newIds' (old id to new id; ids not in it stay).
+  void renumberShuffles(
+      const std::map<int32_t, int32_t>& newIds,
+      facebook::velox::memory::MemoryPool* pool);
 };
 
 /// Cuts 'plan' into stages. 'pool' holds constants of the deserialized plans.
+/// 'keyConfig' is the query config that can change results; it goes into the
+/// stage keys.
 StagePlan planStages(
     const facebook::axiom::optimizer::MultiFragmentPlan& plan,
-    facebook::velox::memory::MemoryPool* pool);
+    facebook::velox::memory::MemoryPool* pool,
+    const std::map<std::string, std::string>& keyConfig = {});
 
 } // namespace ember::driver

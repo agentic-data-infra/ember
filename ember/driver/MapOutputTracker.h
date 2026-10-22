@@ -30,6 +30,9 @@ class MapOutputTracker {
       int32_t mapId,
       shuffle::MapStatus status);
 
+  /// Map tasks of 'shuffleId', or std::nullopt if it is not registered.
+  std::optional<int32_t> numMaps(int32_t shuffleId) const;
+
   /// True once every map task of 'shuffleId' has an output.
   bool isComplete(int32_t shuffleId) const;
 

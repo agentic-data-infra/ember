@@ -4,9 +4,9 @@ Turns an optimized plan into stages and runs them.
 
 | File | Contents |
 |------|----------|
-| `StagePlan` | Cuts an Axiom `MultiFragmentPlan` into stages in dependency order. Rewrites each fragment's plan JSON: a producer's `PartitionedOutput` becomes a `ShuffleWrite`, an `Exchange`/`MergeExchange` becomes a `ShuffleRead`, and file scans use serializable handles. The shuffle id is the producing stage's id. |
-| `StageKey` | Gives each stage a content key: a Merkle hash over its rewritten plan (node kind, parameters without node and shuffle ids, column names renamed by first use, code version, child keys). Scans add their files' path, size and mtime; a `ShuffleRead` adds the key of the stage it reads, so a key covers all of a stage's upstream. Calls to nondeterministic functions (`rand`, `uuid`, `now`, ...) and non-local inputs leave the node, and everything downstream, without a key. The code version is the driver executable's identity, so a rebuild changes every key. `explain()` and `onStageCompleted` show the keys. |
-| `DagScheduler` | Runs a job: for each stage, enumerates splits (text files cut into byte ranges, `ember.files.max_split_bytes`), adds shuffle block URLs from the tracker, builds one `TaskDescription` per task and runs the set. Recomputes lost shuffle outputs (below). Collects the result stage's rows; removes the job's shuffle files at the end. `onStageCompleted` sees every stage attempt. |
+| `StagePlan` | Cuts an Axiom `MultiFragmentPlan` into stages in dependency order. Rewrites each fragment's plan JSON: a producer's `PartitionedOutput` becomes a `ShuffleWrite`, an `Exchange`/`MergeExchange` becomes a `ShuffleRead`, and file scans use serializable handles. Shuffle ids start as the producing stage's id; the scheduler renumbers them to be unique in its session. |
+| `StageKey` | Gives each stage a content key: a Merkle hash over its rewritten plan (node kind, parameters without node and shuffle ids, column names renamed by first use, code version, child keys). Scans add their files' path, size and mtime; a `ShuffleRead` adds the key of the stage it reads, so a key covers all of a stage's upstream. Calls to nondeterministic functions (`rand`, `uuid`, `now`, ...) and non-local inputs leave the node, and everything downstream, without a key. The code version is the driver executable's identity, so a rebuild changes every key. Query config that is not Ember's own (e.g. `session_timezone`), and `ember.files.max_split_bytes`, goes into every key. `explain()` and `onStageCompleted` show the keys. |
+| `DagScheduler` | Runs a job: for each stage, enumerates splits (text files cut into byte ranges, `ember.files.max_split_bytes`), adds shuffle block URLs from the tracker, builds one `TaskDescription` per task and runs the set. Recomputes lost shuffle outputs (below). Collects the result stage's rows. At the end it keeps the outputs of keyed map stages for reuse (below) and removes the rest. `onStageCompleted` sees every stage attempt. |
 | `TaskScheduler` | Launches a stage's tasks on the backend and waits. Retries a failed task up to `maxTaskAttempts` (4) times; errors from the user's program fail at once. A task that cannot fetch its input is not retried: the task set returns its fetch failure. |
 | `MapOutputTracker` | Records each map task's `MapStatus` (location, bytes per partition) and gives reduce task `p` the URLs of its non-empty blocks. Forgets outputs whose executor is lost or could not be fetched from. |
 | `SchedulerBackend` | Where tasks run: `launchTask(bytes, callback)`, `totalSlots`, `removeShuffle`, and an executor listener told when executors join or are lost. |
@@ -35,3 +35,20 @@ tasks of each input whose outputs are missing, recursively for their own
 inputs. Then the stage runs a new attempt for only the partitions it still
 lacks. A stage that ends `maxStageAttempts` (4) attempts with partitions
 missing fails the job.
+
+## Reusing stage outputs
+
+The scheduler keeps the shuffle output of each map stage that has a key
+(StageKey) after its job, in a memo by key, for the life of the session. When
+a later job has a stage with the same key and the same number of tasks, that
+stage takes the stored shuffle's id instead of a new one and does not run:
+its consumers read the stored blocks, and stages only it reads do not run
+either. There is no check beyond the key; a key collision is not handled.
+
+Stored shuffles stay registered with the `MapOutputTracker`, so outputs lost
+with an executor, or that cannot be fetched, are forgotten as for any
+shuffle, and the job reruns just those map tasks (and, recursively, what they
+read) before using the rest. `explain()` marks stages `reused` or `not
+needed`; `onStageCompleted` reports a reused stage once with `reused` set.
+`ember.reuse.outputs=false` turns it off. Stored files go away with the
+executors when the session stops.
