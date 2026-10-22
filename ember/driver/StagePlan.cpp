@@ -87,7 +87,8 @@ void visit(
 
 StagePlan planStages(
     const optimizer::MultiFragmentPlan& plan,
-    velox::memory::MemoryPool* pool) {
+    velox::memory::MemoryPool* pool,
+    const std::map<std::string, std::string>& keyConfig) {
   const auto& fragments = plan.fragments();
   VELOX_CHECK(!fragments.empty());
 
@@ -181,16 +182,18 @@ StagePlan planStages(
       result.resultStage().numTasks.value_or(0),
       1,
       "The result stage must run one task");
-  computeStageKeys(result);
+  computeStageKeys(result, keyConfig);
   return result;
 }
 
-std::string StagePlan::toString() const {
+std::string StagePlan::toString(
+    const std::function<std::string(const Stage&)>& note) const {
   std::stringstream out;
   for (const auto& stage : stages) {
     out << "Stage " << stage.stageId;
     if (stage.key.has_value()) {
-      out << " [key " << shortKey(*stage.key) << "]: ";
+      out << " [key " << shortKey(*stage.key)
+          << (note != nullptr ? note(stage) : "") << "]: ";
     } else {
       out << " [no key: " << stage.noKeyReason << "]: ";
     }
@@ -208,6 +211,47 @@ std::string StagePlan::toString() const {
     out << std::endl << stage.plan->toString(true, true) << std::endl;
   }
   return out.str();
+}
+
+namespace {
+
+void renumberNode(
+    folly::dynamic& node,
+    const std::map<int32_t, int32_t>& newIds) {
+  const auto& name = node["name"].getString();
+  if (name == "ShuffleReadNode" || name == "ShuffleWriteNode") {
+    if (auto it = newIds.find(node["shuffleId"].asInt()); it != newIds.end()) {
+      node["shuffleId"] = it->second;
+    }
+  }
+  if (auto* sources = node.get_ptr("sources")) {
+    for (auto& source : *sources) {
+      renumberNode(source, newIds);
+    }
+  }
+}
+
+} // namespace
+
+void StagePlan::renumberShuffles(
+    const std::map<int32_t, int32_t>& newIds,
+    velox::memory::MemoryPool* pool) {
+  auto renumber = [&](int32_t& id) {
+    if (auto it = newIds.find(id); it != newIds.end()) {
+      id = it->second;
+    }
+  };
+  for (auto& stage : stages) {
+    if (stage.shuffleId.has_value()) {
+      renumber(*stage.shuffleId);
+    }
+    for (auto& input : stage.shuffleInputs) {
+      renumber(input.shuffleId);
+    }
+    renumberNode(stage.fragment, newIds);
+    stage.plan =
+        velox::ISerializable::deserialize<core::PlanNode>(stage.fragment, pool);
+  }
 }
 
 } // namespace ember::driver

@@ -25,7 +25,8 @@ after a hash shuffle on `word`, then a merge to the driver.
 Session config: `ember.local.dir` (shuffle files, default `<tmp>/ember`),
 `ember.files.max_split_bytes` (largest text byte range per task),
 `ember.shuffle.spill_threshold_bytes` (buffered shuffle bytes per map task
-before a spill).
+before a spill), `ember.reuse.outputs` (keep shuffle outputs for later jobs
+with the same stages, default true).
 
 Known gaps: aggregates use Presto semantics (the `sparksql` ones are registered
 with the `ember_` prefix but not yet mapped); parquet files are one split per

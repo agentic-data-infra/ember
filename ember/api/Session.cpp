@@ -248,7 +248,7 @@ std::vector<velox::RowVectorPtr> SessionState::execute(
 std::string SessionState::explainStages(
     const optimizer::MultiFragmentPlanPtr& plan) {
   VELOX_USER_CHECK_NOT_NULL(scheduler_, "Session {} is stopped", appName_);
-  return scheduler_->stagePlan(*plan).toString();
+  return scheduler_->explain(*plan);
 }
 
 void SessionState::stop() {

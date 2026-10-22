@@ -6,12 +6,19 @@
 // managers and cuts text files into byte ranges. Map stages register their
 // outputs with the MapOutputTracker, which gives each reduce task its blocks.
 // The result stage's rows come back with its task result.
+//
+// Exact reuse: a map stage with a key keeps its shuffle output after the job,
+// in a memo by key. A later job's stage with the same key reads the stored
+// output instead of running; stages only it reads do not run either. Stored
+// outputs lost with their executor are recomputed as in any job.
 
 #pragma once
 
 #include <atomic>
 #include <functional>
 #include <map>
+#include <mutex>
+#include <optional>
 #include <string>
 
 #include "axiom/optimizer/MultiFragmentPlan.h"
@@ -28,6 +35,11 @@ struct StageAttemptInfo {
   int32_t attempt{0};
   /// The stage's content key, if it has one (StageKey.h).
   std::optional<std::string> stageKey;
+  /// The shuffle it writes, for a map stage.
+  std::optional<int32_t> shuffleId;
+  /// The stage read stored outputs of an earlier job instead of running; then
+  /// 'partitions' is empty.
+  bool reused{false};
   /// Partitions (map ids, for a map stage) the attempt ran.
   std::vector<int32_t> partitions;
   /// Where each map output the attempt committed lives, by map id.
@@ -57,6 +69,9 @@ class DagScheduler {
   /// default, a file scan's bytes spread over 'parallelism' tasks, with
   /// ranges between 4MB and 128MB.
   static constexpr const char* kMaxSplitBytes = "ember.files.max_split_bytes";
+  /// Config key: keep keyed shuffle outputs for later jobs to reuse (default
+  /// true).
+  static constexpr const char* kReuseOutputs = "ember.reuse.outputs";
 
   DagScheduler(
       std::shared_ptr<SchedulerBackend> backend,
@@ -70,6 +85,9 @@ class DagScheduler {
 
   /// The stages 'plan' runs as.
   StagePlan stagePlan(const facebook::axiom::optimizer::MultiFragmentPlan& plan);
+
+  /// The stages 'plan' runs as, marking those that would reuse stored output.
+  std::string explain(const facebook::axiom::optimizer::MultiFragmentPlan& plan);
 
   SchedulerBackend& backend() {
     return taskScheduler_.backend();
@@ -88,12 +106,25 @@ class DagScheduler {
       const Stage& stage,
       JobContext& job);
 
+  // The shuffle that holds the stored output of 'stage', if it can be reused:
+  // one stored under its key with as many map outputs as it has tasks.
+  std::optional<int32_t> storedShuffle(const Stage& stage, int32_t numTasks);
+
   const DagSchedulerOptions options_;
+  const bool reuseOutputs_;
+  // Config that goes into stage keys: what is not Ember's own, and splits.
+  std::map<std::string, std::string> keyConfig_;
   TaskScheduler taskScheduler_;
   MapOutputTracker mapOutputTracker_;
   std::shared_ptr<facebook::velox::memory::MemoryPool> rootPool_;
   std::shared_ptr<facebook::velox::memory::MemoryPool> planPool_;
   std::atomic<int64_t> jobCounter_{0};
+  std::atomic<int32_t> shuffleCounter_{0};
+
+  // Stored shuffle outputs by stage key. They stay registered with the
+  // tracker, so losses are tracked as for any shuffle.
+  std::mutex memoMutex_;
+  std::map<std::string, int32_t> memo_;
 };
 
 } // namespace ember::driver

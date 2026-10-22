@@ -14,6 +14,8 @@
 //
 // The code version is the identity of the driver's executable, which links
 // Velox, Axiom and the program's functions: any rebuild changes every key.
+// Query config that can change results (e.g. the session time zone) goes into
+// every key too.
 //
 // A node that calls a nondeterministic function (rand, uuid, now, ...) has no
 // key, nor does anything that reads it; nor does a scan of files that are not
@@ -26,7 +28,10 @@
 namespace ember::driver {
 
 /// Sets the keys of the stages of 'plan', which are in dependency order.
-void computeStageKeys(StagePlan& plan);
+/// 'config' is the query config that can change results.
+void computeStageKeys(
+    StagePlan& plan,
+    const std::map<std::string, std::string>& config = {});
 
 /// Short form of a key, as explain() shows it.
 std::string shortKey(const std::string& key);

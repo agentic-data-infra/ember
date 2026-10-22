@@ -124,8 +124,11 @@ void collectNames(const folly::dynamic& json, std::set<std::string>& names) {
 
 class StageHasher {
  public:
-  StageHasher(Stage& stage, const std::map<int32_t, const Stage*>& byShuffle)
-      : stage_{stage}, byShuffle_{byShuffle} {
+  StageHasher(
+      Stage& stage,
+      const std::map<int32_t, const Stage*>& byShuffle,
+      const std::string& environment)
+      : stage_{stage}, byShuffle_{byShuffle}, environment_{environment} {
     collectNames(stage.fragment, names_);
   }
 
@@ -152,7 +155,7 @@ class StageHasher {
         "{}\n{}\n{}\n",
         node["name"].asString(),
         folly::json::serialize(params, sortedKeys()),
-        codeVersion());
+        environment_);
     for (const auto& child : children) {
       if (!child.has_value()) {
         return std::nullopt;
@@ -309,6 +312,8 @@ class StageHasher {
 
   Stage& stage_;
   const std::map<int32_t, const Stage*>& byShuffle_;
+  // Code version and config.
+  const std::string& environment_;
   std::set<std::string> names_;
   std::map<std::string, std::string> renames_;
   std::map<std::string, bool> nondeterministic_;
@@ -317,10 +322,16 @@ class StageHasher {
 
 } // namespace
 
-void computeStageKeys(StagePlan& plan) {
+void computeStageKeys(
+    StagePlan& plan,
+    const std::map<std::string, std::string>& config) {
+  auto environment = codeVersion();
+  for (const auto& [key, value] : config) {
+    environment += fmt::format("\n{}={}", key, value);
+  }
   std::map<int32_t, const Stage*> byShuffle;
   for (auto& stage : plan.stages) {
-    StageHasher hasher(stage, byShuffle);
+    StageHasher hasher(stage, byShuffle, environment);
     stage.key = hasher.hashNode(stage.fragment);
     if (stage.key.has_value() && !stage.shuffleId.has_value()) {
       // The result's column names are the user's.

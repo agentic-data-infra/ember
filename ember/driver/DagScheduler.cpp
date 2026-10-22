@@ -1,5 +1,7 @@
 #include "ember/driver/DagScheduler.h"
 
+#include <set>
+
 #include <folly/ScopeGuard.h>
 #include <folly/coro/BlockingWait.h>
 #include <glog/logging.h>
@@ -67,7 +69,15 @@ DagScheduler::DagScheduler(
     std::shared_ptr<SchedulerBackend> backend,
     DagSchedulerOptions options)
     : options_{std::move(options)},
+      reuseOutputs_{
+          !options_.config.contains(kReuseOutputs) ||
+          folly::to<bool>(options_.config.at(kReuseOutputs))},
       taskScheduler_{std::move(backend), options_.maxTaskAttempts} {
+  for (const auto& [key, value] : options_.config) {
+    if (!key.starts_with("ember.") || key == kMaxSplitBytes) {
+      keyConfig_[key] = value;
+    }
+  }
   rootPool_ = velox::memory::memoryManager()->addRootPool(
       fmt::format("ember_driver_{}_{}", options_.appName, ++schedulerCounter));
   planPool_ = rootPool_->addLeafChild("plans");
@@ -91,7 +101,48 @@ DagScheduler::~DagScheduler() {
 }
 
 StagePlan DagScheduler::stagePlan(const optimizer::MultiFragmentPlan& plan) {
-  return planStages(plan, planPool_.get());
+  return planStages(plan, planPool_.get(), keyConfig_);
+}
+
+std::optional<int32_t> DagScheduler::storedShuffle(
+    const Stage& stage,
+    int32_t numTasks) {
+  if (!stage.key.has_value()) {
+    return std::nullopt;
+  }
+  std::lock_guard<std::mutex> l(memoMutex_);
+  auto it = memo_.find(*stage.key);
+  if (it == memo_.end() ||
+      mapOutputTracker_.numMaps(it->second) != numTasks) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
+std::string DagScheduler::explain(const optimizer::MultiFragmentPlan& plan) {
+  const auto stages = stagePlan(plan);
+  // Stages that run: the result stage, and what running stages read.
+  std::set<int32_t> runs{stages.resultStage().stageId};
+  std::map<int32_t, std::string> notes;
+  for (auto it = stages.stages.rbegin(); it != stages.stages.rend(); ++it) {
+    const auto& stage = *it;
+    if (!runs.contains(stage.stageId)) {
+      notes[stage.stageId] = ", not needed";
+      continue;
+    }
+    if (stage.shuffleId.has_value() && stage.key.has_value()) {
+      std::lock_guard<std::mutex> l(memoMutex_);
+      if (memo_.contains(*stage.key)) {
+        notes[stage.stageId] = ", reused";
+        continue;
+      }
+    }
+    runs.insert(stage.parents.begin(), stage.parents.end());
+  }
+  return stages.toString([&](const Stage& stage) {
+    auto it = notes.find(stage.stageId);
+    return it == notes.end() ? std::string() : it->second;
+  });
 }
 
 std::vector<std::map<std::string, std::vector<folly::dynamic>>>
@@ -209,17 +260,6 @@ std::vector<velox::RowVectorPtr> DagScheduler::runJob(
 
   auto stages = stagePlan(plan);
 
-  std::vector<int32_t> shuffles;
-  SCOPE_EXIT {
-    for (auto shuffleId : shuffles) {
-      backend().removeShuffle(shuffleId);
-      mapOutputTracker_.unregisterShuffle(shuffleId);
-    }
-  };
-
-  // Write partitions per shuffle, to check against reader task counts.
-  std::map<int32_t, int32_t> shufflePartitions;
-
   std::vector<StageState> states(stages.stages.size());
   for (size_t i = 0; i < stages.stages.size(); ++i) {
     const auto& stage = stages.stages[i];
@@ -234,6 +274,53 @@ std::vector<velox::RowVectorPtr> DagScheduler::runJob(
     } else {
       state.splits = scanSplits(stage, job);
     }
+  }
+
+  // Shuffles get ids unique in the session; a stage with stored output takes
+  // the id of the shuffle that holds it.
+  std::map<int32_t, int32_t> newIds;
+  std::set<int32_t> reused;
+  for (auto& state : states) {
+    const auto& stage = *state.stage;
+    if (!stage.shuffleId.has_value()) {
+      continue;
+    }
+    auto stored = storedShuffle(stage, state.numTasks());
+    if (stored.has_value()) {
+      reused.insert(*stored);
+    }
+    newIds[*stage.shuffleId] = stored.value_or(++shuffleCounter_);
+  }
+  stages.renumberShuffles(newIds, planPool_.get());
+
+  // The job's own shuffles: kept for reuse if keyed, otherwise removed.
+  std::map<int32_t, const Stage*> written;
+  SCOPE_EXIT {
+    for (const auto& [shuffleId, stage] : written) {
+      if (reuseOutputs_ && stage->key.has_value()) {
+        std::lock_guard<std::mutex> l(memoMutex_);
+        auto [it, inserted] = memo_.emplace(*stage->key, shuffleId);
+        if (inserted) {
+          continue;
+        }
+        if (!reused.contains(it->second) && !written.contains(it->second)) {
+          // The stored output did not fit this job; keep the new one.
+          backend().removeShuffle(it->second);
+          mapOutputTracker_.unregisterShuffle(it->second);
+          it->second = shuffleId;
+          continue;
+        }
+      }
+      backend().removeShuffle(shuffleId);
+      mapOutputTracker_.unregisterShuffle(shuffleId);
+    }
+  };
+
+  // Write partitions per shuffle, to check against reader task counts.
+  std::map<int32_t, int32_t> shufflePartitions;
+
+  for (auto& state : states) {
+    const auto& stage = *state.stage;
     const auto numTasks = state.numTasks();
     for (auto& taskSplits : state.splits) {
       for (const auto& input : stage.shuffleInputs) {
@@ -256,8 +343,19 @@ std::vector<velox::RowVectorPtr> DagScheduler::runJob(
     }
 
     if (stage.shuffleId.has_value()) {
-      shuffles.push_back(*stage.shuffleId);
-      mapOutputTracker_.registerShuffle(*stage.shuffleId, numTasks);
+      if (reused.contains(*stage.shuffleId)) {
+        if (options_.onStageCompleted) {
+          options_.onStageCompleted(StageAttemptInfo{
+              .jobId = job.jobId,
+              .stageId = stage.stageId,
+              .stageKey = stage.key,
+              .shuffleId = stage.shuffleId,
+              .reused = true});
+        }
+      } else {
+        written[*stage.shuffleId] = &stage;
+        mapOutputTracker_.registerShuffle(*stage.shuffleId, numTasks);
+      }
       shufflePartitions[*stage.shuffleId] =
           stage.plan->as<shuffle::ShuffleWriteNode>()->numPartitions();
       job.producers[*stage.shuffleId] = &state;
@@ -269,11 +367,9 @@ std::vector<velox::RowVectorPtr> DagScheduler::runJob(
     }
   }
 
-  // Stages run in dependency order; a stage whose inputs were lost reruns
-  // their producers first.
-  for (auto& state : states) {
-    runStage(state, job);
-  }
+  // The result stage runs the stages it reads first, and so on upstream;
+  // stored outputs are complete already, unless some were lost.
+  runStage(states.back(), job);
 
   std::vector<velox::RowVectorPtr> rows;
   const auto& result = states.back();
@@ -364,6 +460,7 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
         .stageId = stage.stageId,
         .attempt = attempt,
         .stageKey = stage.key,
+        .shuffleId = stage.shuffleId,
         .partitions = partitions};
     if (!inputsLost) {
       auto taskSet = taskScheduler_.runTaskSet(std::move(tasks));
