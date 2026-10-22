@@ -1,7 +1,7 @@
 # ember/api
 
 Ember's Dataframe API. Programs include `ember/Session.h` and
-`ember/functions.h`; see `examples/WordCount.cpp`.
+`ember/functions.h`; see `examples/WordCount.cpp` and `examples/DomainReport.cpp`.
 
 | File | Contents |
 |------|----------|

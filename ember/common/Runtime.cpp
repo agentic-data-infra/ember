@@ -7,9 +7,9 @@
 #include "axiom/connectors/ConnectorMetadataRegistry.h"
 #include "axiom/connectors/file/FileConnector.h"
 #include "axiom/connectors/file/core/FileConnectorMetadata.h"
-#include "axiom/connectors/file/parquet/ParquetFileHandler.h"
 #include "ember/FileSerde.h"
 #include "ember/FunctionRegistry.h"
+#include "ember/ParquetFileHandler.h"
 #include "ember/TextFileHandler.h"
 #include "ember/shuffle/Shuffle.h"
 #include "velox/common/file/FileSystems.h"
@@ -50,7 +50,7 @@ void initializeRuntime() {
     registerFileSerde();
     shuffle::registerShuffle();
 
-    axiom_connector::file::registerParquetHandler();
+    registerParquetFileHandler();
     registerTextFileHandler();
     auto connector =
         std::make_shared<axiom_connector::file::FileConnector>(kFileConnectorId);

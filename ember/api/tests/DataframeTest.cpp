@@ -187,6 +187,24 @@ TEST_F(DataframeTest, splitTakesRegex) {
   EXPECT_EQ(dots[0][0], Variant(4));
 }
 
+TEST_F(DataframeTest, regexpExtractAndRound) {
+  auto df = ember_->createDataframe(
+      ROW({"url", "x"}, {VARCHAR(), facebook::velox::DOUBLE()}),
+      {{"https://www.Example.org/a?b", 2.345}, {"no url", -1.5}});
+  auto rows = df.select(
+                    lower(regexp_extract(
+                              col("url"), R"(^https?://(?:www\.)?([^/?]+))", 1))
+                        .as("host"),
+                    round(col("x"), 2).as("r2"),
+                    round(col("x")).as("r0"))
+                  .orderBy(col("host").desc())
+                  .collect();
+  ASSERT_EQ(rows.size(), 2);
+  EXPECT_EQ(rows[0], Row({Variant("example.org"), Variant(2.35), Variant(2.0)}));
+  // No match: an empty string. Rounds half away from zero.
+  EXPECT_EQ(rows[1], Row({Variant(""), Variant(-1.5), Variant(-2.0)}));
+}
+
 TEST_F(DataframeTest, udfThroughCall) {
   registerUdf<TimesTwoFunction, int64_t, int64_t>("times_two");
   auto rows = people()
