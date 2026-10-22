@@ -1,7 +1,6 @@
 // Runs tasks on worker processes, which may be on other hosts.
 //
-// The driver serves DriverService (ember.thrift) on 'port' (master URL
-// ember://host:port). Workers,
+// The driver serves RPC on 'port' (master URL ember://host:port). Workers,
 // started separately, register there with their address and task slots; the
 // backend connects back to each to launch tasks and sends tasks to workers
 // with free slots. A task's result is the reply to its launchTask call.
@@ -21,13 +20,8 @@
 #include <thread>
 
 #include "ember/driver/SchedulerBackend.h"
-#include "ember/rpc/RpcClient.h"
+#include "ember/rpc/Clients.h"
 #include "ember/rpc/RpcServer.h"
-#include "ember/rpc/gen-cpp2/ember_types.h"
-
-namespace ember::rpc::thrift {
-class WorkerService;
-}
 
 namespace folly {
 class CPUThreadPoolExecutor;
@@ -76,9 +70,7 @@ class ClusterBackend : public SchedulerBackend {
   void stop() override;
 
  private:
-  using WorkerClient = rpc::RpcClient<rpc::thrift::WorkerService>;
-
-  // Serves DriverService.
+  // Serves the workers' calls.
   class Handler;
 
   struct WorkerInfo {
@@ -86,7 +78,7 @@ class ClusterBackend : public SchedulerBackend {
     std::string address;
     int32_t slots{0};
     int32_t running{0};
-    std::shared_ptr<WorkerClient> client;
+    std::shared_ptr<rpc::WorkerClient> client;
     std::chrono::steady_clock::time_point lastHeartbeat;
   };
 
@@ -95,8 +87,8 @@ class ClusterBackend : public SchedulerBackend {
     ResultCallback onResult;
   };
 
-  rpc::thrift::RegisterWorkerResponse registerWorker(
-      const rpc::thrift::RegisterWorkerRequest& request);
+  rpc::RegisterWorkerResponse registerWorker(
+      const rpc::RegisterWorkerRequest& request);
   bool heartbeat(const std::string& workerId);
 
   // Sends pending tasks to free slots.

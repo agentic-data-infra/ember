@@ -1,10 +1,10 @@
-#include "ember/rpc/RpcClient.h"
+#include "ember/rpc/ThriftConnection.h"
 
 #include <folly/executors/IOThreadPoolExecutor.h>
 #include <folly/io/async/AsyncSocket.h>
 #include <thrift/lib/cpp2/async/RocketClientChannel.h>
 
-namespace ember::rpc {
+namespace ember::rpc::detail {
 
 namespace {
 
@@ -107,4 +107,4 @@ void throwRpcError(
       e != nullptr ? e->what() : error.what().toStdString()));
 }
 
-} // namespace ember::rpc
+} // namespace ember::rpc::detail

@@ -24,6 +24,7 @@
 #include <folly/futures/Future.h>
 
 #include "ember/rpc/RpcServer.h"
+#include "ember/shuffle/ShuffleInterface.h"
 
 namespace folly {
 class CPUThreadPoolExecutor;
@@ -86,11 +87,12 @@ class Worker {
   void startExecutor();
   void stopExecutor();
 
-  // Serves WorkerService.
+  // Serves the driver's and other workers' calls.
   class Handler;
 
-  folly::SemiFuture<std::unique_ptr<std::string>> launchTask(
-      std::unique_ptr<std::string> task);
+  folly::SemiFuture<std::string> launchTask(std::string task);
+  folly::SemiFuture<std::unique_ptr<folly::IOBuf>> fetchBlock(
+      shuffle::BlockId id);
   void removeShuffle(int32_t shuffleId);
   void shutdown();
 

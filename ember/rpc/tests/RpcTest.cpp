@@ -6,20 +6,16 @@
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/futures/SharedPromise.h>
 
-#include "ember/rpc/RpcClient.h"
+#include "ember/rpc/Clients.h"
 #include "ember/rpc/RpcServer.h"
-#include "ember/rpc/gen-cpp2/WorkerServiceAsyncClient.h"
-#include "ember/rpc/gen-cpp2/WorkerService.h"
 
 namespace ember::rpc {
 namespace {
 
-using Client = RpcClient<thrift::WorkerService>;
-
 // launchTask echoes its task after the number of ms it starts with, if any;
-// "throw" throws and "fail" fails its future. removeShuffle never answers
+// "throw" throws and "fail" fails its future. removeShuffle does not return
 // until the test lets it. fetchBlock returns a block of 'reduceId' bytes.
-class TestHandler : public apache::thrift::ServiceHandler<thrift::WorkerService> {
+class TestHandler : public WorkerHandler {
  public:
   TestHandler() : pool_{std::make_unique<folly::CPUThreadPoolExecutor>(8)} {}
 
@@ -34,18 +30,16 @@ class TestHandler : public apache::thrift::ServiceHandler<thrift::WorkerService>
     }
   }
 
-  folly::SemiFuture<std::unique_ptr<std::string>> semifuture_launchTask(
-      std::unique_ptr<std::string> task) override {
-    if (*task == "throw") {
+  folly::SemiFuture<std::string> launchTask(std::string task) override {
+    if (task == "throw") {
       throw std::runtime_error("handler threw");
     }
-    if (*task == "fail") {
-      return folly::makeSemiFuture<std::unique_ptr<std::string>>(
+    if (task == "fail") {
+      return folly::makeSemiFuture<std::string>(
           std::runtime_error("future failed"));
     }
     return folly::via(pool_.get(), [task = std::move(task)]() mutable {
-             auto delay =
-                 folly::tryTo<int32_t>(task->substr(0, task->find(' ')));
+             auto delay = folly::tryTo<int32_t>(task.substr(0, task.find(' ')));
              if (delay.hasValue()) {
                std::this_thread::sleep_for(std::chrono::milliseconds(*delay));
              }
@@ -54,14 +48,15 @@ class TestHandler : public apache::thrift::ServiceHandler<thrift::WorkerService>
         .semi();
   }
 
-  folly::SemiFuture<folly::Unit> semifuture_removeShuffle(
-      int32_t /*shuffleId*/) override {
-    return hang_.getSemiFuture();
+  void removeShuffle(int32_t /*shuffleId*/) override {
+    hang_.getSemiFuture().wait();
   }
 
-  folly::SemiFuture<std::unique_ptr<folly::IOBuf>> semifuture_fetchBlock(
-      std::unique_ptr<thrift::BlockId> block) override {
-    std::string bytes(*block->reduceId(), '\0');
+  void shutdown() override {}
+
+  folly::SemiFuture<std::unique_ptr<folly::IOBuf>> fetchBlock(
+      const BlockId& block) override {
+    std::string bytes(block.reduceId, '\0');
     for (size_t i = 0; i < bytes.size(); ++i) {
       bytes[i] = static_cast<char>(i * 7);
     }
@@ -89,9 +84,10 @@ class RpcTest : public testing::Test {
     return HostAndPort{"localhost", server_.port()};
   }
 
-  static folly::SemiFuture<std::string> echo(Client& client, std::string task) {
-    return client.call(
-        [&](auto& c) { return c.semifuture_launchTask(task); });
+  static folly::SemiFuture<std::string> echo(
+      WorkerClient& client,
+      const std::string& task) {
+    return client.launchTask(task);
   }
 
   std::shared_ptr<TestHandler> handler_;
@@ -109,7 +105,7 @@ TEST_F(RpcTest, hostAndPort) {
 }
 
 TEST_F(RpcTest, roundTrip) {
-  auto client = Client::connect(address());
+  auto client = WorkerClient::connect(address());
   EXPECT_EQ(echo(*client, "hello").get(), "hello");
   EXPECT_EQ(echo(*client, "").get(), "");
 
@@ -120,16 +116,14 @@ TEST_F(RpcTest, roundTrip) {
   }
   EXPECT_EQ(echo(*client, big).get(), big);
 
-  thrift::BlockId block;
-  block.reduceId() = 16 << 20;
-  auto bytes = client->call([&](auto& c) { return c.semifuture_fetchBlock(block); })
-                   .get();
-  EXPECT_EQ(bytes.computeChainDataLength(), big.size());
-  EXPECT_EQ(bytes.to<std::string>(), big);
+  auto blocks = ShuffleBlockClient::connect(address());
+  auto bytes = blocks->fetchBlock(BlockId{.reduceId = 16 << 20}).get();
+  EXPECT_EQ(bytes->computeChainDataLength(), big.size());
+  EXPECT_EQ(bytes->to<std::string>(), big);
 }
 
 TEST_F(RpcTest, concurrentCallsCompleteOutOfOrder) {
-  auto client = Client::connect(address());
+  auto client = WorkerClient::connect(address());
   // The first call answers last.
   auto slow = echo(*client, "300 slow");
   std::vector<folly::SemiFuture<std::string>> fast;
@@ -148,7 +142,7 @@ TEST_F(RpcTest, manyClients) {
   std::atomic<int> ok{0};
   for (int t = 0; t < 8; ++t) {
     threads.emplace_back([&, t] {
-      auto client = Client::connect(address());
+      auto client = WorkerClient::connect(address());
       for (int i = 0; i < 50; ++i) {
         auto payload = fmt::format("x{}-{}", t, i);
         if (echo(*client, payload).get() == payload) {
@@ -164,7 +158,7 @@ TEST_F(RpcTest, manyClients) {
 }
 
 TEST_F(RpcTest, errors) {
-  auto client = Client::connect(address());
+  auto client = WorkerClient::connect(address());
   EXPECT_THROW(
       {
         try {
@@ -182,9 +176,8 @@ TEST_F(RpcTest, errors) {
 }
 
 TEST_F(RpcTest, pendingCallsFailWhenConnectionBreaks) {
-  auto client = Client::connect(address());
-  auto pending =
-      client->call([](auto& c) { return c.semifuture_removeShuffle(1); });
+  auto client = WorkerClient::connect(address());
+  auto pending = client->removeShuffle(1);
   server_.stop();
   EXPECT_THROW(std::move(pending).get(std::chrono::seconds(10)), RpcError);
   EXPECT_FALSE(client->isOpen());
@@ -192,9 +185,8 @@ TEST_F(RpcTest, pendingCallsFailWhenConnectionBreaks) {
 }
 
 TEST_F(RpcTest, closeFailsPendingCalls) {
-  auto client = Client::connect(address());
-  auto pending =
-      client->call([](auto& c) { return c.semifuture_removeShuffle(1); });
+  auto client = WorkerClient::connect(address());
+  auto pending = client->removeShuffle(1);
   client->close();
   EXPECT_THROW(std::move(pending).get(std::chrono::seconds(10)), RpcError);
   EXPECT_FALSE(client->isOpen());
@@ -206,7 +198,7 @@ TEST_F(RpcTest, connectFails) {
   const auto port = other.port();
   other.stop();
   EXPECT_THROW(
-      Client::connect(
+      WorkerClient::connect(
           HostAndPort{"localhost", port}, std::chrono::milliseconds(500)),
       RpcError);
 }

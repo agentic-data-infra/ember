@@ -1,5 +1,6 @@
-# Ember's RPC over fbthrift: the services in ember.thrift, plus a thread-safe
-# client and a server around fbthrift's.
+# Ember's RPC over fbthrift. Only this package sees fbthrift and the code
+# generated from ember.thrift: its headers expose Ember's own messages,
+# handlers and clients.
 
 load("//third-party:thrift.bzl", "thrift_cpp_library")
 
@@ -11,14 +12,21 @@ thrift_cpp_library(
         "ShuffleBlockService",
         "WorkerService",
     ],
-    visibility = ["PUBLIC"],
 )
 
 cxx_library(
     name = "rpc",
     srcs = glob(["*.cpp"]),
     header_namespace = "ember/rpc",
-    exported_headers = glob(["*.h"]),
-    exported_deps = [":ember_thrift"],
+    exported_headers = [
+        "Clients.h",
+        "Handlers.h",
+        "Messages.h",
+        "Rpc.h",
+        "RpcServer.h",
+    ],
+    headers = ["ThriftConnection.h"],
+    exported_deps = ["//third-party:velox_axiom"],
+    deps = [":ember_thrift"],
     visibility = ["PUBLIC"],
 )

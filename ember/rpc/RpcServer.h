@@ -1,22 +1,13 @@
-// The serving side: one of Ember's Thrift services (ember.thrift) on a port.
-//
-// A handler implements the generated apache::thrift::ServiceHandler<Service>,
-// typically its semifuture_ methods. They are called on the server's own
-// threads; one that blocks or runs long (a task, a disk read) should move its
-// work to an executor and return the future. A handler that throws, or whose
-// future fails, fails the call with the exception's message.
+// The serving side of Ember's RPC: a driver's or a worker's handler
+// (Handlers.h) on a port.
 
 #pragma once
 
 #include <memory>
 #include <string>
 
+#include "ember/rpc/Handlers.h"
 #include "ember/rpc/Rpc.h"
-
-namespace apache::thrift {
-class AsyncProcessorFactory;
-class ScopedServerInterfaceThread;
-} // namespace apache::thrift
 
 namespace ember::rpc {
 
@@ -31,7 +22,13 @@ class RpcServer {
   /// Starts serving 'handler' on 'host' (empty for all interfaces) and
   /// 'port'; port 0 picks a free one. Throws RpcError if it cannot listen.
   void start(
-      std::shared_ptr<apache::thrift::AsyncProcessorFactory> handler,
+      std::shared_ptr<DriverHandler> handler,
+      const std::string& host,
+      uint16_t port);
+
+  /// start() for a worker.
+  void start(
+      std::shared_ptr<WorkerHandler> handler,
       const std::string& host,
       uint16_t port);
 
@@ -45,7 +42,10 @@ class RpcServer {
   void stop();
 
  private:
-  std::unique_ptr<apache::thrift::ScopedServerInterfaceThread> server_;
+  // The running fbthrift server.
+  struct Impl;
+
+  std::unique_ptr<Impl> impl_;
   uint16_t port_{0};
 };
 

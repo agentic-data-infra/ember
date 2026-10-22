@@ -5,9 +5,7 @@
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <glog/logging.h>
 
-#include "ember/rpc/RpcClient.h"
-#include "ember/rpc/gen-cpp2/DriverServiceAsyncClient.h"
-#include "ember/rpc/gen-cpp2/WorkerService.h"
+#include "ember/rpc/Clients.h"
 #include "ember/worker/Executor.h"
 #include "ember/worker/NetworkBlockTransport.h"
 #include "velox/common/base/Exceptions.h"
@@ -19,27 +17,26 @@ constexpr auto kRetryInterval = std::chrono::seconds(1);
 constexpr auto kCallTimeout = std::chrono::seconds(30);
 } // namespace
 
-class Worker::Handler
-    : public apache::thrift::ServiceHandler<rpc::thrift::WorkerService>,
-      public ShuffleBlockHandler {
+class Worker::Handler : public rpc::WorkerHandler {
  public:
-  Handler(Worker* worker, folly::Executor* blockReaders)
-      : ShuffleBlockHandler(
-            [worker] { return shuffle::ShuffleBlockStore::find(worker->address_); },
-            blockReaders),
-        worker_{worker} {}
+  explicit Handler(Worker* worker) : worker_{worker} {}
 
-  folly::SemiFuture<std::unique_ptr<std::string>> semifuture_launchTask(
-      std::unique_ptr<std::string> task) override {
+  folly::SemiFuture<std::string> launchTask(std::string task) override {
     return worker_->launchTask(std::move(task));
   }
 
-  void sync_removeShuffle(int32_t shuffleId) override {
+  void removeShuffle(int32_t shuffleId) override {
     worker_->removeShuffle(shuffleId);
   }
 
-  void sync_shutdown() override {
+  void shutdown() override {
     worker_->shutdown();
+  }
+
+  folly::SemiFuture<std::unique_ptr<folly::IOBuf>> fetchBlock(
+      const rpc::BlockId& block) override {
+    return worker_->fetchBlock(shuffle::BlockId{
+        block.shuffleId, block.mapId, block.reduceId});
   }
 
  private:
@@ -76,7 +73,7 @@ std::string Worker::start() {
   blockReaders_ = std::make_unique<folly::CPUThreadPoolExecutor>(4);
 
   server_.start(
-      std::make_shared<Handler>(this, blockReaders_.get()),
+      std::make_shared<Handler>(this),
       options_.bindHost,
       options_.port);
   const auto host = options_.advertisedHost.empty() ? rpc::localHostName()
@@ -105,6 +102,19 @@ void Worker::shutdown() {
   wakeup_.notify_all();
 }
 
+folly::SemiFuture<std::unique_ptr<folly::IOBuf>> Worker::fetchBlock(
+    shuffle::BlockId id) {
+  return folly::via(
+             blockReaders_.get(),
+             [this, id]() -> std::unique_ptr<folly::IOBuf> {
+               auto store = shuffle::ShuffleBlockStore::find(address_);
+               VELOX_CHECK_NOT_NULL(
+                   store, "No executor serves shuffle blocks here");
+               return store->readBlock(id);
+             })
+      .semi();
+}
+
 void Worker::stop() {
   {
     std::lock_guard<std::mutex> l(mutex_);
@@ -131,11 +141,10 @@ void Worker::run() {
 
 bool Worker::serveDriver(std::chrono::milliseconds connectTimeout) {
   const auto deadline = std::chrono::steady_clock::now() + connectTimeout;
-  using DriverClient = rpc::RpcClient<rpc::thrift::DriverService>;
-  std::shared_ptr<DriverClient> driver;
+  std::shared_ptr<rpc::DriverClient> driver;
   while (driver == nullptr) {
     try {
-      driver = DriverClient::connect(options_.driver, std::chrono::seconds(5));
+      driver = rpc::DriverClient::connect(options_.driver, std::chrono::seconds(5));
     } catch (const std::exception& e) {
       if (connectTimeout.count() > 0 &&
           std::chrono::steady_clock::now() >= deadline) {
@@ -152,19 +161,16 @@ bool Worker::serveDriver(std::chrono::milliseconds connectTimeout) {
   }
 
   startExecutor();
-  rpc::thrift::RegisterWorkerResponse reply;
+  rpc::RegisterWorkerResponse reply;
   try {
-    rpc::thrift::RegisterWorkerRequest request;
-    request.workerId() = address_;
-    request.address() = address_;
-    request.slots() = options_.slots;
     reply = driver
-                ->call([&](auto& c) {
-                  return c.semifuture_registerWorker(request);
-                })
+                ->registerWorker(rpc::RegisterWorkerRequest{
+                    .workerId = address_,
+                    .address = address_,
+                    .slots = options_.slots})
                 .get(kCallTimeout);
     LOG(INFO) << "Registered with driver " << options_.driver.toString()
-              << " of " << *reply.appName() << ", " << options_.slots
+              << " of " << reply.appName << ", " << options_.slots
               << " slots";
   } catch (const std::exception& e) {
     LOG(ERROR) << "Registration with " << options_.driver.toString()
@@ -175,7 +181,7 @@ bool Worker::serveDriver(std::chrono::milliseconds connectTimeout) {
   }
 
   const auto interval =
-      std::chrono::milliseconds(std::max<int64_t>(*reply.heartbeatIntervalMs(), 10));
+      std::chrono::milliseconds(std::max<int64_t>(reply.heartbeatIntervalMs, 10));
   while (true) {
     {
       std::unique_lock<std::mutex> l(mutex_);
@@ -186,13 +192,7 @@ bool Worker::serveDriver(std::chrono::milliseconds connectTimeout) {
       }
     }
     try {
-      rpc::thrift::HeartbeatRequest request;
-      request.workerId() = address_;
-      auto heartbeat =
-          driver
-              ->call([&](auto& c) { return c.semifuture_heartbeat(request); })
-              .get(kCallTimeout);
-      if (!*heartbeat.registered()) {
+      if (!driver->heartbeat(address_).get(kCallTimeout)) {
         LOG(WARNING) << "Driver no longer knows this worker";
         break;
       }
@@ -239,8 +239,7 @@ void Worker::stopExecutor() {
   }
 }
 
-folly::SemiFuture<std::unique_ptr<std::string>> Worker::launchTask(
-    std::unique_ptr<std::string> task) {
+folly::SemiFuture<std::string> Worker::launchTask(std::string task) {
   std::shared_ptr<Executor> executor;
   std::shared_ptr<folly::CPUThreadPoolExecutor> slots;
   {
@@ -252,7 +251,7 @@ folly::SemiFuture<std::unique_ptr<std::string>> Worker::launchTask(
   return folly::via(
              slots.get(),
              [executor, task = std::move(task)] {
-               return std::make_unique<std::string>(executor->runTask(*task));
+               return executor->runTask(task);
              })
       .semi();
 }
