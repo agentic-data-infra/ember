@@ -103,7 +103,5 @@ See [ember/README.md](ember/README.md).
 
 ## License
 
-Copyright 2026 Patrick Stuedi.
-
 Ember is licensed under the [Apache License, Version 2.0](LICENSE). Velox and
 Axiom, which Ember builds on, are also Apache 2.0 licensed.
