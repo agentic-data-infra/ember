@@ -1,23 +1,26 @@
 # ember/rpc
 
-A small RPC over TCP between the driver and workers, and between workers for
-shuffle blocks. No IDL and no code generation: a frame is a 16-byte header
-(payload length, kind, method, request id) followed by opaque bytes, and one
-connection carries any number of concurrent calls, answered in any order.
+RPC between the driver and workers, and between workers for shuffle blocks,
+over [fbthrift](https://github.com/facebook/fbthrift) (Rocket transport). The
+services are defined in `ember.thrift`; `thrift1` generates their C++ into
+`ember/rpc/gen-cpp2/` at build time (`thrift_cpp_library` in
+`third-party/thrift.bzl`).
 
 | File | Contents |
 |------|----------|
-| `Rpc` | The methods, the frame layout, `RpcError` and `HostAndPort`. |
-| `RpcClient` | Connects to a server; `call(method, payload)` returns a future of the reply. A reader thread matches replies to calls; a broken connection fails every pending call. |
-| `RpcServer` | Accepts connections, a thread each, and answers requests with the handler set for each method. Handlers return futures, so long work (a task) runs elsewhere. |
-| `Messages` | The JSON control messages: `RegisterWorker`, `Heartbeat`, `RemoveShuffle`, `FetchBlock` and their replies. |
-| `Socket` | Blocking socket helpers and frame encoding. |
+| `ember.thrift` | The services and their messages. |
+| `Rpc` | `RpcError` and `HostAndPort`. |
+| `RpcClient` | `RpcClient<Service>::connect(address)`; `call([&](auto& c) { return c.semifuture_x(...); })` returns a future of the reply, from any thread. Calls on one connection run concurrently; a broken connection or `close()` fails every pending call, and every failure is an `RpcError`. No default call timeout. |
+| `RpcServer` | Serves a generated `ServiceHandler<Service>` on a port. Handlers return futures, so long work (a task) runs elsewhere. |
 
-| Method | From → to | Request → reply |
-|--------|-----------|-----------------|
-| `RegisterWorker` | worker → driver | worker id, address, slots → app name, heartbeat interval |
-| `Heartbeat` | worker → driver | worker id → whether the driver still knows it |
-| `LaunchTask` | driver → worker | `TaskDescription` bytes → `TaskResult` bytes |
-| `RemoveShuffle` | driver → worker | shuffle id → empty |
-| `Shutdown` | driver → worker | empty → empty |
-| `FetchBlock` | worker → worker | shuffle, map, reduce id → the block's bytes |
+| Service | Method | From → to | Request → reply |
+|---------|--------|-----------|-----------------|
+| `DriverService` | `registerWorker` | worker → driver | worker id, address, slots → app name, heartbeat interval |
+| | `heartbeat` | worker → driver | worker id → whether the driver still knows it |
+| `WorkerService` | `launchTask` | driver → worker | `TaskDescription` bytes → `TaskResult` bytes |
+| | `removeShuffle` | driver → worker | shuffle id |
+| | `shutdown` | driver → worker | |
+| `ShuffleBlockService` | `fetchBlock` | worker → worker | shuffle, map, reduce id → the block's bytes, as an IOBuf |
+
+`WorkerService` extends `ShuffleBlockService`, so a worker serves both on one
+port.

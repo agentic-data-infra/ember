@@ -1,126 +1,110 @@
 #include "ember/rpc/RpcClient.h"
 
-#include <sys/socket.h>
-#include <unistd.h>
-
-#include <glog/logging.h>
-
-#include "ember/rpc/Socket.h"
+#include <folly/executors/IOThreadPoolExecutor.h>
+#include <folly/io/async/AsyncSocket.h>
+#include <thrift/lib/cpp2/async/RocketClientChannel.h>
 
 namespace ember::rpc {
 
-std::shared_ptr<RpcClient> RpcClient::connect(
+namespace {
+
+// The event base threads of every connection in the process.
+folly::EventBase* nextEventBase() {
+  static auto* pool = new folly::IOThreadPoolExecutor(
+      4, std::make_shared<folly::NamedThreadFactory>("EmberRpcIO"));
+  return pool->getEventBase();
+}
+
+class ConnectCallback : public folly::AsyncSocket::ConnectCallback {
+ public:
+  folly::SemiFuture<folly::Unit> future() {
+    return promise_.getSemiFuture();
+  }
+
+  void connectSuccess() noexcept override {
+    promise_.setValue();
+  }
+
+  void connectErr(const folly::AsyncSocketException& error) noexcept override {
+    promise_.setException(RpcError(error.what()));
+  }
+
+ private:
+  folly::Promise<folly::Unit> promise_;
+};
+
+} // namespace
+
+Connection::Connection(
     const HostAndPort& address,
-    std::chrono::milliseconds timeout) {
-  const int fd = connectTcp(address, timeout);
-  std::shared_ptr<RpcClient> client(new RpcClient(address, fd));
-  client->reader_ = std::thread([raw = client.get()] { raw->readLoop(); });
-  return client;
-}
-
-RpcClient::RpcClient(HostAndPort address, int fd)
-    : address_{std::move(address)}, fd_{fd} {}
-
-RpcClient::~RpcClient() {
-  close();
-  if (reader_.joinable()) {
-    if (reader_.get_id() == std::this_thread::get_id()) {
-      reader_.detach();
-    } else {
-      reader_.join();
-    }
-  }
-  ::close(fd_);
-}
-
-void RpcClient::close() {
-  if (!closed_.exchange(true)) {
-    ::shutdown(fd_, SHUT_RDWR);
-  }
-}
-
-folly::SemiFuture<std::string> RpcClient::call(
-    Method method,
-    std::string payload) {
-  return call(method, folly::IOBuf::fromString(std::move(payload)));
-}
-
-folly::SemiFuture<std::string> RpcClient::call(
-    Method method,
-    std::unique_ptr<folly::IOBuf> payload) {
-  const auto length = payload->computeChainDataLength();
-  if (length > kMaxPayloadBytes) {
-    return folly::makeSemiFuture<std::string>(RpcError(fmt::format(
-        "{} request of {} bytes is too large", methodName(method), length)));
-  }
-  folly::Promise<std::string> promise;
-  auto future = promise.getSemiFuture();
-  uint64_t id;
-  {
-    std::lock_guard<std::mutex> l(mutex_);
-    if (closed_) {
-      return folly::makeSemiFuture<std::string>(RpcError(
-          fmt::format("Connection to {} is closed", address_.toString())));
-    }
-    id = nextId_++;
-    pending_.emplace(id, std::move(promise));
-  }
-  FrameHeader header{
-      static_cast<uint32_t>(length), FrameKind::kRequest, method, id};
-  bool ok;
-  {
-    std::lock_guard<std::mutex> l(writeMutex_);
-    ok = writeFrame(fd_, header, payload.get());
-  }
-  if (!ok) {
-    // The reader sees the broken connection too and fails every call.
-    close();
-  }
-  return future;
-}
-
-void RpcClient::readLoop() {
-  FrameHeader header;
-  std::string payload;
-  std::string reason = "connection closed";
+    std::chrono::milliseconds timeout)
+    : address_{address}, eventBase_{nextEventBase()} {
+  folly::SocketAddress socketAddress;
   try {
-    while (readFrame(fd_, header, payload)) {
-      folly::Promise<std::string> promise;
-      {
-        std::lock_guard<std::mutex> l(mutex_);
-        auto it = pending_.find(header.id);
-        if (it == pending_.end()) {
-          LOG(WARNING) << "RPC response for unknown call " << header.id
-                       << " from " << address_.toString();
-          continue;
-        }
-        promise = std::move(it->second);
-        pending_.erase(it);
-      }
-      if (header.kind == FrameKind::kError) {
-        promise.setException(RpcError(payload));
-      } else {
-        promise.setValue(std::move(payload));
-      }
-      payload = std::string();
-    }
+    socketAddress.setFromHostPort(address.host, address.port);
   } catch (const std::exception& e) {
-    reason = e.what();
+    throw RpcError(
+        fmt::format("Cannot resolve {}: {}", address.toString(), e.what()));
   }
-  close();
-  failPending(reason);
+
+  ConnectCallback connected;
+  folly::AsyncSocket::UniquePtr socket;
+  eventBase_->runInEventBaseThreadAndWait([&] {
+    socket = folly::AsyncSocket::UniquePtr(new folly::AsyncSocket(eventBase_));
+    socket->connect(&connected, socketAddress, timeout.count());
+  });
+  auto result = connected.future().getTry();
+  if (result.hasException()) {
+    eventBase_->runInEventBaseThreadAndWait([&] { socket.reset(); });
+    throw RpcError(fmt::format(
+        "Cannot connect to {}: {}",
+        address.toString(),
+        result.exception().get_exception()->what()));
+  }
+
+  eventBase_->runInEventBaseThreadAndWait([&] {
+    auto channel = apache::thrift::RocketClientChannel::newChannel(
+        std::move(socket));
+    // Tasks run as long as they take; callers bound their own waits.
+    channel->setTimeout(0);
+    channel->setCloseCallback(this);
+    channel_ = std::move(channel);
+  });
 }
 
-void RpcClient::failPending(const std::string& reason) {
-  std::map<uint64_t, folly::Promise<std::string>> pending;
-  {
-    std::lock_guard<std::mutex> l(mutex_);
-    pending.swap(pending_);
+Connection::~Connection() {
+  eventBase_->runImmediatelyOrRunInEventBaseThreadAndWait([this] {
+    auto* channel = static_cast<apache::thrift::ClientChannel*>(channel_.get());
+    channel->setCloseCallback(nullptr);
+    channel->closeNow();
+    channel_.reset();
+  });
+}
+
+void Connection::close() {
+  open_ = false;
+  // Without waiting: the caller may hold locks that failing calls' callbacks
+  // take.
+  eventBase_->runInEventBaseThread([channel = channel_] {
+    static_cast<apache::thrift::ClientChannel*>(channel.get())->closeNow();
+  });
+}
+
+void Connection::channelClosed() {
+  open_ = false;
+}
+
+void throwRpcError(
+    const HostAndPort& address,
+    const folly::exception_wrapper& error) {
+  if (error.is_compatible_with<RpcError>()) {
+    error.throw_exception();
   }
-  for (auto& [id, promise] : pending) {
-    promise.setException(RpcError(fmt::format(
-        "Connection to {} lost: {}", address_.toString(), reason)));
-  }
+  const auto* e = error.get_exception();
+  throw RpcError(fmt::format(
+      "Call to {} failed: {}",
+      address.toString(),
+      e != nullptr ? e->what() : error.what().toStdString()));
 }
 
 } // namespace ember::rpc

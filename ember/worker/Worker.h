@@ -5,7 +5,7 @@
 // 'driver', retrying until the driver is up, and sends heartbeats. For each
 // driver it registers with it creates a fresh Executor, with its own shuffle
 // directory under 'localDirectory', and removes it when that driver is done:
-// the driver sent kShutdown, stopped answering heartbeats, or forgot the
+// the driver called shutdown, stopped answering heartbeats, or forgot the
 // worker. Then the worker exits, or with 'persistent' waits for the next
 // driver at the same address.
 //
@@ -21,7 +21,8 @@
 #include <mutex>
 #include <string>
 
-#include "ember/rpc/RpcClient.h"
+#include <folly/futures/Future.h>
+
 #include "ember/rpc/RpcServer.h"
 
 namespace folly {
@@ -85,8 +86,13 @@ class Worker {
   void startExecutor();
   void stopExecutor();
 
-  folly::SemiFuture<std::unique_ptr<folly::IOBuf>> launchTask(
-      std::string task);
+  // Serves WorkerService.
+  class Handler;
+
+  folly::SemiFuture<std::unique_ptr<std::string>> launchTask(
+      std::unique_ptr<std::string> task);
+  void removeShuffle(int32_t shuffleId);
+  void shutdown();
 
   const WorkerOptions options_;
   std::string address_;

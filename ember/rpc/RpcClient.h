@@ -1,43 +1,49 @@
-// The calling side of a connection: sends requests and completes a future per
-// request when its response arrives. Any number of calls may be in flight; a
-// reader thread matches responses to them by id.
+// A connection to one of Ember's Thrift services (ember.thrift), usable from
+// any thread.
+//
+// fbthrift's channels belong to an event base thread; this wraps one on a
+// thread of a process-wide IO pool. Any number of calls may be in flight on a
+// connection and complete in any order. Calls fail with RpcError: when the
+// handler threw, when the connection broke (which fails every pending call),
+// or after close(). There is no default call timeout, since a task runs as
+// long as it takes; callers bound their waits.
 
 #pragma once
 
 #include <atomic>
 #include <chrono>
-#include <map>
 #include <memory>
-#include <mutex>
-#include <string>
-#include <thread>
 
+#include <fmt/format.h>
 #include <folly/futures/Future.h>
+#include <thrift/lib/cpp2/async/RequestCallback.h>
+#include <thrift/lib/cpp2/async/RequestChannel.h>
 
 #include "ember/rpc/Rpc.h"
 
+namespace folly {
+class EventBase;
+}
+
+namespace apache::thrift {
+template <typename Service>
+class Client;
+}
+
 namespace ember::rpc {
 
-class RpcClient {
+/// The service-independent part of RpcClient: the channel and its state.
+class Connection : private apache::thrift::CloseCallback {
  public:
   /// Connects to 'address'. Throws RpcError if it cannot within 'timeout'.
-  static std::shared_ptr<RpcClient> connect(
+  explicit Connection(
       const HostAndPort& address,
-      std::chrono::milliseconds timeout = std::chrono::seconds(10));
+      std::chrono::milliseconds timeout);
 
-  ~RpcClient();
+  ~Connection() override;
 
-  RpcClient(const RpcClient&) = delete;
-  RpcClient& operator=(const RpcClient&) = delete;
-
-  /// Sends a request. The future holds the response payload, or fails with
-  /// RpcError if the server's handler failed or the connection broke.
-  folly::SemiFuture<std::string> call(Method method, std::string payload);
-
-  /// call() with an IOBuf payload, sent without copying.
-  folly::SemiFuture<std::string> call(
-      Method method,
-      std::unique_ptr<folly::IOBuf> payload);
+  Connection(const Connection&) = delete;
+  Connection& operator=(const Connection&) = delete;
 
   const HostAndPort& address() const {
     return address_;
@@ -45,26 +51,95 @@ class RpcClient {
 
   /// False once the connection broke or close() was called.
   bool isOpen() const {
-    return !closed_;
+    return open_;
   }
 
   /// Breaks the connection; pending calls fail.
   void close();
 
- private:
-  RpcClient(HostAndPort address, int fd);
+  folly::EventBase* eventBase() const {
+    return eventBase_;
+  }
 
-  void readLoop();
-  void failPending(const std::string& reason);
+  const std::shared_ptr<apache::thrift::RequestChannel>& channel() const {
+    return channel_;
+  }
+
+ private:
+  void channelClosed() override;
 
   const HostAndPort address_;
-  const int fd_;
-  std::thread reader_;
-  std::atomic<bool> closed_{false};
-  std::mutex writeMutex_;
-  std::mutex mutex_;
-  uint64_t nextId_{1};
-  std::map<uint64_t, folly::Promise<std::string>> pending_;
+  folly::EventBase* const eventBase_;
+  std::shared_ptr<apache::thrift::RequestChannel> channel_;
+  std::atomic<bool> open_{true};
+};
+
+/// Turns a failed call's exception into RpcError.
+[[noreturn]] void throwRpcError(
+    const HostAndPort& address,
+    const folly::exception_wrapper& error);
+
+template <typename Service>
+class RpcClient {
+ public:
+  /// Connects to 'address'. Throws RpcError if it cannot within 'timeout'.
+  static std::shared_ptr<RpcClient> connect(
+      const HostAndPort& address,
+      std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    return std::shared_ptr<RpcClient>(new RpcClient(address, timeout));
+  }
+
+  ~RpcClient() {
+    // The generated client releases the channel, which must happen on its
+    // thread.
+    connection_.eventBase()->runImmediatelyOrRunInEventBaseThreadAndWait(
+        [this] { client_.reset(); });
+  }
+
+  RpcClient(const RpcClient&) = delete;
+  RpcClient& operator=(const RpcClient&) = delete;
+
+  /// Makes a call with the generated client, e.g.
+  ///
+  ///   client->call([&](auto& c) { return c.semifuture_heartbeat(request); })
+  ///
+  /// The arguments are serialized before call() returns.
+  template <typename MakeCall>
+  auto call(MakeCall&& makeCall) {
+    using Result = typename decltype(makeCall(*client_))::value_type;
+    if (!connection_.isOpen()) {
+      return folly::makeSemiFuture<Result>(RpcError(fmt::format(
+          "Connection to {} is closed", connection_.address().toString())));
+    }
+    return makeCall(*client_).deferError(
+        [address = connection_.address()](
+            folly::exception_wrapper error) -> Result {
+          throwRpcError(address, error);
+        });
+  }
+
+  const HostAndPort& address() const {
+    return connection_.address();
+  }
+
+  /// False once the connection broke or close() was called.
+  bool isOpen() const {
+    return connection_.isOpen();
+  }
+
+  /// Breaks the connection; pending calls fail.
+  void close() {
+    connection_.close();
+  }
+
+ private:
+  RpcClient(const HostAndPort& address, std::chrono::milliseconds timeout)
+      : connection_{address, timeout},
+        client_{std::make_unique<apache::thrift::Client<Service>>(
+            connection_.channel())} {}
+
+  Connection connection_;
+  std::unique_ptr<apache::thrift::Client<Service>> client_;
 };
 
 } // namespace ember::rpc

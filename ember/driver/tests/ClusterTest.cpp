@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <netinet/in.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <spawn.h>
@@ -15,7 +16,6 @@
 #include <filesystem>
 
 #include "ember/driver/DagScheduler.h"
-#include "ember/rpc/RpcServer.h"
 #include "ember/tests/WordCountUtil.h"
 #include "ember/worker/Worker.h"
 #include "velox/common/base/tests/GTestUtils.h"
@@ -35,9 +35,17 @@ std::string workerBinary() {
 }
 
 uint16_t freePort() {
-  rpc::RpcServer server;
-  server.start("", 0);
-  return server.port();
+  const int fd = ::socket(AF_INET6, SOCK_STREAM, 0);
+  VELOX_CHECK_GE(fd, 0);
+  sockaddr_in6 address{};
+  address.sin6_family = AF_INET6;
+  socklen_t length = sizeof(address);
+  VELOX_CHECK_EQ(
+      ::bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+  VELOX_CHECK_EQ(
+      ::getsockname(fd, reinterpret_cast<sockaddr*>(&address), &length), 0);
+  ::close(fd);
+  return ntohs(address.sin6_port);
 }
 
 class WorkerProcess {

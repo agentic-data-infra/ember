@@ -9,24 +9,6 @@
 
 namespace ember::rpc {
 
-const char* methodName(Method method) {
-  switch (method) {
-    case Method::kRegisterWorker:
-      return "RegisterWorker";
-    case Method::kHeartbeat:
-      return "Heartbeat";
-    case Method::kLaunchTask:
-      return "LaunchTask";
-    case Method::kRemoveShuffle:
-      return "RemoveShuffle";
-    case Method::kShutdown:
-      return "Shutdown";
-    case Method::kFetchBlock:
-      return "FetchBlock";
-  }
-  return "Unknown";
-}
-
 std::string HostAndPort::toString() const {
   if (host.find(':') != std::string::npos) {
     return fmt::format("[{}]:{}", host, port);

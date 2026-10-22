@@ -20,5 +20,5 @@ partition's runs. Attempts write temp files and rename them; the first commit
 wins, so a retried or duplicate task never corrupts a block.
 
 The worker never reads files directly in a reduce task: it fetches whole
-blocks through `BlockTransport`, local today and over RPC once driver and
-workers are separate processes.
+blocks through `BlockTransport`: read in process by the local backend, over
+RPC (`fetchBlock`) between worker processes.

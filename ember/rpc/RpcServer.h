@@ -1,77 +1,52 @@
-// The serving side: accepts connections and answers their requests with the
-// handler registered for each method.
+// The serving side: one of Ember's Thrift services (ember.thrift) on a port.
 //
-// A handler gets the request payload and returns a future of the response
-// payload. It is called on the connection's reader thread, so a handler that
-// blocks or runs long (a task, a disk read) should move its work to an
-// executor and return the future. Responses go out as they complete, in any
-// order.
+// A handler implements the generated apache::thrift::ServiceHandler<Service>,
+// typically its semifuture_ methods. They are called on the server's own
+// threads; one that blocks or runs long (a task, a disk read) should move its
+// work to an executor and return the future. A handler that throws, or whose
+// future fails, fails the call with the exception's message.
 
 #pragma once
 
-#include <atomic>
-#include <functional>
-#include <list>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <thread>
-
-#include <folly/futures/Future.h>
-#include <folly/io/IOBuf.h>
 
 #include "ember/rpc/Rpc.h"
+
+namespace apache::thrift {
+class AsyncProcessorFactory;
+class ScopedServerInterfaceThread;
+} // namespace apache::thrift
 
 namespace ember::rpc {
 
 class RpcServer {
  public:
-  using Handler = std::function<folly::SemiFuture<std::unique_ptr<folly::IOBuf>>(
-      std::string payload)>;
-
-  RpcServer() = default;
+  RpcServer();
   ~RpcServer();
 
   RpcServer(const RpcServer&) = delete;
   RpcServer& operator=(const RpcServer&) = delete;
 
-  /// Registers the handler of 'method'. Call before start().
-  void setHandler(Method method, Handler handler);
-
-  /// Starts serving on 'host' and 'port'; port 0 picks a free one. Throws
-  /// RpcError if it cannot listen.
-  void start(const std::string& host, uint16_t port);
+  /// Starts serving 'handler' on 'host' (empty for all interfaces) and
+  /// 'port'; port 0 picks a free one. Throws RpcError if it cannot listen.
+  void start(
+      std::shared_ptr<apache::thrift::AsyncProcessorFactory> handler,
+      const std::string& host,
+      uint16_t port);
 
   /// The port served, once started.
   uint16_t port() const {
     return port_;
   }
 
-  /// Stops accepting and closes every connection. Responses still pending are
-  /// dropped.
+  /// Stops accepting and closes every connection. Calls still running are
+  /// not answered.
   void stop();
 
  private:
-  struct Connection;
-
-  void acceptLoop();
-  void serve(const std::shared_ptr<Connection>& connection);
-  void reapFinished();
-
-  std::map<Method, Handler> handlers_;
-  int listenFd_{-1};
+  std::unique_ptr<apache::thrift::ScopedServerInterfaceThread> server_;
   uint16_t port_{0};
-  std::atomic<bool> stopped_{false};
-  std::thread acceptor_;
-  std::mutex mutex_;
-  std::list<std::shared_ptr<Connection>> connections_;
 };
-
-/// A handler's response from bytes.
-inline folly::SemiFuture<std::unique_ptr<folly::IOBuf>> respond(
-    std::string payload) {
-  return folly::makeSemiFuture(folly::IOBuf::fromString(std::move(payload)));
-}
 
 } // namespace ember::rpc

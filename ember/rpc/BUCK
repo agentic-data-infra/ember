@@ -1,10 +1,24 @@
-# Length-prefixed TCP RPC between the driver and workers.
+# Ember's RPC over fbthrift: the services in ember.thrift, plus a thread-safe
+# client and a server around fbthrift's.
+
+load("//third-party:thrift.bzl", "thrift_cpp_library")
+
+thrift_cpp_library(
+    name = "ember_thrift",
+    src = "ember.thrift",
+    services = [
+        "DriverService",
+        "ShuffleBlockService",
+        "WorkerService",
+    ],
+    visibility = ["PUBLIC"],
+)
 
 cxx_library(
     name = "rpc",
     srcs = glob(["*.cpp"]),
     header_namespace = "ember/rpc",
     exported_headers = glob(["*.h"]),
-    exported_deps = ["//third-party:velox_axiom"],
+    exported_deps = [":ember_thrift"],
     visibility = ["PUBLIC"],
 )
