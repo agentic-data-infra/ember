@@ -6,6 +6,7 @@
 
 #include "axiom/logical_plan/PlanPrinter.h"
 #include "axiom/optimizer/ToVelox.h"
+#include "ember/CachedTable.h"
 #include "ember/Session.h"
 #include "ember/functions.h"
 
@@ -99,7 +100,9 @@ std::string Row::toString() const {
     if (i > 0) {
       result += ",";
     }
-    result += values_[i].isNull() ? "null" : values_[i].toString(nullptr);
+    result += values_[i].isNull()
+        ? "null"
+        : values_[i].toString(values_[i].inferType());
   }
   return result + "]";
 }
@@ -432,6 +435,26 @@ std::string Dataframe::explainString() const {
 
 void Dataframe::explain() const {
   std::cout << explainString() << std::endl;
+}
+
+Dataframe Dataframe::cache() const {
+  auto table = registerCachedTable(
+      schema(), [prefix = *this] { return prefix.physicalPlan(); });
+  return Dataframe(
+      session_,
+      std::make_shared<const PlanStep>(
+          nullptr,
+          [id = table->id](lp::PlanBuilder& builder, const auto& /*context*/) {
+            builder.tableScan(SessionState::fileConnectorId(), kCachedSchema, id);
+          },
+          table));
+}
+
+const Dataframe& Dataframe::unpersist() const {
+  if (step_->cached_ != nullptr) {
+    session_->uncache(step_->cached_->id);
+  }
+  return *this;
 }
 
 Dataframe GroupedData::agg(const std::vector<Column>& aggregates) const {

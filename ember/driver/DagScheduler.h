@@ -11,6 +11,12 @@
 // in a memo by key. A later job's stage with the same key reads the stored
 // output instead of running; stages only it reads do not run either. Stored
 // outputs lost with their executor are recomputed as in any job.
+//
+// Cached Dataframes: a stage that reads a cached table (CachedTable.h) first
+// materializes it, as a job of its own over the cached plan whose last stage
+// writes one shuffle partition per task. That output stays in the memo, under
+// its stage key (or the table's id, if it has none), whether or not other
+// outputs are kept; later jobs, and lost outputs, rerun only what is missing.
 
 #pragma once
 
@@ -89,6 +95,14 @@ class DagScheduler {
   /// The stages 'plan' runs as, marking those that would reuse stored output.
   std::string explain(const facebook::axiom::optimizer::MultiFragmentPlan& plan);
 
+  /// Makes sure the output of cached table 'id' is stored, running its plan
+  /// if needed, and returns the shuffle that holds it.
+  int32_t materialize(const std::string& id);
+
+  /// Drops the stored output of cached table 'id'. Returns false if none was
+  /// stored.
+  bool uncache(const std::string& id);
+
   SchedulerBackend& backend() {
     return taskScheduler_.backend();
   }
@@ -97,18 +111,41 @@ class DagScheduler {
   struct JobContext;
   struct StageState;
 
+  // Runs 'stages' as one job. The last stage is the result stage, whose rows
+  // are returned, or, with 'outputKey', a map stage whose output is kept in
+  // the memo under that key; then 'outputShuffle' is set to its shuffle.
+  std::vector<facebook::velox::RowVectorPtr> runStages(
+      StagePlan& stages,
+      const std::optional<std::string>& outputKey,
+      facebook::velox::memory::MemoryPool* pool,
+      int32_t* outputShuffle = nullptr);
+
   // Runs 'stage' until all its partitions are done, first rerunning lost
   // outputs of the stages it reads.
   void runStage(StageState& stage, JobContext& job);
+
+  // The stages of cached table 'id', planned to store its output.
+  StagePlan cachedStagePlan(const std::string& id);
+
+  CachedOutput cachedOutput(const std::string& id);
+
+  // The memo key of a cached table's output.
+  static std::string cacheMemoKey(
+      const std::string& id,
+      const std::optional<std::string>& key) {
+    return key.value_or("cached " + id);
+  }
 
   // Serialized splits for each task of a source stage, per scan node.
   std::vector<std::map<std::string, std::vector<folly::dynamic>>> scanSplits(
       const Stage& stage,
       JobContext& job);
 
-  // The shuffle that holds the stored output of 'stage', if it can be reused:
-  // one stored under its key with as many map outputs as it has tasks.
-  std::optional<int32_t> storedShuffle(const Stage& stage, int32_t numTasks);
+  // The shuffle stored under 'key', if it can be reused by a stage with
+  // 'numTasks' tasks: one with as many map outputs.
+  std::optional<int32_t> storedShuffle(
+      const std::optional<std::string>& key,
+      int32_t numTasks);
 
   const DagSchedulerOptions options_;
   const bool reuseOutputs_;

@@ -631,6 +631,122 @@ TEST_F(SchedulerTest, recomputesLostStoredOutputs) {
   EXPECT_EQ(backend->totalLaunches(), 2 * launches + 1);
 }
 
+// The read of a cached table in 'plan'.
+std::optional<Stage::ShuffleInput> cachedInput(
+    DagScheduler& dag,
+    const facebook::axiom::optimizer::MultiFragmentPlan& plan) {
+  for (const auto& stage : dag.stagePlan(plan).stages) {
+    for (const auto& input : stage.shuffleInputs) {
+      if (input.cacheId.has_value()) {
+        return input;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+// The key of the cached output 'plan' reads.
+std::optional<std::string> cachedInputKey(
+    DagScheduler& dag,
+    const facebook::axiom::optimizer::MultiFragmentPlan& plan) {
+  auto input = cachedInput(dag, plan);
+  return input.has_value() ? input->cacheKey : std::nullopt;
+}
+
+// A threshold sweep over a cached projection computes the projection once;
+// the filter is not pushed into it.
+TEST_F(SchedulerTest, cachedSweepComputesPrefixOnce) {
+  auto path = writeCorpus(3, 300);
+  auto lines = ember_->read().text(path).select(
+      length(col("value")).as("len"), upper(col("value")).as("upper"));
+  auto cached = lines.cache();
+  auto sweep = [](const Dataframe& df, int32_t threshold) {
+    return df.filter(col("len") > lit(int64_t{threshold}))
+        .agg({countAll().as("n"), sum(length(col("upper"))).as("chars")});
+  };
+
+  std::map<std::string, int32_t> ranTasks;
+  std::map<std::string, int32_t> reusedStages;
+  auto [dag, backend] = scheduler(
+      {}, nullptr, [&](const StageAttemptInfo& info, FlakyBackend&) {
+        if (info.stageKey.has_value()) {
+          ranTasks[*info.stageKey] += info.partitions.size();
+          reusedStages[*info.stageKey] += info.reused;
+        }
+      });
+  const auto cutKey = cachedInputKey(*dag, *sweep(cached, 0).physicalPlan());
+  ASSERT_TRUE(cutKey.has_value());
+  EXPECT_NE(
+      dag->explain(*sweep(cached, 0).physicalPlan()).find("not stored yet"),
+      std::string::npos);
+
+  const std::vector<int32_t> thresholds = {0, 20, 40, 60};
+  for (auto threshold : thresholds) {
+    EXPECT_EQ(
+        toStrings(dag->runJob(*sweep(cached, threshold).physicalPlan(), pool_.get())),
+        toStrings(sweep(lines, threshold).collectBatches()))
+        << threshold;
+  }
+  // One task per file, once; every later job reads the stored output.
+  EXPECT_EQ(ranTasks[*cutKey], 3);
+  EXPECT_EQ(reusedStages[*cutKey], thresholds.size() - 1);
+  EXPECT_NE(
+      dag->explain(*sweep(cached, 99).physicalPlan()).find("(stored)"),
+      std::string::npos);
+
+  // A different cached prefix has a different key, and computes.
+  auto other = lines.select(col("len"), lower(col("upper")).as("upper")).cache();
+  const auto otherKey = cachedInputKey(*dag, *sweep(other, 0).physicalPlan());
+  ASSERT_TRUE(otherKey.has_value());
+  EXPECT_NE(otherKey, cutKey);
+  EXPECT_EQ(
+      toStrings(dag->runJob(*sweep(other, 20).physicalPlan(), pool_.get())),
+      toStrings(sweep(lines, 20).collectBatches()));
+  EXPECT_EQ(ranTasks[*otherKey], 3);
+
+  // Dropped, it computes again.
+  const auto id = *cachedInput(*dag, *sweep(cached, 0).physicalPlan())->cacheId;
+  EXPECT_TRUE(dag->uncache(id));
+  EXPECT_FALSE(dag->uncache(id));
+  dag->runJob(*sweep(cached, 0).physicalPlan(), pool_.get());
+  EXPECT_EQ(ranTasks[*cutKey], 6);
+}
+
+// A cached output lost with its executor is recomputed, only the lost part.
+TEST_F(SchedulerTest, recomputesLostCachedOutput) {
+  auto path = writeCorpus(3, 100);
+  auto cached = ember_->read()
+                    .text(path)
+                    .select(upper(col("value")).as("upper"))
+                    .cache();
+  auto df = cached.groupBy("upper").count();
+  auto expected = sorted(toStrings(df.collectBatches()));
+
+  std::map<int32_t, std::string> locations;
+  std::map<std::string, int32_t> ranTasks;
+  auto [dag, backend] = scheduler(
+      {}, nullptr, [&](const StageAttemptInfo& info, FlakyBackend&) {
+        if (info.stageKey.has_value()) {
+          ranTasks[*info.stageKey] += info.partitions.size();
+        }
+        for (const auto& [map, location] : info.outputLocations) {
+          locations[map] = location;
+        }
+      });
+  const auto plan = df.physicalPlan();
+  const auto cutKey = cachedInputKey(*dag, *plan);
+  ASSERT_TRUE(cutKey.has_value());
+  EXPECT_EQ(sorted(toStrings(dag->runJob(*plan, pool_.get()))), expected);
+  EXPECT_EQ(ranTasks[*cutKey], 3);
+
+  // The local backend has one executor: all outputs are lost.
+  backend->restartExecutor(locations.begin()->second);
+  EXPECT_EQ(sorted(toStrings(dag->runJob(*plan, pool_.get()))), expected);
+  EXPECT_EQ(ranTasks[*cutKey], 6);
+  EXPECT_EQ(sorted(toStrings(dag->runJob(*plan, pool_.get()))), expected);
+  EXPECT_EQ(ranTasks[*cutKey], 6);
+}
+
 // Query config that can change results is part of the key; Ember's own config
 // is not.
 TEST_F(SchedulerTest, keysCoverQueryConfig) {

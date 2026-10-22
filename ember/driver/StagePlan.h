@@ -8,6 +8,12 @@
 // A stage's plan is serialized once, with Velox serde, and sent with each of
 // its tasks: the task binary. File scans are rewritten to serializable
 // handles on the way. Each stage gets a content key (StageKey.h).
+//
+// A scan of a cached table (CachedTable.h) becomes a ShuffleRead of the
+// shuffle that stores the cached plan's output, as a cached input: task p of
+// the stage reads every block of map outputs p, p + numTasks, ... A cached
+// plan itself is planned with 'materialize' set, so that its last stage
+// writes that shuffle instead of returning rows.
 
 #pragma once
 
@@ -52,6 +58,11 @@ struct Stage {
     facebook::velox::core::PlanNodeId nodeId;
     int32_t shuffleId;
     bool broadcast;
+    /// Set for a read of a cached table. Its shuffle id is a negative
+    /// placeholder until the scheduler knows the stored shuffle.
+    std::optional<std::string> cacheId;
+    /// The key of the cached output, if it has one.
+    std::optional<std::string> cacheKey;
   };
   std::vector<ShuffleInput> shuffleInputs;
 
@@ -74,7 +85,7 @@ struct StagePlan {
   }
 
   /// One line per stage plus its plan, as explain() shows it. 'note' adds to
-  /// a keyed stage's key, e.g. that it reuses stored output.
+  /// a stage's key, e.g. that it reuses stored output.
   std::string toString(
       const std::function<std::string(const Stage&)>& note = nullptr) const;
 
@@ -85,12 +96,30 @@ struct StagePlan {
       facebook::velox::memory::MemoryPool* pool);
 };
 
+/// What a scan of a cached table reads: the stored output of its plan.
+struct CachedOutput {
+  /// The cached Dataframe's schema; the stored rows have the same columns by
+  /// position, under the names in 'type'.
+  facebook::velox::RowTypePtr schema;
+  facebook::velox::RowTypePtr type;
+  std::string serdeKind;
+  std::optional<std::string> key;
+};
+
+/// The output of the cached table with the given id.
+using CachedOutputResolver = std::function<CachedOutput(const std::string&)>;
+
 /// Cuts 'plan' into stages. 'pool' holds constants of the deserialized plans.
 /// 'keyConfig' is the query config that can change results; it goes into the
-/// stage keys.
+/// stage keys. 'cachedOutput' resolves scans of cached tables. With
+/// 'materialize', the plan's output is written to a shuffle with one partition
+/// per map output: the last stage is the map stage that writes it, and there
+/// is no result stage.
 StagePlan planStages(
     const facebook::axiom::optimizer::MultiFragmentPlan& plan,
     facebook::velox::memory::MemoryPool* pool,
-    const std::map<std::string, std::string>& keyConfig = {});
+    const std::map<std::string, std::string>& keyConfig = {},
+    const CachedOutputResolver& cachedOutput = nullptr,
+    bool materialize = false);
 
 } // namespace ember::driver
