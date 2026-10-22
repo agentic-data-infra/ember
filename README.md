@@ -100,7 +100,3 @@ buck2 run //examples:threshold_sweep -- docs/ cache     # or nocache
 ## Layout
 
 See [ember/README.md](ember/README.md).
-
-## License
-
-Ember is licensed under the [Apache License, Version 2.0](LICENSE).
