@@ -85,6 +85,10 @@ std::string TaskResult::serialize() const {
   obj["state"] = state == TaskState::kFinished ? "finished" : "failed";
   obj["error"] = error;
   obj["userError"] = userError;
+  if (fetchFailure.has_value()) {
+    obj["fetchFailure"] =
+        shuffle::blockUrl(fetchFailure->location, fetchFailure->block);
+  }
   if (mapStatus.has_value()) {
     folly::dynamic lengths = folly::dynamic::array;
     for (auto length : mapStatus->partitionLengths) {
@@ -123,6 +127,11 @@ TaskResult TaskResult::deserialize(const std::string& bytes) {
                                                        : TaskState::kFailed;
   result.error = obj["error"].asString();
   result.userError = obj["userError"].asBool();
+  if (obj.count("fetchFailure")) {
+    auto [location, block] =
+        shuffle::parseBlockUrl(obj["fetchFailure"].asString());
+    result.fetchFailure = shuffle::FetchFailure{std::move(location), block};
+  }
   if (obj.count("mapStatus")) {
     shuffle::MapStatus status;
     status.location = obj["mapStatus"]["location"].asString();

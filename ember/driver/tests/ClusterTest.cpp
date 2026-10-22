@@ -1,7 +1,8 @@
 // Ember as a cluster on one machine: a driver (this test) and ember-worker
 // processes started separately, as they would be on other hosts. Tasks reach
 // the workers over RPC and every shuffle block travels between workers over
-// TCP.
+// TCP. Workers are killed or frozen mid-job to check that lost shuffle
+// outputs are recomputed.
 
 #include <gtest/gtest.h>
 
@@ -13,6 +14,7 @@
 
 #include <filesystem>
 
+#include "ember/driver/DagScheduler.h"
 #include "ember/rpc/RpcServer.h"
 #include "ember/tests/WordCountUtil.h"
 #include "ember/worker/Worker.h"
@@ -70,6 +72,12 @@ class WorkerProcess {
     }
   }
 
+  /// Stops the process without ending it, as if it hung.
+  void freeze() {
+    VELOX_CHECK_GT(pid_, 0);
+    ::kill(pid_, SIGSTOP);
+  }
+
   /// Waits up to 'timeout' for the process to exit. Returns its exit status,
   /// or nullopt if it is still running.
   std::optional<int> waitForExit(std::chrono::milliseconds timeout) {
@@ -109,28 +117,52 @@ class ClusterTest : public testing::Test {
     fs::remove_all(dir_);
   }
 
-  void startWorkers(int32_t count, int32_t slots) {
+  void startWorkers(
+      int32_t count,
+      int32_t slots,
+      std::vector<std::string> extraArgs = {}) {
     for (int32_t i = 0; i < count; ++i) {
       const auto id = workers_.size();
+      const auto port = freePort();
+      std::vector<std::string> args{
+          fmt::format("--driver=localhost:{}", port_),
+          fmt::format("--slots={}", slots),
+          "--host=localhost",
+          fmt::format("--port={}", port),
+          fmt::format("--local_dir={}", (dir_ / "workers").string()),
+          // Even a worker's own blocks go over TCP.
+          "--fetch_local_blocks_over_network"};
+      args.insert(args.end(), extraArgs.begin(), extraArgs.end());
       workers_.push_back(std::make_unique<WorkerProcess>(
-          std::vector<std::string>{
-              fmt::format("--driver=localhost:{}", port_),
-              fmt::format("--slots={}", slots),
-              "--host=localhost",
-              fmt::format("--local_dir={}", (dir_ / "workers").string()),
-              // Even a worker's own blocks go over TCP.
-              "--fetch_local_blocks_over_network"},
-          dir_ / fmt::format("worker-{}.log", id)));
+          args, dir_ / fmt::format("worker-{}.log", id)));
+      workerAddresses_.push_back(fmt::format("localhost:{}", port));
     }
   }
 
-  Session& startDriver(int32_t expectedWorkers) {
-    session_ = Session::builder()
-                   .appName("ClusterTest")
-                   .master(fmt::format("ember://localhost:{}", port_))
-                   .config("ember.cluster.workers", std::to_string(expectedWorkers))
-                   .config("ember.local.dir", (dir_ / "driver").string())
-                   .getOrCreate();
+  // The worker serving at 'address'.
+  WorkerProcess& worker(const std::string& address) {
+    for (size_t i = 0; i < workerAddresses_.size(); ++i) {
+      if (workerAddresses_[i] == address) {
+        return *workers_[i];
+      }
+    }
+    VELOX_FAIL("No worker at {}", address);
+  }
+
+  Session& startDriver(
+      int32_t expectedWorkers,
+      SessionState::StageListener onStageCompleted = nullptr,
+      std::map<std::string, std::string> config = {}) {
+    auto builder = Session::builder();
+    builder.appName("ClusterTest")
+        .master(fmt::format("ember://localhost:{}", port_))
+        .config("ember.cluster.workers", std::to_string(expectedWorkers))
+        .config("ember.local.dir", (dir_ / "driver").string())
+        .onStageCompleted(std::move(onStageCompleted));
+    for (auto& [key, value] : config) {
+      builder.config(key, value);
+    }
+    session_ = builder.getOrCreate();
     return *session_;
   }
 
@@ -138,6 +170,7 @@ class ClusterTest : public testing::Test {
   fs::path dir_;
   uint16_t port_{0};
   std::vector<std::unique_ptr<WorkerProcess>> workers_;
+  std::vector<std::string> workerAddresses_;
   std::optional<Session> session_;
 };
 
@@ -191,6 +224,136 @@ TEST_F(ClusterTest, losingAWorkerBetweenJobs) {
   EXPECT_EQ(
       test::toMap(test::wordCount(session, (dir_ / "input").string()).collect()),
       expected);
+}
+
+// Stage attempts of the jobs a test runs, as the driver reports them.
+class StageLog {
+ public:
+  SessionState::StageListener listener(
+      std::function<void(const driver::StageAttemptInfo&)> also = nullptr) {
+    return [this, also = std::move(also)](const driver::StageAttemptInfo& info) {
+      attempts_.push_back(info);
+      if (also != nullptr) {
+        also(info);
+      }
+    };
+  }
+
+  const std::vector<driver::StageAttemptInfo>& attempts() const {
+    return attempts_;
+  }
+
+  // Highest attempt number of 'stageId'.
+  int32_t lastAttempt(int32_t stageId) const {
+    int32_t last = -1;
+    for (const auto& attempt : attempts_) {
+      if (attempt.stageId == stageId) {
+        last = std::max(last, attempt.attempt);
+      }
+    }
+    return last;
+  }
+
+ private:
+  std::vector<driver::StageAttemptInfo> attempts_;
+};
+
+// A worker dies after the map stage, holding some of its output. The driver
+// sees it go, and the lost map tasks run again on the others before the
+// reduce stage reads them.
+TEST_F(ClusterTest, workerKilledAfterTheMapStage) {
+  test::writeCorpus(dir_ / "input", 6, 2000);
+  const auto expected = test::shellWordCount(dir_ / "input");
+  startWorkers(/*count=*/3, /*slots=*/2);
+
+  StageLog log;
+  std::optional<int32_t> mapStage;
+  std::string killed;
+  auto& session = startDriver(3, log.listener([&](const auto& info) {
+    if (mapStage.has_value()) {
+      return;
+    }
+    mapStage = info.stageId;
+    ASSERT_FALSE(info.outputLocations.empty());
+    killed = info.outputLocations.begin()->second;
+    worker(killed).kill();
+  }));
+
+  EXPECT_EQ(
+      test::toMap(test::wordCount(session, (dir_ / "input").string()).collect()),
+      expected);
+  EXPECT_GE(log.lastAttempt(*mapStage), 1);
+  // Reruns of the map stage ran only the lost tasks, and not on the dead
+  // worker.
+  for (const auto& attempt : log.attempts()) {
+    if (attempt.stageId == *mapStage && attempt.attempt > 0) {
+      EXPECT_LT(attempt.partitions.size(), 6);
+      for (const auto& [mapId, location] : attempt.outputLocations) {
+        EXPECT_NE(location, killed);
+      }
+    }
+  }
+}
+
+// A worker dies just before the last stage. The middle stage's outputs it
+// held are lost, and so are the map stage outputs that those depend on: both
+// stages rerun their lost tasks.
+TEST_F(ClusterTest, workerKilledBeforeTheLastStage) {
+  test::writeCorpus(dir_ / "input", 6, 2000);
+  const auto expected = test::shellWordCount(dir_ / "input");
+  startWorkers(/*count=*/3, /*slots=*/2);
+
+  StageLog log;
+  std::vector<int32_t> stages;
+  auto& session = startDriver(3, log.listener([&](const auto& info) {
+    if (std::find(stages.begin(), stages.end(), info.stageId) ==
+        stages.end()) {
+      stages.push_back(info.stageId);
+    }
+    // After the first attempt of the second stage, kill a worker holding
+    // its output.
+    if (stages.size() == 2 && info.stageId == stages[1] && info.attempt == 0) {
+      ASSERT_FALSE(info.outputLocations.empty());
+      worker(info.outputLocations.begin()->second).kill();
+    }
+  }));
+
+  auto df = test::wordCount(session, (dir_ / "input").string());
+  EXPECT_EQ(test::toMap(df.collect()), expected);
+  ASSERT_GE(stages.size(), 3);
+  EXPECT_GE(log.lastAttempt(stages[0]), 1);
+  EXPECT_GE(log.lastAttempt(stages[1]), 1);
+
+  // The session runs further jobs on the remaining workers.
+  EXPECT_EQ(session.read().text((dir_ / "input").string()).count(), 6 * 2000);
+}
+
+// A worker hangs after the map stage. Reduce tasks time out fetching from
+// it, the driver drops it when its heartbeats stop, and its map outputs are
+// recomputed.
+TEST_F(ClusterTest, workerFrozenAfterTheMapStage) {
+  test::writeCorpus(dir_ / "input", 4, 1000);
+  const auto expected = test::shellWordCount(dir_ / "input");
+  startWorkers(/*count=*/3, /*slots=*/2, {"--fetch_timeout_ms=2000"});
+
+  StageLog log;
+  std::optional<int32_t> mapStage;
+  auto& session = startDriver(
+      3,
+      log.listener([&](const auto& info) {
+        if (mapStage.has_value()) {
+          return;
+        }
+        mapStage = info.stageId;
+        ASSERT_FALSE(info.outputLocations.empty());
+        worker(info.outputLocations.begin()->second).freeze();
+      }),
+      {{SessionState::kHeartbeatTimeoutMs, "1500"}});
+
+  EXPECT_EQ(
+      test::toMap(test::wordCount(session, (dir_ / "input").string()).collect()),
+      expected);
+  EXPECT_GE(log.lastAttempt(*mapStage), 1);
 }
 
 TEST_F(ClusterTest, driverFailsWithoutWorkers) {

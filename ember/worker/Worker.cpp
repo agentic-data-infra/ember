@@ -41,7 +41,8 @@ Worker::~Worker() {
 
 std::string Worker::start() {
   transport_ = std::make_shared<NetworkBlockTransport>(
-      /*fetchLocalBlocks=*/!options_.fetchLocalBlocksOverNetwork);
+      /*fetchLocalBlocks=*/!options_.fetchLocalBlocksOverNetwork,
+      options_.fetchTimeout);
   shuffle::BlockTransport::setInstance(transport_);
   blockReaders_ = std::make_unique<folly::CPUThreadPoolExecutor>(4);
 

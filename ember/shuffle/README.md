@@ -5,10 +5,10 @@ Presto C++'s `ShuffleInterface`.
 
 | File | Contents |
 |------|----------|
-| `ShuffleInterface` | `BlockId` (shuffle, map, reduce), `MapStatus` (location, bytes per partition), `ShuffleWriter` (`collect`, `commit`, `abort`) and `BlockTransport` (`fetchBlock(location, block)`). Block URLs: `ember-shuffle://<location>/<shuffle>/<map>/<reduce>`. |
+| `ShuffleInterface` | `BlockId` (shuffle, map, reduce), `MapStatus` (location, bytes per partition), `ShuffleWriter` (`collect`, `commit`, `abort`) and `BlockTransport` (`fetchBlock(location, block)`). Block URLs: `ember-shuffle://<location>/<shuffle>/<map>/<reduce>`. `FetchFailure` names a block that could not be fetched; it travels in the task's error message as `[fetch-failed <block url>]`. |
 | `FileShuffle` | `ShuffleBlockStore`, the per-executor store of shuffle files, and its writer and the local `BlockTransport`. |
 | `ShuffleWrite` | `ShuffleWriteNode` and operator: partitions its input (hash, round robin or single), serializes it to Presto pages and hands them to a `ShuffleWriter`; commits at end of input. |
-| `ShuffleRead` | `ShuffleReadNode`: Velox's `Exchange` or `MergeExchange` fed by an `ExchangeSource` that fetches blocks through the `BlockTransport`. Splits are block URLs. |
+| `ShuffleRead` | `ShuffleReadNode`: Velox's `Exchange` or `MergeExchange` fed by an `ExchangeSource` that fetches blocks through the `BlockTransport`. Splits are block URLs. A failed fetch fails the task with a `FetchFailure`. |
 | `Shuffle` | `registerShuffle()`: plan node serde, operator translators and the exchange source factory. |
 
 On disk, map task M of shuffle S writes `shuffle_S_M.data`, frames of

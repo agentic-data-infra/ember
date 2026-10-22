@@ -57,6 +57,9 @@ std::string ClusterBackend::registerWorker(const std::string& payload) {
       removeWorkerLocked(it->second, "registered again");
     }
     workers_[worker->id] = worker;
+    if (listener_.onExecutorAdded) {
+      listener_.onExecutorAdded(worker->address);
+    }
   }
   LOG(INFO) << "Worker " << worker->address << " registered with "
             << worker->slots << " slots";
@@ -195,6 +198,9 @@ void ClusterBackend::removeWorkerLocked(
   workers_.erase(worker->id);
   // Fails the worker's running tasks.
   worker->client->close();
+  if (listener_.onExecutorLost) {
+    listener_.onExecutorLost(worker->address);
+  }
   if (workers_.empty()) {
     noWorkersSince_ = std::chrono::steady_clock::now();
   }
@@ -215,14 +221,17 @@ void ClusterBackend::monitor() {
   std::unique_lock<std::mutex> l(mutex_);
   while (!changed_.wait_for(l, kMonitorInterval, [&] { return stopped_; })) {
     const auto now = std::chrono::steady_clock::now();
-    std::vector<std::shared_ptr<WorkerInfo>> silent;
+    // A worker that died between tasks shows as a closed connection.
+    std::vector<std::pair<std::shared_ptr<WorkerInfo>, std::string>> lost;
     for (const auto& [id, worker] : workers_) {
-      if (now - worker->lastHeartbeat > options_.heartbeatTimeout) {
-        silent.push_back(worker);
+      if (!worker->client->isOpen()) {
+        lost.emplace_back(worker, "connection closed");
+      } else if (now - worker->lastHeartbeat > options_.heartbeatTimeout) {
+        lost.emplace_back(worker, "no heartbeat");
       }
     }
-    for (const auto& worker : silent) {
-      removeWorkerLocked(worker, "no heartbeat");
+    for (const auto& [worker, reason] : lost) {
+      removeWorkerLocked(worker, reason);
     }
     if (workers_.empty() && !pending_.empty() &&
         now - noWorkersSince_ > options_.noWorkersTimeout) {
@@ -239,6 +248,11 @@ void ClusterBackend::monitor() {
       l.lock();
     }
   }
+}
+
+void ClusterBackend::setExecutorListener(ExecutorListener listener) {
+  std::lock_guard<std::mutex> l(mutex_);
+  listener_ = std::move(listener);
 }
 
 void ClusterBackend::removeShuffle(int32_t shuffleId) {

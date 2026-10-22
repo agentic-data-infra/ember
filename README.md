@@ -48,7 +48,9 @@ ember_worker --driver=driver-host:7077 --slots=4
 word_count path/to/text ember://driver-host:7077 3
 ```
 
-Input paths must be readable from every worker under the same name.
+Input paths must be readable from every worker under the same name. If a
+worker dies or hangs mid-job, its tasks, and the shuffle output it held, run
+again on the remaining workers.
 `scripts/run_local_cluster.sh -n 3 -- word_count path {master} {workers}`
 does all of this on one machine.
 

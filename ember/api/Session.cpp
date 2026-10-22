@@ -81,7 +81,8 @@ std::shared_ptr<SessionState> activeSession;
 SessionState::SessionState(
     std::string appName,
     std::string master,
-    std::map<std::string, std::string> config)
+    std::map<std::string, std::string> config,
+    StageListener onStageCompleted)
     : appName_{std::move(appName)},
       master_{std::move(master)},
       config_{std::move(config)},
@@ -100,11 +101,18 @@ SessionState::SessionState(
   if (master_.starts_with(kClusterScheme)) {
     const auto address = rpc::HostAndPort::parse(
         master_.substr(kClusterScheme.size()));
+    const auto heartbeatTimeout = std::chrono::milliseconds(
+        configInt(config_, kHeartbeatTimeoutMs, 30'000));
+    // A few heartbeats fit in the timeout.
+    const auto heartbeatInterval = std::min<std::chrono::milliseconds>(
+        std::chrono::seconds(2), heartbeatTimeout / 4);
     auto cluster =
         std::make_shared<driver::ClusterBackend>(driver::ClusterBackendOptions{
             .appName = appName_,
             .bindHost = configValue(config_, kDriverBindHost, ""),
-            .port = address.port});
+            .port = address.port,
+            .heartbeatInterval = heartbeatInterval,
+            .heartbeatTimeout = heartbeatTimeout});
     cluster->waitForWorkers(
         configInt(config_, kClusterWorkers, 1),
         std::chrono::milliseconds(
@@ -126,7 +134,8 @@ SessionState::SessionState(
       driver::DagSchedulerOptions{
           .appName = appName_,
           .parallelism = parallelism_,
-          .config = config_});
+          .config = config_,
+          .onStageCompleted = std::move(onStageCompleted)});
   rootPool_ = velox::memory::memoryManager()->addRootPool(
       fmt::format("ember_{}", appName_));
   resultPool_ = rootPool_->addLeafChild("results");
@@ -266,10 +275,17 @@ Session::Builder& Session::Builder::config(
   return *this;
 }
 
+Session::Builder& Session::Builder::onStageCompleted(
+    SessionState::StageListener listener) {
+  onStageCompleted_ = std::move(listener);
+  return *this;
+}
+
 Session Session::Builder::getOrCreate() {
   std::lock_guard<std::mutex> l(activeMutex);
   if (activeSession == nullptr) {
-    activeSession = std::make_shared<SessionState>(appName_, master_, config_);
+    activeSession = std::make_shared<SessionState>(
+        appName_, master_, config_, onStageCompleted_);
   }
   return Session(activeSession);
 }

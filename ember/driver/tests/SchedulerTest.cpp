@@ -1,6 +1,6 @@
 // Ember's scheduler and shuffle end to end: stage plans, task messages,
-// retries, byte-range splits and spills, and agreement with Axiom's
-// in-process LocalRunner.
+// retries, recomputing lost shuffle outputs, byte-range splits and spills,
+// and agreement with Axiom's in-process LocalRunner.
 
 #include <gtest/gtest.h>
 
@@ -58,8 +58,24 @@ class FlakyBackend : public SchedulerBackend {
     backend_->launchTask(std::move(task), std::move(onResult));
   }
 
+  void setExecutorListener(ExecutorListener listener) override {
+    std::lock_guard<std::mutex> l(mutex_);
+    listener_ = std::move(listener);
+  }
+
   void removeShuffle(int32_t shuffleId) override {
     backend_->removeShuffle(shuffleId);
+  }
+
+  /// Reports the executor at 'location' lost, then back, as if it restarted.
+  void restartExecutor(const std::string& location) {
+    ExecutorListener listener;
+    {
+      std::lock_guard<std::mutex> l(mutex_);
+      listener = listener_;
+    }
+    listener.onExecutorLost(location);
+    listener.onExecutorAdded(location);
   }
 
   void stop() override {
@@ -85,6 +101,7 @@ class FlakyBackend : public SchedulerBackend {
   const FailIf fail_;
   std::mutex mutex_;
   std::map<int32_t, int32_t> launches_;
+  ExecutorListener listener_;
 };
 
 class SchedulerTest : public testing::Test {
@@ -117,11 +134,16 @@ class SchedulerTest : public testing::Test {
     fs::remove_all(dir_);
   }
 
-  // A scheduler over its own local executor, with 'config'.
+  using OnStage =
+      std::function<void(const StageAttemptInfo&, FlakyBackend& backend)>;
+
+  // A scheduler over its own local executor, with 'config'. 'onStage' sees
+  // every stage attempt.
   std::pair<std::unique_ptr<DagScheduler>, std::shared_ptr<FlakyBackend>>
   scheduler(
       std::map<std::string, std::string> config = {},
-      FlakyBackend::FailIf fail = nullptr) {
+      FlakyBackend::FailIf fail = nullptr,
+      OnStage onStage = nullptr) {
     auto backend = std::make_shared<FlakyBackend>(
         std::make_shared<LocalBackend>(LocalBackendOptions{
             .numSlots = 4,
@@ -133,7 +155,14 @@ class SchedulerTest : public testing::Test {
         DagSchedulerOptions{
             .appName = "SchedulerTest",
             .parallelism = 4,
-            .config = std::move(config)});
+            .config = std::move(config),
+            .onStageCompleted =
+                [onStage = std::move(onStage),
+                 raw = backend.get()](const StageAttemptInfo& info) {
+                  if (onStage != nullptr) {
+                    onStage(info, *raw);
+                  }
+                }});
     return {std::move(dag), backend};
   }
 
@@ -410,6 +439,96 @@ TEST_F(SchedulerTest, failsAfterMaxAttempts) {
       "failed 4 times. Last error: injected failure");
   const auto stages = dag->stagePlan(*df.physicalPlan());
   EXPECT_EQ(backend->launches(stages.resultStage().stageId), 4);
+
+  // The scheduler runs the next job normally.
+  auto [healthy, healthyBackend] = scheduler();
+  EXPECT_FALSE(healthy->runJob(*df.physicalPlan(), pool_.get()).empty());
+}
+
+// Deleting a map stage's files once it is done: the reduce tasks cannot fetch
+// them, so the map stage runs again and then the reduce tasks that failed.
+TEST_F(SchedulerTest, recomputesShuffleOutputsThatCannotBeFetched) {
+  auto path = writeCorpus(2, 200);
+  auto df = wordCount(path);
+  auto expected = toStrings(df.collectBatches());
+
+  std::vector<StageAttemptInfo> attempts;
+  std::optional<int32_t> mapStage;
+  auto [dag, backend] = scheduler(
+      {}, nullptr, [&](const StageAttemptInfo& info, FlakyBackend& backend) {
+        attempts.push_back(info);
+        if (!mapStage.has_value()) {
+          mapStage = info.stageId;
+          backend.removeShuffle(info.stageId);
+        }
+      });
+  EXPECT_EQ(toStrings(dag->runJob(*df.physicalPlan(), pool_.get())), expected);
+
+  const auto plan = dag->stagePlan(*df.physicalPlan());
+  const auto reduceStage = plan.stages[1].stageId;
+  ASSERT_EQ(plan.stages[0].stageId, *mapStage);
+  // Map, reduce (fetch failures), map again, reduce again, result.
+  ASSERT_EQ(attempts.size(), 5);
+  // Every reduce task that reads a block failed to fetch it.
+  EXPECT_EQ(attempts[1].stageId, reduceStage);
+  const auto failed = attempts[1].fetchFailures.size();
+  EXPECT_GT(failed, 0);
+  // Both map tasks ran again, then the failed reduce tasks.
+  EXPECT_EQ(attempts[2].stageId, *mapStage);
+  EXPECT_EQ(attempts[2].attempt, 1);
+  EXPECT_EQ(attempts[2].partitions, (std::vector<int32_t>{0, 1}));
+  EXPECT_EQ(attempts[3].stageId, reduceStage);
+  EXPECT_EQ(attempts[3].attempt, 1);
+  EXPECT_EQ(attempts[3].partitions.size(), failed);
+  EXPECT_EQ(backend->launches(*mapStage), 2 * 2);
+  EXPECT_EQ(backend->launches(reduceStage), 4 + failed);
+  EXPECT_EQ(backend->launches(plan.resultStage().stageId), 1);
+  EXPECT_TRUE(attempts[3].fetchFailures.empty());
+}
+
+// An executor lost after a map stage: its outputs are recomputed before any
+// reduce task tries to read them.
+TEST_F(SchedulerTest, recomputesOutputsOfALostExecutor) {
+  auto path = writeCorpus(2, 200);
+  auto df = wordCount(path);
+  auto expected = toStrings(df.collectBatches());
+
+  std::vector<StageAttemptInfo> attempts;
+  auto [dag, backend] = scheduler(
+      {}, nullptr, [&](const StageAttemptInfo& info, FlakyBackend& backend) {
+        attempts.push_back(info);
+        if (attempts.size() == 1) {
+          ASSERT_EQ(info.outputLocations.size(), 2);
+          backend.restartExecutor(info.outputLocations.at(0));
+        }
+      });
+  EXPECT_EQ(toStrings(dag->runJob(*df.physicalPlan(), pool_.get())), expected);
+
+  const auto plan = dag->stagePlan(*df.physicalPlan());
+  EXPECT_EQ(backend->launches(plan.stages[0].stageId), 2 * 2);
+  EXPECT_EQ(backend->launches(plan.stages[1].stageId), 4);
+  for (const auto& attempt : attempts) {
+    EXPECT_TRUE(attempt.fetchFailures.empty());
+  }
+}
+
+TEST_F(SchedulerTest, failsAfterMaxStageAttempts) {
+  auto path = writeCorpus(1, 50);
+  auto df = wordCount(path);
+  std::optional<int32_t> mapStage;
+  auto [dag, backend] = scheduler(
+      {}, nullptr, [&](const StageAttemptInfo& info, FlakyBackend& backend) {
+        if (!mapStage.has_value()) {
+          mapStage = info.stageId;
+        }
+        if (info.stageId == *mapStage) {
+          backend.removeShuffle(info.stageId);
+        }
+      });
+  VELOX_ASSERT_THROW(
+      dag->runJob(*df.physicalPlan(), pool_.get()),
+      "4 attempts lost their inputs or outputs");
+  EXPECT_EQ(backend->launches(*mapStage), 4);
 
   // The scheduler runs the next job normally.
   auto [healthy, healthyBackend] = scheduler();
