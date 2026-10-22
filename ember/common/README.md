@@ -9,4 +9,5 @@ Code shared by the api, driver and worker. Headers are included as `ember/<File>
 | `TextFileHandler` | Text format for Axiom's file connector: one `value` column per line. Reads a byte range of a file; a range owns the lines that start inside it. |
 | `ParquetFileHandler` | Axiom's parquet format, but reads the file columns named by the column handles, so scans whose columns Axiom renamed (one file scanned twice in a plan) work. Registered in place of Axiom's handler. |
 | `FileSerde` | Serializable versions of the file connector's table handle, column handle and split (`FileRangeSplit`: path, start, length), so tasks travel as bytes. |
+| `CachedTable` | Registry of cached Dataframes (`cache_<n>` to schema and plan), and the `cached` file connector format that gives the optimizer their schema. The driver replaces their scans; they are never read as files. |
 | `RowPages` | `serializeRows`/`deserializeRows`: result rows as Presto pages. |

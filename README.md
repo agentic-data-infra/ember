@@ -69,6 +69,14 @@ buck2 run //examples:domain_report -- data.parquet 'local[*]' 1 100000000 > repo
 python3 examples/check_domain_report.py data.parquet report.txt
 ```
 
+`examples/ThresholdSweep.cpp` sweeps a quality threshold over a per-document
+feature computed with a regex over the text. It caches the features with
+`Dataframe::cache()`, so only the first threshold computes them:
+
+```
+buck2 run //examples:threshold_sweep -- docs/ cache     # or nocache
+```
+
 ## Layout
 
 See [ember/README.md](ember/README.md).

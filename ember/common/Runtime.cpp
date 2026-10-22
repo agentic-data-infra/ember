@@ -7,6 +7,7 @@
 #include "axiom/connectors/ConnectorMetadataRegistry.h"
 #include "axiom/connectors/file/FileConnector.h"
 #include "axiom/connectors/file/core/FileConnectorMetadata.h"
+#include "ember/CachedTable.h"
 #include "ember/FileSerde.h"
 #include "ember/FunctionRegistry.h"
 #include "ember/ParquetFileHandler.h"
@@ -52,6 +53,7 @@ void initializeRuntime() {
 
     registerParquetFileHandler();
     registerTextFileHandler();
+    registerCachedTableHandler();
     auto connector =
         std::make_shared<axiom_connector::file::FileConnector>(kFileConnectorId);
     velox::connector::registerConnector(connector);

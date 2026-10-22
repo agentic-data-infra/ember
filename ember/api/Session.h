@@ -111,6 +111,9 @@ class SessionState {
   std::string explainStages(
       const facebook::axiom::optimizer::MultiFragmentPlanPtr& plan);
 
+  /// Drops the stored output of cached table 'id' (Dataframe::unpersist).
+  void uncache(const std::string& id);
+
   void stop();
 
  private:

@@ -175,12 +175,21 @@ class StageHasher {
       }
       data += *files;
     } else if (name == "ShuffleReadNode") {
-      const auto& parent = *byShuffle_.at(node["shuffleId"].asInt());
-      if (!parent.key.has_value()) {
-        reason_ = fmt::format("reads stage {}", parent.stageId);
-        return std::nullopt;
+      const auto shuffleId = node["shuffleId"].asInt();
+      if (const auto* input = cachedInput(shuffleId)) {
+        if (!input->cacheKey.has_value()) {
+          reason_ = fmt::format("reads {}, which has no key", *input->cacheId);
+          return std::nullopt;
+        }
+        data += "cached " + *input->cacheKey;
+      } else {
+        const auto& parent = *byShuffle_.at(shuffleId);
+        if (!parent.key.has_value()) {
+          reason_ = fmt::format("reads stage {}", parent.stageId);
+          return std::nullopt;
+        }
+        data += *parent.key;
       }
-      data += *parent.key;
     }
     auto key = hashOf(data);
     stage_.nodeKeys[node["id"].asString()] = key;
@@ -199,6 +208,15 @@ class StageHasher {
       return opts;
     }();
     return opts;
+  }
+
+  const Stage::ShuffleInput* cachedInput(int32_t shuffleId) const {
+    for (const auto& input : stage_.shuffleInputs) {
+      if (input.shuffleId == shuffleId && input.cacheId.has_value()) {
+        return &input;
+      }
+    }
+    return nullptr;
   }
 
   // Drops plan node ids and renames column names by first use.

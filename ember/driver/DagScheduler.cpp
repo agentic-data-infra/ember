@@ -8,6 +8,7 @@
 
 #include "axiom/connectors/ConnectorMetadata.h"
 #include "axiom/runner/LocalRunner.h"
+#include "ember/CachedTable.h"
 #include "ember/FileSerde.h"
 #include "ember/RowPages.h"
 #include "ember/TextFileHandler.h"
@@ -101,17 +102,42 @@ DagScheduler::~DagScheduler() {
 }
 
 StagePlan DagScheduler::stagePlan(const optimizer::MultiFragmentPlan& plan) {
-  return planStages(plan, planPool_.get(), keyConfig_);
+  return planStages(plan, planPool_.get(), keyConfig_, [this](const auto& id) {
+    return cachedOutput(id);
+  });
+}
+
+StagePlan DagScheduler::cachedStagePlan(const std::string& id) {
+  auto table = findCachedTable(id);
+  VELOX_USER_CHECK_NOT_NULL(table, "Cached Dataframe {} is gone", id);
+  return planStages(
+      *table->plan(),
+      planPool_.get(),
+      keyConfig_,
+      [this](const auto& id) { return cachedOutput(id); },
+      /*materialize=*/true);
+}
+
+CachedOutput DagScheduler::cachedOutput(const std::string& id) {
+  const auto stages = cachedStagePlan(id);
+  const auto& last = stages.stages.back();
+  const auto* write = last.plan->as<shuffle::ShuffleWriteNode>();
+  VELOX_CHECK_NOT_NULL(write);
+  return CachedOutput{
+      findCachedTable(id)->schema,
+      write->outputType(),
+      write->serdeKind(),
+      last.key};
 }
 
 std::optional<int32_t> DagScheduler::storedShuffle(
-    const Stage& stage,
+    const std::optional<std::string>& key,
     int32_t numTasks) {
-  if (!stage.key.has_value()) {
+  if (!key.has_value()) {
     return std::nullopt;
   }
   std::lock_guard<std::mutex> l(memoMutex_);
-  auto it = memo_.find(*stage.key);
+  auto it = memo_.find(*key);
   if (it == memo_.end() ||
       mapOutputTracker_.numMaps(it->second) != numTasks) {
     return std::nullopt;
@@ -135,6 +161,17 @@ std::string DagScheduler::explain(const optimizer::MultiFragmentPlan& plan) {
       if (memo_.contains(*stage.key)) {
         notes[stage.stageId] = ", reused";
         continue;
+      }
+    }
+    for (const auto& input : stage.shuffleInputs) {
+      if (input.cacheId.has_value()) {
+        std::lock_guard<std::mutex> l(memoMutex_);
+        notes[stage.stageId] += fmt::format(
+            ", reads {} ({})",
+            *input.cacheId,
+            memo_.contains(cacheMemoKey(*input.cacheId, input.cacheKey))
+                ? "stored"
+                : "not stored yet");
       }
     }
     runs.insert(stage.parents.begin(), stage.parents.end());
@@ -234,6 +271,47 @@ DagScheduler::scanSplits(const Stage& stage, JobContext& job) {
 std::vector<velox::RowVectorPtr> DagScheduler::runJob(
     const optimizer::MultiFragmentPlan& plan,
     velox::memory::MemoryPool* pool) {
+  auto stages = stagePlan(plan);
+  return runStages(stages, std::nullopt, pool);
+}
+
+int32_t DagScheduler::materialize(const std::string& id) {
+  auto stages = cachedStagePlan(id);
+  int32_t shuffleId = 0;
+  runStages(
+      stages,
+      cacheMemoKey(id, stages.stages.back().key),
+      nullptr,
+      &shuffleId);
+  return shuffleId;
+}
+
+bool DagScheduler::uncache(const std::string& id) {
+  if (findCachedTable(id) == nullptr) {
+    return false;
+  }
+  const auto stages = cachedStagePlan(id);
+  const auto key = cacheMemoKey(id, stages.stages.back().key);
+  std::optional<int32_t> shuffleId;
+  {
+    std::lock_guard<std::mutex> l(memoMutex_);
+    auto it = memo_.find(key);
+    if (it == memo_.end()) {
+      return false;
+    }
+    shuffleId = it->second;
+    memo_.erase(it);
+  }
+  backend().removeShuffle(*shuffleId);
+  mapOutputTracker_.unregisterShuffle(*shuffleId);
+  return true;
+}
+
+std::vector<velox::RowVectorPtr> DagScheduler::runStages(
+    StagePlan& stages,
+    const std::optional<std::string>& outputKey,
+    velox::memory::MemoryPool* pool,
+    int32_t* outputShuffle) {
   JobContext job;
   job.jobId = fmt::format("{}_{}", options_.appName, ++jobCounter_);
   job.queryCtx = core::QueryCtx::create(
@@ -258,34 +336,63 @@ std::vector<velox::RowVectorPtr> DagScheduler::runJob(
       std::make_shared<velox::NoopRuntimeStatWriter>(),
       runner::Properties{});
 
-  auto stages = stagePlan(plan);
+  // Cached tables this job reads are stored first; their placeholder
+  // shuffle ids become the ids of the shuffles that hold them.
+  std::map<int32_t, int32_t> newIds;
+  for (const auto& stage : stages.stages) {
+    for (const auto& input : stage.shuffleInputs) {
+      if (input.cacheId.has_value()) {
+        newIds[input.shuffleId] = materialize(*input.cacheId);
+      }
+    }
+  }
 
   std::vector<StageState> states(stages.stages.size());
   for (size_t i = 0; i < stages.stages.size(); ++i) {
     const auto& stage = stages.stages[i];
     auto& state = states[i];
     state.stage = &stage;
-    state.isResult = i + 1 == stages.stages.size();
+    state.isResult = !outputKey.has_value() && i + 1 == stages.stages.size();
+    // A stage reading cached tables runs a task per stored map output.
+    int32_t cachedMaps = 0;
+    for (const auto& input : stage.shuffleInputs) {
+      if (input.cacheId.has_value()) {
+        cachedMaps = std::max(
+            cachedMaps,
+            mapOutputTracker_.numMaps(newIds.at(input.shuffleId)).value());
+      }
+    }
     if (stage.numTasks.has_value()) {
       state.splits.resize(*stage.numTasks);
       for (size_t j = 0; j < stage.scans.size(); ++j) {
         VELOX_NYI("Scans in a stage with a fixed task count");
       }
+    } else if (cachedMaps > 0 && stage.scans.empty()) {
+      state.splits.resize(cachedMaps);
     } else {
       state.splits = scanSplits(stage, job);
+      if (state.numTasks() < cachedMaps) {
+        state.splits.resize(cachedMaps);
+      }
     }
   }
 
+  // The memo key of a stage's output.
+  auto memoKey = [&](const StageState& state) {
+    return outputKey.has_value() && &state == &states.back()
+        ? outputKey
+        : state.stage->key;
+  };
+
   // Shuffles get ids unique in the session; a stage with stored output takes
   // the id of the shuffle that holds it.
-  std::map<int32_t, int32_t> newIds;
   std::set<int32_t> reused;
   for (auto& state : states) {
     const auto& stage = *state.stage;
     if (!stage.shuffleId.has_value()) {
       continue;
     }
-    auto stored = storedShuffle(stage, state.numTasks());
+    auto stored = storedShuffle(memoKey(state), state.numTasks());
     if (stored.has_value()) {
       reused.insert(*stored);
     }
@@ -293,13 +400,16 @@ std::vector<velox::RowVectorPtr> DagScheduler::runJob(
   }
   stages.renumberShuffles(newIds, planPool_.get());
 
-  // The job's own shuffles: kept for reuse if keyed, otherwise removed.
-  std::map<int32_t, const Stage*> written;
+  // The job's own shuffles: kept for reuse if keyed, otherwise removed. A
+  // cached table's output is always kept.
+  std::map<int32_t, const StageState*> written;
   SCOPE_EXIT {
-    for (const auto& [shuffleId, stage] : written) {
-      if (reuseOutputs_ && stage->key.has_value()) {
+    for (const auto& [shuffleId, state] : written) {
+      const auto key = memoKey(*state);
+      const bool isOutput = outputKey.has_value() && state == &states.back();
+      if ((reuseOutputs_ || isOutput) && key.has_value()) {
         std::lock_guard<std::mutex> l(memoMutex_);
-        auto [it, inserted] = memo_.emplace(*stage->key, shuffleId);
+        auto [it, inserted] = memo_.emplace(*key, shuffleId);
         if (inserted) {
           continue;
         }
@@ -332,7 +442,7 @@ std::vector<velox::RowVectorPtr> DagScheduler::runJob(
     }
 
     for (const auto& input : stage.shuffleInputs) {
-      if (!input.broadcast) {
+      if (!input.broadcast && !input.cacheId.has_value()) {
         VELOX_CHECK_EQ(
             shufflePartitions.at(input.shuffleId),
             numTasks,
@@ -353,7 +463,7 @@ std::vector<velox::RowVectorPtr> DagScheduler::runJob(
               .reused = true});
         }
       } else {
-        written[*stage.shuffleId] = &stage;
+        written[*stage.shuffleId] = &state;
         mapOutputTracker_.registerShuffle(*stage.shuffleId, numTasks);
       }
       shufflePartitions[*stage.shuffleId] =
@@ -371,6 +481,10 @@ std::vector<velox::RowVectorPtr> DagScheduler::runJob(
   // stored outputs are complete already, unless some were lost.
   runStage(states.back(), job);
 
+  if (outputKey.has_value()) {
+    *outputShuffle = *states.back().stage->shuffleId;
+    return {};
+  }
   std::vector<velox::RowVectorPtr> rows;
   const auto& result = states.back();
   const auto type = result.stage->plan->outputType();
@@ -412,10 +526,15 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
     while (!inputsReady) {
       inputsReady = true;
       for (const auto& input : stage.shuffleInputs) {
-        if (!mapOutputTracker_.isComplete(input.shuffleId)) {
-          runStage(*job.producers.at(input.shuffleId), job);
-          inputsReady = false;
+        if (mapOutputTracker_.isComplete(input.shuffleId)) {
+          continue;
         }
+        if (input.cacheId.has_value()) {
+          VELOX_CHECK_EQ(materialize(*input.cacheId), input.shuffleId);
+        } else {
+          runStage(*job.producers.at(input.shuffleId), job);
+        }
+        inputsReady = false;
       }
     }
 
@@ -445,8 +564,19 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
           break;
         }
         auto& nodeSplits = task.splits[input.nodeId];
-        for (const auto& url : mapOutputTracker_.blockUrls(
-                 input.shuffleId, input.broadcast ? 0 : p)) {
+        std::vector<std::string> urls;
+        if (input.cacheId.has_value()) {
+          // Map outputs p, p + numTasks, ...
+          const auto numMaps = *mapOutputTracker_.numMaps(input.shuffleId);
+          for (int32_t m = p; m < numMaps; m += state.numTasks()) {
+            auto mapUrls = mapOutputTracker_.mapBlockUrls(input.shuffleId, m);
+            urls.insert(urls.end(), mapUrls.begin(), mapUrls.end());
+          }
+        } else {
+          urls = mapOutputTracker_.blockUrls(
+              input.shuffleId, input.broadcast ? 0 : p);
+        }
+        for (const auto& url : urls) {
           nodeSplits.push_back(
               velox::exec::RemoteConnectorSplit(url).serialize());
         }

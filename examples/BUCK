@@ -9,3 +9,9 @@ cxx_binary(
     srcs = ["DomainReport.cpp"],
     deps = ["//ember/api:api"],
 )
+
+cxx_binary(
+    name = "threshold_sweep",
+    srcs = ["ThresholdSweep.cpp"],
+    deps = ["//ember/api:api"],
+)

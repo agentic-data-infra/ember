@@ -251,6 +251,12 @@ std::string SessionState::explainStages(
   return scheduler_->explain(*plan);
 }
 
+void SessionState::uncache(const std::string& id) {
+  if (scheduler_ != nullptr) {
+    scheduler_->uncache(id);
+  }
+}
+
 void SessionState::stop() {
   if (scheduler_ != nullptr) {
     scheduler_->backend().stop();

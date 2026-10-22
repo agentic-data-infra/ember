@@ -22,6 +22,7 @@
 
 namespace ember {
 
+struct CachedTable;
 class GroupedData;
 class SessionState;
 
@@ -86,8 +87,13 @@ class PlanStep {
       facebook::axiom::logical_plan::PlanBuilder& builder,
       const facebook::axiom::logical_plan::PlanBuilder::Context& context)>;
 
-  PlanStep(std::shared_ptr<const PlanStep> parent, Apply apply)
-      : parent_{std::move(parent)}, apply_{std::move(apply)} {}
+  PlanStep(
+      std::shared_ptr<const PlanStep> parent,
+      Apply apply,
+      std::shared_ptr<const CachedTable> cached = nullptr)
+      : parent_{std::move(parent)},
+        apply_{std::move(apply)},
+        cached_{std::move(cached)} {}
 
   const std::shared_ptr<const PlanStep>& parent() const {
     return parent_;
@@ -102,6 +108,8 @@ class PlanStep {
 
   const std::shared_ptr<const PlanStep> parent_;
   const Apply apply_;
+  // The table a cache() step scans.
+  const std::shared_ptr<const CachedTable> cached_;
 
   mutable std::mutex mutex_;
   // Logical plan and schema only.
@@ -190,6 +198,27 @@ class Dataframe {
       const Dataframe& right,
       const std::vector<std::string>& usingColumns,
       const std::string& how = "inner") const;
+
+  /// Marks this Dataframe's result to be kept: the returned Dataframe reads
+  /// the same rows, but plans that use it are cut there. The first action
+  /// that needs it computes this Dataframe and stores the result on the
+  /// executors, one part per task; later actions read the stored result, in
+  /// any plan built on the returned Dataframe. Lost parts are recomputed.
+  /// The optimizer does not move work across the cut, e.g. a filter
+  /// downstream is not pushed into the cached plan.
+  ///
+  /// Use the returned Dataframe: this one is unchanged, and plans built on
+  /// it compute everything.
+  [[nodiscard]] Dataframe cache() const;
+
+  /// Alias of cache(); results are kept on the executors' local disks.
+  [[nodiscard]] Dataframe persist() const {
+    return cache();
+  }
+
+  /// On a Dataframe returned by cache(): drops the stored result, which the
+  /// next action that needs it computes again. Otherwise does nothing.
+  const Dataframe& unpersist() const;
 
   // Actions.
 

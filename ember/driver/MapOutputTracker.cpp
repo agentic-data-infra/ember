@@ -90,6 +90,25 @@ bool MapOutputTracker::isComplete(int32_t shuffleId) const {
   return true;
 }
 
+std::vector<std::string> MapOutputTracker::mapBlockUrls(
+    int32_t shuffleId,
+    int32_t mapId) const {
+  std::lock_guard<std::mutex> l(mutex_);
+  const auto& map = outputs_.at(shuffleId).at(mapId);
+  VELOX_CHECK(
+      map.has_value(),
+      "Map output {} of shuffle {} is missing",
+      mapId,
+      shuffleId);
+  std::vector<std::string> urls;
+  for (int32_t p = 0; p < map->partitionLengths.size(); ++p) {
+    if (map->partitionLengths[p] > 0) {
+      urls.push_back(shuffle::blockUrl(map->location, {shuffleId, mapId, p}));
+    }
+  }
+  return urls;
+}
+
 std::vector<std::string> MapOutputTracker::blockUrls(
     int32_t shuffleId,
     int32_t reduceId) const {

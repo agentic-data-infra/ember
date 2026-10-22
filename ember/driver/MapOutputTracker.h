@@ -55,6 +55,10 @@ class MapOutputTracker {
   /// skipping empty blocks.
   std::vector<std::string> blockUrls(int32_t shuffleId, int32_t reduceId) const;
 
+  /// Block URLs of all partitions of map output 'mapId', skipping empty
+  /// blocks.
+  std::vector<std::string> mapBlockUrls(int32_t shuffleId, int32_t mapId) const;
+
   /// Total bytes per reduce partition.
   std::vector<int64_t> partitionSizes(int32_t shuffleId) const;
 
