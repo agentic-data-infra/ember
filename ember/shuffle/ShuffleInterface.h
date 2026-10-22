@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -83,5 +84,22 @@ bool isBlockUrl(const std::string& url);
 
 /// Parses a blockUrl() into its location and block id.
 std::pair<std::string, BlockId> parseBlockUrl(const std::string& url);
+
+/// A reduce task could not fetch a block: its map output is lost, e.g. the
+/// executor that holds it died. The driver then recomputes the output rather
+/// than retrying the reduce task.
+///
+/// Velox passes an exchange source's error on to the task as a message only,
+/// so the failure travels inside the message (see message() and find()).
+struct FetchFailure {
+  std::string location;
+  BlockId block;
+
+  /// "[fetch-failed <block url>] <cause>".
+  std::string message(const std::string& cause) const;
+
+  /// The fetch failure in an error message, if any.
+  static std::optional<FetchFailure> find(const std::string& error);
+};
 
 } // namespace ember::shuffle

@@ -54,6 +54,9 @@ struct WorkerOptions {
   std::chrono::milliseconds connectTimeout{std::chrono::seconds(60)};
   /// Fetch blocks of this process's own executor over TCP too.
   bool fetchLocalBlocksOverNetwork{false};
+  /// A shuffle block fetch fails after this long; the driver then recomputes
+  /// the block.
+  std::chrono::milliseconds fetchTimeout{std::chrono::seconds(120)};
 };
 
 class Worker {

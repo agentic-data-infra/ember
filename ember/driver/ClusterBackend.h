@@ -7,8 +7,8 @@
 //
 // A worker that misses heartbeats for 'heartbeatTimeout', or whose connection
 // breaks, is dropped: its running tasks fail and the TaskScheduler retries
-// them elsewhere. Its shuffle outputs are not recomputed; that is stage
-// resubmission, which comes with fault tolerance.
+// them elsewhere, and the executor listener hears that its location is lost,
+// so the DagScheduler recomputes the shuffle outputs it held.
 
 #pragma once
 
@@ -62,6 +62,8 @@ class ClusterBackend : public SchedulerBackend {
 
   void launchTask(std::string task, ResultCallback onResult) override;
 
+  void setExecutorListener(ExecutorListener listener) override;
+
   void removeShuffle(int32_t shuffleId) override;
 
   /// Tells the workers the application is over and stops serving.
@@ -108,6 +110,7 @@ class ClusterBackend : public SchedulerBackend {
   std::map<std::string, std::shared_ptr<WorkerInfo>> workers_;
   std::deque<PendingTask> pending_;
   std::chrono::steady_clock::time_point noWorkersSince_;
+  ExecutorListener listener_;
 };
 
 } // namespace ember::driver

@@ -14,6 +14,13 @@ class SchedulerBackend {
  public:
   using ResultCallback = std::function<void(std::string taskResult)>;
 
+  /// Called with an executor's location (its shuffle outputs' location) when
+  /// it joins or is lost, on any thread.
+  struct ExecutorListener {
+    std::function<void(const std::string& location)> onExecutorAdded;
+    std::function<void(const std::string& location)> onExecutorLost;
+  };
+
   virtual ~SchedulerBackend() = default;
 
   /// Tasks that run at once.
@@ -22,6 +29,10 @@ class SchedulerBackend {
   /// Runs a serialized TaskDescription and calls 'onResult' with its
   /// serialized TaskResult, on any thread. Tasks beyond the free slots wait.
   virtual void launchTask(std::string task, ResultCallback onResult) = 0;
+
+  /// Replaces the listener; an empty one removes it. Backends whose executors
+  /// cannot be lost may ignore it.
+  virtual void setExecutorListener(ExecutorListener /*listener*/) {}
 
   /// Deletes the files of 'shuffleId' on every executor.
   virtual void removeShuffle(int32_t shuffleId) = 0;

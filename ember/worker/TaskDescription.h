@@ -55,6 +55,10 @@ struct TaskResult {
   /// The error came from the user's program (e.g. a bad cast), not from Ember.
   bool userError{false};
 
+  /// Set when the task failed because a shuffle block it reads is lost. The
+  /// driver recomputes that map output instead of retrying the task.
+  std::optional<shuffle::FetchFailure> fetchFailure;
+
   /// Set when a map task commits its shuffle output.
   std::optional<shuffle::MapStatus> mapStatus;
 

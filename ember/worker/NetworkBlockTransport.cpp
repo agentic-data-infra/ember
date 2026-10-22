@@ -24,6 +24,12 @@ NetworkBlockTransport::fetchBlock(
       ->call(
           rpc::Method::kFetchBlock,
           rpc::FetchBlock{id.shuffleId, id.mapId, id.reduceId}.serialize())
+      .within(
+          fetchTimeout_,
+          std::runtime_error(fmt::format(
+              "No reply from {} within {} ms",
+              location,
+              fetchTimeout_.count())))
       .deferValue([](std::string bytes) {
         return folly::IOBuf::fromString(std::move(bytes));
       });

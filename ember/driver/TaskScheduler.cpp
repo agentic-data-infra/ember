@@ -20,7 +20,7 @@ namespace {
 
 struct TaskSet {
   std::vector<TaskDescription> tasks;
-  std::vector<TaskResult> results;
+  TaskSetResult result;
   std::mutex mutex;
   std::condition_variable done;
   size_t pending{0};
@@ -30,11 +30,10 @@ struct TaskSet {
 
 } // namespace
 
-std::vector<TaskResult> TaskScheduler::runTaskSet(
-    std::vector<TaskDescription> tasks) {
+TaskSetResult TaskScheduler::runTaskSet(std::vector<TaskDescription> tasks) {
   auto set = std::make_shared<TaskSet>();
   set->tasks = std::move(tasks);
-  set->results.resize(set->tasks.size());
+  set->result.results.resize(set->tasks.size());
   set->pending = set->tasks.size();
 
   std::function<void(size_t)> launch = [this, set, &launch](size_t index) {
@@ -47,7 +46,12 @@ std::vector<TaskResult> TaskScheduler::runTaskSet(
             std::lock_guard<std::mutex> l(set->mutex);
             auto& task = set->tasks[index];
             if (result.state == TaskState::kFinished) {
-              set->results[index] = std::move(result);
+              set->result.results[index] = std::move(result);
+              --set->pending;
+            } else if (result.fetchFailure.has_value()) {
+              LOG(WARNING) << "Task " << result.taskId
+                           << " lost its input: " << result.error;
+              set->result.fetchFailures.push_back(*result.fetchFailure);
               --set->pending;
             } else if (
                 // An error in the user's program fails the same way again.
@@ -89,7 +93,7 @@ std::vector<TaskResult> TaskScheduler::runTaskSet(
     }
     VELOX_FAIL(*set->failure);
   }
-  return std::move(set->results);
+  return std::move(set->result);
 }
 
 } // namespace ember::driver

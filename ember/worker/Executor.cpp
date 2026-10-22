@@ -141,6 +141,10 @@ std::string Executor::runTask(const std::string& bytes) {
         result.error = fmt::format(
             "Task ended as {}", exec::taskStateString(task->state()));
       }
+      result.fetchFailure = shuffle::FetchFailure::find(result.error);
+      if (result.fetchFailure.has_value()) {
+        result.userError = false;
+      }
     } else if (
         auto write =
             std::dynamic_pointer_cast<const shuffle::ShuffleWriteNode>(plan)) {

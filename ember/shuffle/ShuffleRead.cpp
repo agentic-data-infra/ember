@@ -125,6 +125,10 @@ class ShuffleBlockSource : public exec::ExchangeSource {
         ->fetchBlock(location_, block_)
         .deferValue([self](std::unique_ptr<folly::IOBuf> data) {
           return self->enqueue(std::move(data));
+        })
+        .deferError([self](folly::exception_wrapper error) -> Response {
+          const FetchFailure failure{self->location_, self->block_};
+          VELOX_FAIL(failure.message(error.what().toStdString()));
         });
   }
 

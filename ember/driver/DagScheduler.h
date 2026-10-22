@@ -10,6 +10,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <string>
 
@@ -20,14 +21,32 @@
 
 namespace ember::driver {
 
+/// One attempt of a stage, as reported to DagSchedulerOptions::onStageCompleted.
+struct StageAttemptInfo {
+  std::string jobId;
+  int32_t stageId{0};
+  int32_t attempt{0};
+  /// Partitions (map ids, for a map stage) the attempt ran.
+  std::vector<int32_t> partitions;
+  /// Where each map output the attempt committed lives, by map id.
+  std::map<int32_t, std::string> outputLocations;
+  /// Blocks its tasks could not fetch.
+  std::vector<shuffle::FetchFailure> fetchFailures;
+};
+
 struct DagSchedulerOptions {
   std::string appName{"ember"};
   /// Tasks per stage when nothing else decides it, and the target number of
   /// splits of a file scan.
   int32_t parallelism{1};
   int32_t maxTaskAttempts{4};
+  /// Attempts of a stage that may end with partitions missing (their inputs
+  /// were lost, or their outputs) before the job fails.
+  int32_t maxStageAttempts{4};
   /// Velox query config plus Ember's keys, passed to every task.
   std::map<std::string, std::string> config;
+  /// Called on the job's thread after each stage attempt.
+  std::function<void(const StageAttemptInfo&)> onStageCompleted;
 };
 
 class DagScheduler {
@@ -40,6 +59,7 @@ class DagScheduler {
   DagScheduler(
       std::shared_ptr<SchedulerBackend> backend,
       DagSchedulerOptions options);
+  ~DagScheduler();
 
   /// Runs 'plan' and returns its rows, allocated from 'pool'.
   std::vector<facebook::velox::RowVectorPtr> runJob(
@@ -55,6 +75,11 @@ class DagScheduler {
 
  private:
   struct JobContext;
+  struct StageState;
+
+  // Runs 'stage' until all its partitions are done, first rerunning lost
+  // outputs of the stages it reads.
+  void runStage(StageState& stage, JobContext& job);
 
   // Serialized splits for each task of a source stage, per scan node.
   std::vector<std::map<std::string, std::vector<folly::dynamic>>> scanSplits(

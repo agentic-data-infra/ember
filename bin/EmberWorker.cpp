@@ -1,7 +1,7 @@
 // ember-worker: runs an Ember driver's tasks.
 //
 //   ember-worker --driver=host:port [--slots=N] [--port=P] [--host=name]
-//                [--local_dir=dir] [--persistent]
+//                [--local_dir=dir] [--persistent] [--fetch_timeout_ms=T]
 //
 // Start one per machine (or several on one machine), pointed at the address
 // in the driver's master URL ember://host:port. The worker registers with the
@@ -32,6 +32,10 @@ DEFINE_bool(
     fetch_local_blocks_over_network,
     false,
     "Fetch this worker's own shuffle blocks over TCP too (for testing).");
+DEFINE_int32(
+    fetch_timeout_ms,
+    120'000,
+    "Milliseconds before a shuffle block fetch from another worker fails.");
 DEFINE_int32(
     connect_timeout_s,
     60,
@@ -71,6 +75,7 @@ int main(int argc, char** argv) {
   options.persistent = FLAGS_persistent;
   options.fetchLocalBlocksOverNetwork = FLAGS_fetch_local_blocks_over_network;
   options.connectTimeout = std::chrono::seconds(FLAGS_connect_timeout_s);
+  options.fetchTimeout = std::chrono::milliseconds(FLAGS_fetch_timeout_ms);
 
   ember::Worker worker(options);
   worker.start();

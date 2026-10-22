@@ -279,6 +279,36 @@ std::pair<std::string, BlockId> parseBlockUrl(const std::string& url) {
           folly::to<int32_t>(parts[3])}};
 }
 
+namespace {
+constexpr std::string_view kFetchFailedTag = "[fetch-failed ";
+} // namespace
+
+std::string FetchFailure::message(const std::string& cause) const {
+  return fmt::format("{}{}] {}", kFetchFailedTag, blockUrl(location, block), cause);
+}
+
+std::optional<FetchFailure> FetchFailure::find(const std::string& error) {
+  const auto start = error.find(kFetchFailedTag);
+  if (start == std::string::npos) {
+    return std::nullopt;
+  }
+  const auto urlStart = start + kFetchFailedTag.size();
+  const auto end = error.find(']', urlStart);
+  if (end == std::string::npos) {
+    return std::nullopt;
+  }
+  const auto url = error.substr(urlStart, end - urlStart);
+  if (!isBlockUrl(url)) {
+    return std::nullopt;
+  }
+  try {
+    auto [location, block] = parseBlockUrl(url);
+    return FetchFailure{std::move(location), block};
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
 ShuffleBlockStore::ShuffleBlockStore(std::string location, std::string directory)
     : location_{std::move(location)}, directory_{std::move(directory)} {
   fs::create_directories(directory_);

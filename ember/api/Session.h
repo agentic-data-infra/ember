@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -29,6 +30,7 @@
 
 namespace ember::driver {
 class DagScheduler;
+struct StageAttemptInfo;
 }
 
 namespace facebook::axiom::optimizer {
@@ -40,10 +42,13 @@ namespace ember {
 /// Shared state behind a Session and its Dataframes.
 class SessionState {
  public:
+  using StageListener = std::function<void(const driver::StageAttemptInfo&)>;
+
   SessionState(
       std::string appName,
       std::string master,
-      std::map<std::string, std::string> config);
+      std::map<std::string, std::string> config,
+      StageListener onStageCompleted = nullptr);
   ~SessionState();
 
   const std::string& appName() const {
@@ -80,6 +85,10 @@ class SessionState {
   /// Config key: how long to wait for them, in ms (default 60000).
   static constexpr const char* kRegistrationTimeoutMs =
       "ember.cluster.registration_timeout_ms";
+  /// Config key: how long a worker may miss heartbeats before it is lost, in
+  /// ms (default 30000).
+  static constexpr const char* kHeartbeatTimeoutMs =
+      "ember.cluster.heartbeat_timeout_ms";
   /// Config key: interface the driver serves on (default all).
   static constexpr const char* kDriverBindHost = "ember.driver.bind_host";
 
@@ -130,6 +139,9 @@ class Session {
     Builder& appName(std::string name);
     Builder& master(std::string master);
     Builder& config(const std::string& key, std::string value);
+    /// Called after each stage attempt of every job, e.g. to watch stages
+    /// rerun after a worker is lost.
+    Builder& onStageCompleted(SessionState::StageListener listener);
 
     /// Returns the active session if there is one, else creates it.
     Session getOrCreate();
@@ -138,6 +150,7 @@ class Session {
     std::string appName_{"ember"};
     std::string master_{"local[*]"};
     std::map<std::string, std::string> config_;
+    SessionState::StageListener onStageCompleted_;
   };
 
   static Builder builder();

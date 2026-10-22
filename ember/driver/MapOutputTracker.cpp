@@ -9,14 +9,66 @@ void MapOutputTracker::registerShuffle(int32_t shuffleId, int32_t numMaps) {
   outputs_[shuffleId].assign(numMaps, std::nullopt);
 }
 
-void MapOutputTracker::registerMapOutput(
+bool MapOutputTracker::registerMapOutput(
     int32_t shuffleId,
     int32_t mapId,
     shuffle::MapStatus status) {
   std::lock_guard<std::mutex> l(mutex_);
   auto& maps = outputs_.at(shuffleId);
   VELOX_CHECK_LT(mapId, maps.size());
+  if (lostLocations_.contains(status.location)) {
+    return false;
+  }
   maps[mapId] = std::move(status);
+  return true;
+}
+
+std::vector<int32_t> MapOutputTracker::missingMaps(int32_t shuffleId) const {
+  std::lock_guard<std::mutex> l(mutex_);
+  const auto& maps = outputs_.at(shuffleId);
+  std::vector<int32_t> missing;
+  for (int32_t mapId = 0; mapId < maps.size(); ++mapId) {
+    if (!maps[mapId].has_value()) {
+      missing.push_back(mapId);
+    }
+  }
+  return missing;
+}
+
+int32_t MapOutputTracker::removeOutputsAt(
+    int32_t shuffleId,
+    const std::string& location) {
+  std::lock_guard<std::mutex> l(mutex_);
+  auto it = outputs_.find(shuffleId);
+  return it == outputs_.end() ? 0 : removeOutputsAtLocked(it->second, location);
+}
+
+int32_t MapOutputTracker::markLocationLost(const std::string& location) {
+  std::lock_guard<std::mutex> l(mutex_);
+  lostLocations_.insert(location);
+  int32_t removed = 0;
+  for (auto& [shuffleId, maps] : outputs_) {
+    removed += removeOutputsAtLocked(maps, location);
+  }
+  return removed;
+}
+
+int32_t MapOutputTracker::removeOutputsAtLocked(
+    std::vector<std::optional<shuffle::MapStatus>>& maps,
+    const std::string& location) {
+  int32_t removed = 0;
+  for (auto& status : maps) {
+    if (status.has_value() && status->location == location) {
+      status.reset();
+      ++removed;
+    }
+  }
+  return removed;
+}
+
+void MapOutputTracker::markLocationAvailable(const std::string& location) {
+  std::lock_guard<std::mutex> l(mutex_);
+  lostLocations_.erase(location);
 }
 
 bool MapOutputTracker::isComplete(int32_t shuffleId) const {
