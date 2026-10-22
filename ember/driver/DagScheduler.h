@@ -26,6 +26,8 @@ struct StageAttemptInfo {
   std::string jobId;
   int32_t stageId{0};
   int32_t attempt{0};
+  /// The stage's content key, if it has one (StageKey.h).
+  std::optional<std::string> stageKey;
   /// Partitions (map ids, for a map stage) the attempt ran.
   std::vector<int32_t> partitions;
   /// Where each map output the attempt committed lives, by map id.

@@ -5,6 +5,7 @@
 #include <sstream>
 
 #include "ember/FileSerde.h"
+#include "ember/driver/StageKey.h"
 #include "ember/shuffle/ShuffleRead.h"
 #include "ember/shuffle/ShuffleWrite.h"
 
@@ -180,13 +181,19 @@ StagePlan planStages(
       result.resultStage().numTasks.value_or(0),
       1,
       "The result stage must run one task");
+  computeStageKeys(result);
   return result;
 }
 
 std::string StagePlan::toString() const {
   std::stringstream out;
   for (const auto& stage : stages) {
-    out << "Stage " << stage.stageId << ": ";
+    out << "Stage " << stage.stageId;
+    if (stage.key.has_value()) {
+      out << " [key " << shortKey(*stage.key) << "]: ";
+    } else {
+      out << " [no key: " << stage.noKeyReason << "]: ";
+    }
     if (stage.numTasks.has_value()) {
       out << *stage.numTasks << (*stage.numTasks == 1 ? " task" : " tasks");
     } else {

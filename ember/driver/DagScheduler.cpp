@@ -363,6 +363,7 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
         .jobId = job.jobId,
         .stageId = stage.stageId,
         .attempt = attempt,
+        .stageKey = stage.key,
         .partitions = partitions};
     if (!inputsLost) {
       auto taskSet = taskScheduler_.runTaskSet(std::move(tasks));
