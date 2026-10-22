@@ -1,11 +1,28 @@
 # ember
 Data processing for agents -- not humans!
 
-Ember is a C++ data processing framework designed for AI agents. It offers a
-Spark-like Dataframe API, uses [Axiom](https://github.com/facebookincubator/axiom)
-for query compilation and [Velox](https://github.com/facebookincubator/velox) for
-query execution. Dataframe programs compile into multi-stage Velox plans that run
-on a driver and a set of workers.
+Ember is a C++ data processing framework designed for AI agents. Agents explore
+data in a loop of many small, overlapping queries, so Ember aims for these
+properties (✅ implemented today, ⬜ planned):
+
+- ✅ Hashed plan DAGs: every stage gets a content key, shown by `explain()`.
+- ✅ Reuse of identical stages across jobs in a session.
+- ✅ Memoization with `cache()`/`persist()`/`unpersist()`.
+- ✅ Fault tolerance through task retry and lineage recompute.
+- ⬜ Cost-based materialization: decide what to keep from predicted reuse.
+- ⬜ Reuse across sessions and agents, through a persistent driver and catalog.
+- ⬜ Shared scans across concurrent queries.
+- ⬜ Differential execution: compare a baseline with candidates from where they diverge.
+- ⬜ Progressive execution: sampled results with confidence intervals that tighten.
+- ⬜ Model and LLM calls as first-class batched operators.
+- ⬜ Lineage and guardrails as queryable tables.
+- ⬜ Elastic scale-out and scale-in of every component.
+
+Ember offers a Spark-like Dataframe API, uses
+[Axiom](https://github.com/facebookincubator/axiom) for query compilation and
+[Velox](https://github.com/facebookincubator/velox) for query execution. Dataframe
+programs compile into multi-stage Velox plans that run on a driver and a set of
+workers.
 
 ## Building
 
