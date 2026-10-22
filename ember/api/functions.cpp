@@ -107,6 +107,13 @@ Column regexp_replace(
   return fn("regexp_replace", {str, lit(pattern), lit(replacement)});
 }
 
+Column regexp_extract(
+    const Column& str,
+    const std::string& pattern,
+    int32_t group) {
+  return fn("regexp_extract", {str, lit(pattern), lit(group)});
+}
+
 Column size(const Column& collection) {
   // legacySizeOfNull = true: size(null) is -1.
   return fn("size", {collection, lit(true)});
@@ -118,6 +125,10 @@ Column array_contains(const Column& array, const Column& value) {
 
 Column abs(const Column& value) {
   return fn("abs", {value});
+}
+
+Column round(const Column& value, int32_t scale) {
+  return fn("round", {value, lit(scale)});
 }
 
 Column coalesce(const std::vector<Column>& columns) {

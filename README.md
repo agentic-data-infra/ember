@@ -56,6 +56,19 @@ again on the remaining workers.
 `scripts/run_local_cluster.sh -n 3 -- word_count path {master} {workers}`
 does all of this on one machine.
 
+## More examples
+
+`examples/DomainReport.cpp` reads FineWeb-Edu style parquet (`url`, `score`,
+`int_score`, `token_count`) and reports, per web domain, how many documents
+and tokens a stricter quality filter (`int_score >= 4`) keeps. It joins two
+aggregations over the same input. `examples/check_domain_report.py` checks
+its full output against DuckDB:
+
+```
+buck2 run //examples:domain_report -- data.parquet 'local[*]' 1 100000000 > report.txt
+python3 examples/check_domain_report.py data.parquet report.txt
+```
+
 ## Layout
 
 See [ember/README.md](ember/README.md).

@@ -46,6 +46,12 @@ Column regexp_replace(
     const Column& str,
     const std::string& pattern,
     const std::string& replacement);
+/// The 'group'th capture group of the first match of 'pattern' in 'str'
+/// (0 = the whole match); "" when nothing matches.
+Column regexp_extract(
+    const Column& str,
+    const std::string& pattern,
+    int32_t group);
 
 // Collections.
 Column size(const Column& collection);
@@ -53,6 +59,8 @@ Column array_contains(const Column& array, const Column& value);
 
 // Math.
 Column abs(const Column& value);
+/// Rounds half up to 'scale' decimal places.
+Column round(const Column& value, int32_t scale = 0);
 
 // Conditionals.
 Column coalesce(const std::vector<Column>& columns);

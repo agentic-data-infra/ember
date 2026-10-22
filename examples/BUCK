@@ -3,3 +3,9 @@ cxx_binary(
     srcs = ["WordCount.cpp"],
     deps = ["//ember/api:api"],
 )
+
+cxx_binary(
+    name = "domain_report",
+    srcs = ["DomainReport.cpp"],
+    deps = ["//ember/api:api"],
+)
