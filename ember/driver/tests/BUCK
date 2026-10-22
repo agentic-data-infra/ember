@@ -22,3 +22,16 @@ cxx_test(
     # Archives must precede the prebuilt Velox/Axiom libraries they use.
     link_ordering = "topological",
 )
+
+cxx_test(
+    name = "stage_key_test",
+    srcs = ["StageKeyTest.cpp"],
+    deps = [
+        "//ember/api:api",
+        "//ember/driver:driver",
+        "//ember/tests:test_main",
+        "//ember/tests:wordcount_util",
+    ],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+)

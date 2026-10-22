@@ -7,10 +7,11 @@
 //
 // A stage's plan is serialized once, with Velox serde, and sent with each of
 // its tasks: the task binary. File scans are rewritten to serializable
-// handles on the way.
+// handles on the way. Each stage gets a content key (StageKey.h).
 
 #pragma once
 
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -51,6 +52,15 @@ struct Stage {
     bool broadcast;
   };
   std::vector<ShuffleInput> shuffleInputs;
+
+  /// Content hash of the stage and everything upstream of it (StageKey.h);
+  /// std::nullopt if the stage is nondeterministic or reads inputs whose
+  /// identity is unknown, and then 'noKeyReason' says why.
+  std::optional<std::string> key;
+  std::string noKeyReason;
+
+  /// Keys of the plan's nodes, by node id. Nodes without a key are absent.
+  std::map<facebook::velox::core::PlanNodeId, std::string> nodeKeys;
 };
 
 struct StagePlan {
