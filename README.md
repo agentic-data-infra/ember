@@ -97,6 +97,24 @@ feature computed with a regex over the text. It caches the features with
 buck2 run //examples:threshold_sweep -- docs/ cache     # or nocache
 ```
 
+## Python
+
+`python/` binds the same API for Python, with results as pyarrow tables:
+
+```python
+from ember import Session
+from ember.functions import col, explode, lower, split
+
+ember = Session.builder.appName("WordCount").getOrCreate()
+words = ember.read.text(path).select(explode(split(lower(col("value")), r"\W+")).alias("word"))
+words.groupBy("word").count().orderBy(col("count").desc()).show()
+```
+
+See [python/README.md](python/README.md) for building it.
+`examples/word_count.py` and `examples/threshold_sweep.py` are the Python
+versions of the examples above, and `examples/check_python_examples.py`
+checks that they print the same results.
+
 ## Layout
 
 See [ember/README.md](ember/README.md).

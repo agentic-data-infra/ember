@@ -1,2 +1,5 @@
 /buck-out/
 /third-party/generated/deps.bzl
+/.venv/
+/python/ember/_ember.so
+__pycache__/
