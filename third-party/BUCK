@@ -7,6 +7,7 @@ load(
     "FBTHRIFT_LINKER_FLAGS",
     "LINKER_FLAGS",
     "PREPROCESSOR_FLAGS",
+    "PYTHON_PREPROCESSOR_FLAGS",
     "TEST_LINKER_FLAGS",
 )
 
@@ -37,5 +38,14 @@ prebuilt_cxx_library(
     header_only = True,
     exported_post_linker_flags = FBTHRIFT_LINKER_FLAGS,
     exported_deps = [":velox_axiom"],
+    visibility = ["PUBLIC"],
+)
+
+# Python and pybind11 headers for Ember's Python binding (python/), from the
+# interpreter gen_third_party.py was given (default: ember/.venv).
+prebuilt_cxx_library(
+    name = "pybind11",
+    header_only = True,
+    exported_preprocessor_flags = PYTHON_PREPROCESSOR_FLAGS,
     visibility = ["PUBLIC"],
 )

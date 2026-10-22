@@ -93,6 +93,19 @@ def fbthrift_link_libraries(velox_src, probe_build):
         os.path.join(probe_build, "build.ninja"), "fbthrift_probe")]
 
 
+def python_flags(python):
+    """Include flags for Python and pybind11, from the interpreter that runs
+    Ember's Python package (python/). Empty without one."""
+    if not (python and os.path.exists(python)):
+        return []
+    out = subprocess.run(
+        [python, "-c",
+         "import sysconfig, pybind11; "
+         "print(sysconfig.get_paths()['include']); print(pybind11.get_include())"],
+        check=True, capture_output=True, text=True).stdout.split()
+    return [flag for path in out for flag in ("-isystem", path)]
+
+
 def unique(items):
     seen = set()
     return [x for x in items if not (x in seen or seen.add(x))]
@@ -104,6 +117,11 @@ def main():
     parser.add_argument("--axiom-src", default=os.path.join(home, "source/axiom"))
     parser.add_argument("--axiom-build", default=None)
     parser.add_argument("--velox-src", default=os.path.join(home, "source/velox"))
+    parser.add_argument(
+        "--python",
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", ".venv", "bin", "python"),
+        help="Python with pybind11 for the Python binding (python/)")
     args = parser.parse_args()
     src_dir = os.path.realpath(args.axiom_src)
     build_dir = os.path.realpath(
@@ -143,6 +161,7 @@ def main():
             ("TEST_LINKER_FLAGS", group(test_libs)),
             ("FBTHRIFT_LINKER_FLAGS", group(fbthrift_libs)),
             ("THRIFT1", thrift1),
+            ("PYTHON_PREPROCESSOR_FLAGS", python_flags(args.python)),
         ]:
             f.write(f"{name} = {json.dumps(value, indent=4)}\n\n")
     print(f"wrote {os.path.normpath(os.path.join(out_dir, 'deps.bzl'))}")

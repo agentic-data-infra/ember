@@ -1,0 +1,36 @@
+# Ember's Python binding: the extension module ember._ember, which links
+# Ember, Axiom and Velox (built position-independent) into one shared object.
+#
+#   buck2 build //python:_ember --out python/ember/_ember.so
+#
+# Only PyInit__ember is exported, so the static Velox, folly and Arrow inside
+# never clash with libraries pyarrow brings into the same process.
+
+cxx_library(
+    name = "_ember",
+    srcs = ["EmberModule.cpp"],
+    soname = "_ember.so",
+    preferred_linkage = "shared",
+    link_style = "static_pic",
+    deps = [
+        "//ember/api:api",
+        "//third-party:pybind11",
+    ],
+    compiler_flags = ["-fvisibility=hidden"],
+    linker_flags = [
+        # libgcc_s ahead of libunwind (which folly and glog pull in), so the
+        # module unwinds exceptions with the same unwinder as libstdc++,
+        # whichever library loaded first.
+        "-Wl,--push-state,--no-as-needed",
+        "-lgcc_s",
+        "-Wl,--pop-state",
+        "-Wl,--version-script=$(location :exports)",
+        "-Wl,--exclude-libs,ALL",
+    ],
+    link_ordering = "topological",
+)
+
+export_file(
+    name = "exports",
+    src = "exports.map",
+)
