@@ -71,9 +71,11 @@ struct DagSchedulerOptions {
 
 class DagScheduler {
  public:
-  /// Config key: largest byte range of a text file one task reads. By
-  /// default, a file scan's bytes spread over 'parallelism' tasks, with
-  /// ranges between 4MB and 128MB.
+  /// Config key: largest byte range of a file one task reads. By default, a
+  /// file scan's bytes spread over 'parallelism' tasks, with ranges between
+  /// 4MB and 128MB. A text range reads the lines that start in it, a Parquet
+  /// range the row groups. With one scan in a stage, a task takes ranges
+  /// until it holds about this many bytes, each range counting 4MB extra.
   static constexpr const char* kMaxSplitBytes = "ember.files.max_split_bytes";
   /// Config key: keep keyed shuffle outputs for later jobs to reuse (default
   /// true).

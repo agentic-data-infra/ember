@@ -1,6 +1,7 @@
 // Ember's scheduler and shuffle end to end: stage plans, task messages,
-// retries, recomputing lost shuffle outputs, byte-range splits and spills,
-// and agreement with Axiom's in-process LocalRunner.
+// retries, recomputing lost shuffle outputs, byte-range splits of text and
+// Parquet files, packing small files, spills, and agreement with Axiom's
+// in-process LocalRunner.
 
 #include <gtest/gtest.h>
 
@@ -17,6 +18,11 @@
 #include "ember/shuffle/ShuffleRead.h"
 #include "ember/shuffle/ShuffleWrite.h"
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/common/file/FileSystems.h"
+#include "velox/dwio/common/BufferedInput.h"
+#include "velox/dwio/common/FileSink.h"
+#include "velox/dwio/parquet/reader/ParquetReader.h"
+#include "velox/dwio/parquet/writer/Writer.h"
 #include "velox/exec/tests/utils/LocalExchangeSource.h"
 
 namespace ember::driver {
@@ -183,6 +189,51 @@ class SchedulerTest : public testing::Test {
       }
     }
     return (dir_ / "input").string() + "/";
+  }
+
+  // Writes rows (id bigint, score bigint), score = id % 7, in row groups of
+  // 'rowsPerGroup' rows; returns the file's path.
+  std::string writeParquet(int64_t numGroups, int64_t rowsPerGroup) {
+    auto pool = rootPool_->addLeafChild("write");
+    auto path = (dir_ / "input" / "rows.parquet").string();
+    velox::dwio::common::WriterOptions options;
+    options.memoryPool = rootPool_.get();
+    options.flushPolicyFactory = [rowsPerGroup] {
+      return std::make_unique<velox::parquet::DefaultFlushPolicy>(
+          rowsPerGroup, 1LL << 30);
+    };
+    auto type = velox::ROW({"id", "score"}, velox::BIGINT());
+    velox::parquet::Writer writer(
+        std::make_unique<velox::dwio::common::LocalFileSink>(
+            path, velox::dwio::common::FileSink::Options{.pool = pool.get()}),
+        options,
+        type);
+    for (int64_t group = 0; group < numGroups; ++group) {
+      auto ids = velox::BaseVector::create<velox::FlatVector<int64_t>>(
+          velox::BIGINT(), rowsPerGroup, pool.get());
+      auto scores = velox::BaseVector::create<velox::FlatVector<int64_t>>(
+          velox::BIGINT(), rowsPerGroup, pool.get());
+      for (int64_t i = 0; i < rowsPerGroup; ++i) {
+        ids->set(i, group * rowsPerGroup + i);
+        scores->set(i, (group * rowsPerGroup + i) % 7);
+      }
+      writer.write(std::make_shared<velox::RowVector>(
+          pool.get(),
+          type,
+          nullptr,
+          rowsPerGroup,
+          std::vector<velox::VectorPtr>{ids, scores}));
+    }
+    writer.close();
+
+    velox::parquet::ParquetReader reader(
+        std::make_unique<velox::dwio::common::BufferedInput>(
+            velox::filesystems::getFileSystem(path, nullptr)
+                ->openFileForRead(path),
+            *pool),
+        velox::dwio::common::ReaderOptions(pool.get()));
+    EXPECT_EQ(reader.fileMetaData().numRowGroups(), numGroups);
+    return path;
   }
 
   static Dataframe wordCount(const std::string& path) {
@@ -412,6 +463,43 @@ TEST_F(SchedulerTest, everyLineReadOnceWhateverTheRangeSize) {
         scheduler({{DagScheduler::kMaxSplitBytes, std::to_string(rangeBytes)}});
     EXPECT_EQ(sorted(toStrings(dag->runJob(*plan, pool_.get()))), expected);
   }
+}
+
+TEST_F(SchedulerTest, everyParquetRowReadOnceWhateverTheRangeSize) {
+  auto path = writeParquet(20, 100);
+  auto df = ember_->read()
+                .parquet(path)
+                .groupBy("score")
+                .agg(count(col("id")).as("n"), sum(col("id")).as("total"))
+                .orderBy(col("score"));
+  auto plan = df.physicalPlan();
+  auto expected = toStrings(df.collectBatches());
+  ASSERT_EQ(expected.size(), 7);
+  const auto fileBytes = static_cast<int64_t>(fs::file_size(path));
+  for (auto rangeBytes : {fileBytes / 13, fileBytes / 4, fileBytes}) {
+    SCOPED_TRACE(rangeBytes);
+    auto [dag, backend] =
+        scheduler({{DagScheduler::kMaxSplitBytes, std::to_string(rangeBytes)}});
+    EXPECT_EQ(toStrings(dag->runJob(*plan, pool_.get())), expected);
+    // One map task per range.
+    const auto stages = dag->stagePlan(*plan);
+    EXPECT_EQ(
+        backend->launches(stages.stages[0].stageId),
+        (fileBytes + rangeBytes - 1) / rangeBytes);
+  }
+}
+
+TEST_F(SchedulerTest, smallFilesShareTasks) {
+  auto path = writeCorpus(40, 10);
+  auto plan = wordCount(path).physicalPlan();
+  auto expected = toStrings(wordCount(path).collectBatches());
+
+  // Each file counts 4MB to open, so 15 fit in 64MB.
+  auto [dag, backend] =
+      scheduler({{DagScheduler::kMaxSplitBytes, std::to_string(64 << 20)}});
+  EXPECT_EQ(toStrings(dag->runJob(*plan, pool_.get())), expected);
+  const auto stages = dag->stagePlan(*plan);
+  EXPECT_EQ(backend->launches(stages.stages[0].stageId), 3);
 }
 
 TEST_F(SchedulerTest, retriesFailedTasks) {

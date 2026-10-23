@@ -11,7 +11,6 @@
 #include "ember/CachedTable.h"
 #include "ember/FileSerde.h"
 #include "ember/RowPages.h"
-#include "ember/TextFileHandler.h"
 #include "ember/shuffle/ShuffleWrite.h"
 #include "velox/common/file/FileSystems.h"
 #include "velox/core/QueryCtx.h"
@@ -31,6 +30,8 @@ namespace {
 
 constexpr int64_t kSplitBytesFloor = 4 << 20;
 constexpr int64_t kSplitBytesCeiling = 128 << 20;
+// What opening a file costs, in bytes read: small files share a task.
+constexpr int64_t kOpenCostBytes = 4 << 20;
 
 std::atomic<int32_t> schedulerCounter{0};
 
@@ -186,6 +187,7 @@ std::vector<std::map<std::string, std::vector<folly::dynamic>>>
 DagScheduler::scanSplits(const Stage& stage, JobContext& job) {
   // Splits per scan, in order.
   std::vector<std::vector<std::shared_ptr<FileRangeSplit>>> splitsPerScan;
+  std::vector<int64_t> maxSplitBytesPerScan;
   for (const auto& scan : stage.scans) {
     auto source = runner::ConnectorSplitSourceFactory().splitSourceForScan(
         job.session, *scan, *job.evaluator, nullptr, std::nullopt);
@@ -212,58 +214,73 @@ DagScheduler::scanSplits(const Stage& stage, JobContext& job) {
       std::rethrow_exception(error);
     }
 
-    const auto* handle =
-        scan->tableHandle()->asChecked<file::FileTableHandle>();
+    // Files split into byte ranges. A text range owns the lines that start in
+    // it, a Parquet range the row groups. A metadata table (e.g. a Parquet
+    // file's row groups) reads whole files.
+    const bool wholeFiles = !scan->tableHandle()
+                                 ->asChecked<file::FileTableHandle>()
+                                 ->suffix()
+                                 .empty();
+    std::vector<int64_t> sizes;
+    int64_t totalBytes = 0;
+    for (const auto& split : fileSplits) {
+      sizes.push_back(
+          velox::filesystems::getFileSystem(split->filePath, nullptr)
+              ->openFileForRead(split->filePath)
+              ->size());
+      totalBytes += sizes.back() + kOpenCostBytes;
+    }
+    int64_t maxSplitBytes = std::min(
+        kSplitBytesCeiling,
+        std::max(kSplitBytesFloor, totalBytes / options_.parallelism));
+    if (auto it = options_.config.find(kMaxSplitBytes);
+        it != options_.config.end()) {
+      maxSplitBytes = folly::to<int64_t>(it->second);
+    }
+    VELOX_USER_CHECK_GT(maxSplitBytes, 0);
     std::vector<std::shared_ptr<FileRangeSplit>> ranges;
-    if (handle->schemaTableName().schema != kTextSchema) {
-      for (const auto& split : fileSplits) {
+    for (size_t i = 0; i < fileSplits.size(); ++i) {
+      const auto step =
+          wholeFiles ? std::max<int64_t>(1, sizes[i]) : maxSplitBytes;
+      for (int64_t start = 0; start < sizes[i]; start += step) {
         ranges.push_back(std::make_shared<FileRangeSplit>(
-            split->connectorId, split->filePath));
-      }
-    } else {
-      // Text files split into byte ranges; a range owns the lines starting in it.
-      std::vector<int64_t> sizes;
-      int64_t totalBytes = 0;
-      for (const auto& split : fileSplits) {
-        sizes.push_back(
-            velox::filesystems::getFileSystem(split->filePath, nullptr)
-                ->openFileForRead(split->filePath)
-                ->size());
-        totalBytes += sizes.back();
-      }
-      int64_t maxSplitBytes = std::min(
-          kSplitBytesCeiling,
-          std::max(kSplitBytesFloor, totalBytes / options_.parallelism));
-      if (auto it = options_.config.find(kMaxSplitBytes);
-          it != options_.config.end()) {
-        maxSplitBytes = folly::to<int64_t>(it->second);
-      }
-      VELOX_USER_CHECK_GT(maxSplitBytes, 0);
-      for (size_t i = 0; i < fileSplits.size(); ++i) {
-        for (int64_t start = 0; start < sizes[i]; start += maxSplitBytes) {
-          ranges.push_back(std::make_shared<FileRangeSplit>(
-              fileSplits[i]->connectorId,
-              fileSplits[i]->filePath,
-              start,
-              std::min(maxSplitBytes, sizes[i] - start)));
-        }
+            fileSplits[i]->connectorId,
+            fileSplits[i]->filePath,
+            start,
+            std::min(step, sizes[i] - start)));
       }
     }
     splitsPerScan.push_back(std::move(ranges));
+    maxSplitBytesPerScan.push_back(maxSplitBytes);
   }
 
-  // One scan: a task per split. Several: 'parallelism' tasks share them.
-  size_t numTasks = options_.parallelism;
-  if (splitsPerScan.size() == 1) {
-    numTasks = std::max<size_t>(1, splitsPerScan[0].size());
-  }
-  std::vector<std::map<std::string, std::vector<folly::dynamic>>> result(
-      numTasks);
-  for (size_t i = 0; i < stage.scans.size(); ++i) {
-    const auto& nodeId = stage.scans[i]->id();
-    for (size_t j = 0; j < splitsPerScan[i].size(); ++j) {
-      result[j % numTasks][nodeId].push_back(splitsPerScan[i][j]->serialize());
+  // Several scans: 'parallelism' tasks share their ranges.
+  if (splitsPerScan.size() != 1) {
+    std::vector<std::map<std::string, std::vector<folly::dynamic>>> result(
+        options_.parallelism);
+    for (size_t i = 0; i < stage.scans.size(); ++i) {
+      const auto& nodeId = stage.scans[i]->id();
+      for (size_t j = 0; j < splitsPerScan[i].size(); ++j) {
+        result[j % result.size()][nodeId].push_back(
+            splitsPerScan[i][j]->serialize());
+      }
     }
+    return result;
+  }
+
+  // One scan: ranges packed in order into tasks of about 'maxSplitBytes',
+  // each range counting kOpenCostBytes extra, so small files share a task.
+  const auto& nodeId = stage.scans[0]->id();
+  std::vector<std::map<std::string, std::vector<folly::dynamic>>> result(1);
+  int64_t taskBytes = 0;
+  for (const auto& range : splitsPerScan[0]) {
+    const auto bytes = range->length + kOpenCostBytes;
+    if (taskBytes > 0 && taskBytes + bytes > maxSplitBytesPerScan[0]) {
+      result.emplace_back();
+      taskBytes = 0;
+    }
+    result.back()[nodeId].push_back(range->serialize());
+    taskBytes += bytes;
   }
   return result;
 }

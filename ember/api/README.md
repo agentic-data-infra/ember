@@ -23,7 +23,7 @@ as three stages: scan/split/unnest/partial count, then final count and sort
 after a hash shuffle on `word`, then a merge to the driver.
 
 Session config: `ember.local.dir` (shuffle files, default `<tmp>/ember`),
-`ember.files.max_split_bytes` (largest text byte range per task),
+`ember.files.max_split_bytes` (largest byte range of a file per task),
 `ember.shuffle.spill_threshold_bytes` (buffered shuffle bytes per map task
 before a spill), `ember.reuse.outputs` (keep shuffle outputs for later jobs
 with the same stages, default true).
