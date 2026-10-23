@@ -2,7 +2,8 @@
 // columns named by the scan's output type, but a scan may rename its columns
 // (Axiom does when one table is scanned twice in a plan, e.g. url -> url_3).
 // This handler reads the file columns named by the column handles and returns
-// them under the output names.
+// them under the output names. A FileRangeSplit reads only the row groups
+// that start in its byte range, so one file can spread over several tasks.
 
 #pragma once
 
