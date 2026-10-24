@@ -1,8 +1,8 @@
 # ember
-Data processing for agents -- not humans!
+Large-scale data processing for agents -- not humans!
 
-Ember is a C++ data processing framework designed for AI agents. It
-particularly targets continuous exploration: AI systems that propose a
+Ember is a C++ framework for large-scale data processing, built to be used by
+AI agents rather than humans. It particularly targets continuous exploration: AI systems that propose a
 hypothesis, run an experiment, evaluate it, refine the hypothesis, and repeat,
 thousands of times in parallel, to attack hard problems in science and
 engineering. Such agents explore data in a loop of many small, overlapping
