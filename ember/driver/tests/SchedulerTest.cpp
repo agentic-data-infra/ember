@@ -9,11 +9,15 @@
 #include <fstream>
 #include <random>
 
+#include <folly/coro/BlockingWait.h>
+
 #include "axiom/runner/LocalRunner.h"
 #include "ember/Session.h"
 #include "ember/driver/DagScheduler.h"
 #include "ember/driver/LocalBackend.h"
+#include "ember/driver/MapOutputTracker.h"
 #include "ember/functions.h"
+#include "ember/shuffle/KilnShuffle.h"
 #include "ember/shuffle/ShuffleConfig.h"
 #include "ember/shuffle/ShuffleRead.h"
 #include "ember/shuffle/ShuffleWrite.h"
@@ -24,6 +28,8 @@
 #include "velox/dwio/parquet/reader/ParquetReader.h"
 #include "velox/dwio/parquet/writer/Writer.h"
 #include "velox/exec/tests/utils/LocalExchangeSource.h"
+#include "kiln/client/Client.h"
+#include "kiln/local/LocalCluster.h"
 
 namespace ember::driver {
 namespace {
@@ -120,11 +126,26 @@ class SchedulerTest : public testing::Test {
     // Axiom's LocalRunner reads its exchanges in memory.
     velox::exec::ExchangeSource::registerFactory(
         velox::exec::test::createLocalExchangeSource);
+    kiln_ = new kiln::local::LocalCluster(kiln::local::LocalClusterOptions{
+        .dramServers = 1, .localFsServers = 0});
   }
 
   static void TearDownTestCase() {
     ember_->stop();
     ember_.reset();
+    delete kiln_;
+    kiln_ = nullptr;
+  }
+
+  // Config for map outputs in the test's Kiln cluster.
+  static std::map<std::string, std::string> kilnConfig() {
+    return {
+        {std::string(shuffle::kShuffleStore), "kiln"},
+        {std::string(shuffle::kKilnMetadata), kilnMetadata()}};
+  }
+
+  static std::string kilnMetadata() {
+    return kiln_->metadataEndpoint().toString();
   }
 
   void SetUp() override {
@@ -314,6 +335,7 @@ class SchedulerTest : public testing::Test {
   }
 
   static inline std::optional<Session> ember_;
+  static inline kiln::local::LocalCluster* kiln_{nullptr};
   fs::path dir_;
   std::shared_ptr<velox::memory::MemoryPool> rootPool_;
   std::shared_ptr<velox::memory::MemoryPool> pool_;
@@ -848,6 +870,102 @@ TEST_F(SchedulerTest, keysCoverQueryConfig) {
   ASSERT_TRUE(base.has_value());
   EXPECT_NE(keyWith({{"session_timezone", "Asia/Tokyo"}}), base);
   EXPECT_EQ(keyWith({{DagScheduler::kReuseOutputs, "true"}}), base);
+}
+
+TEST_F(SchedulerTest, kilnStoreMatchesFileStore) {
+  auto path = writeCorpus(3, 500);
+  auto depts = ember_->createDataframe(
+      velox::ROW({"dept", "floor"}, {velox::VARCHAR(), velox::BIGINT()}),
+      {{"eng", 3L}, {"sales", 1L}, {"ops", 9L}});
+  std::vector<std::pair<std::string, Dataframe>> queries = {
+      {"wordCount", wordCount(path)},
+      {"join", people().join(depts, {"dept"}, "full").select("name", "floor")},
+      {"unionDistinct", people().unionAll(people()).select("dept").distinct()},
+  };
+  for (const auto& [name, df] : queries) {
+    SCOPED_TRACE(name);
+    std::vector<StageAttemptInfo> attempts;
+    auto [dag, backend] = scheduler(
+        kilnConfig(), nullptr, [&](const StageAttemptInfo& info, auto&) {
+          attempts.push_back(info);
+        });
+    auto actual = toStrings(dag->runJob(*df.physicalPlan(), pool_.get()));
+    EXPECT_EQ(sorted(actual), sorted(toStrings(df.collectBatches())));
+    for (const auto& attempt : attempts) {
+      for (const auto& [mapId, location] : attempt.outputLocations) {
+        EXPECT_TRUE(shuffle::isKilnLocation(location)) << location;
+      }
+    }
+  }
+}
+
+TEST_F(SchedulerTest, kilnStoreSpills) {
+  auto path = writeCorpus(2, 3000);
+  auto df = wordCount(path);
+  auto config = kilnConfig();
+  config[std::string(shuffle::kSpillThreshold)] = "1";
+  auto [dag, backend] = scheduler(std::move(config));
+  EXPECT_EQ(
+      toStrings(dag->runJob(*df.physicalPlan(), pool_.get())),
+      toStrings(df.collectBatches()));
+}
+
+// Kiln evicted a map output's chunk before the reduce stage read it: the
+// reads fail to fetch, and the map tasks run again.
+TEST_F(SchedulerTest, recomputesEvictedKilnOutputs) {
+  auto path = writeCorpus(2, 200);
+  auto df = wordCount(path);
+  auto expected = toStrings(df.collectBatches());
+
+  std::vector<StageAttemptInfo> attempts;
+  std::optional<int32_t> mapStage;
+  auto [dag, backend] = scheduler(
+      kilnConfig(), nullptr, [&](const StageAttemptInfo& info, auto&) {
+        attempts.push_back(info);
+        if (mapStage.has_value()) {
+          return;
+        }
+        mapStage = info.stageId;
+        auto client = shuffle::kilnClient(kilnMetadata());
+        for (const auto& [mapId, location] : info.outputLocations) {
+          const auto chunk = shuffle::parseKilnLocation(location).second;
+          folly::coro::blockingWait(
+              client->co_remove(kiln::ChunkId::parse(chunk)));
+        }
+      });
+  EXPECT_EQ(toStrings(dag->runJob(*df.physicalPlan(), pool_.get())), expected);
+
+  const auto plan = dag->stagePlan(*df.physicalPlan());
+  ASSERT_GE(attempts.size(), 4);
+  EXPECT_EQ(attempts[1].stageId, plan.stages[1].stageId);
+  EXPECT_GT(attempts[1].fetchFailures.size(), 0);
+  EXPECT_EQ(attempts[2].stageId, *mapStage);
+  EXPECT_EQ(attempts[2].partitions, (std::vector<int32_t>{0, 1}));
+  EXPECT_EQ(backend->launches(*mapStage), 2 * 2);
+}
+
+TEST(MapOutputTrackerTest, kilnOutputsOutliveTheirExecutor) {
+  MapOutputTracker tracker;
+  tracker.registerShuffle(0, 2);
+  const auto kiln = shuffle::kilnLocation("meta:7000", "abc");
+  ASSERT_TRUE(tracker.registerMapOutput(0, 0, {"executor-1", {10, 20}}));
+  ASSERT_TRUE(tracker.registerMapOutput(0, 1, {kiln, {10, 20}}));
+  EXPECT_EQ(tracker.markLocationLost("executor-1"), 1);
+  EXPECT_EQ(tracker.missingMaps(0), (std::vector<int32_t>{0}));
+  // Reported by a task on the lost executor, but held in Kiln.
+  tracker.registerShuffle(1, 1);
+  EXPECT_TRUE(tracker.registerMapOutput(1, 0, {kiln, {5}}));
+  // Block URLs carry each partition's byte range of the chunk.
+  EXPECT_EQ(
+      tracker.mapBlockUrls(0, 1),
+      (std::vector<std::string>{
+          "kiln://meta:7000/abc/0/10/0/1/0",
+          "kiln://meta:7000/abc/10/20/0/1/1"}));
+  EXPECT_EQ(
+      tracker.blockUrls(1, 0),
+      (std::vector<std::string>{"kiln://meta:7000/abc/0/5/1/0/0"}));
+  // A failed fetch drops that output only.
+  EXPECT_EQ(tracker.removeOutputsAt(0, kiln), 1);
 }
 
 } // namespace

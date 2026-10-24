@@ -14,4 +14,11 @@ inline constexpr std::string_view kExecutorLocation = "ember.executor_location";
 inline constexpr std::string_view kSpillThreshold =
     "ember.shuffle.spill_threshold_bytes";
 
+/// Where map outputs go: "file" (the default), the executor's shuffle files,
+/// or "kiln", one Kiln chunk per map output (see KilnShuffle.h).
+inline constexpr std::string_view kShuffleStore = "ember.shuffle.store";
+
+/// The Kiln metadata server ("host:port") of the "kiln" store.
+inline constexpr std::string_view kKilnMetadata = "ember.shuffle.kiln.metadata";
+
 } // namespace ember::shuffle

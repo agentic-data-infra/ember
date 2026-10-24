@@ -1,0 +1,3 @@
+[submodule "third-party/kiln"]
+	path = third-party/kiln
+	url = https://github.com/agentic-data-infra/kiln.git

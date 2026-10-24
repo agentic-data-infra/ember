@@ -8,3 +8,15 @@ cxx_test(
     # Archives must precede the prebuilt Velox/Axiom libraries they use.
     link_ordering = "topological",
 )
+
+cxx_test(
+    name = "kiln_shuffle_test",
+    srcs = ["KilnShuffleTest.cpp"],
+    deps = [
+        "//ember/shuffle:shuffle",
+        "//ember/tests:test_main",
+        "kiln//kiln/client:client",
+        "kiln//kiln/local:local",
+    ],
+    link_ordering = "topological",
+)

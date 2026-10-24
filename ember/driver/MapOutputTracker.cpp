@@ -1,5 +1,7 @@
 #include "ember/driver/MapOutputTracker.h"
 
+#include <numeric>
+
 #include "velox/common/base/Exceptions.h"
 
 namespace ember::driver {
@@ -101,10 +103,14 @@ std::vector<std::string> MapOutputTracker::mapBlockUrls(
       mapId,
       shuffleId);
   std::vector<std::string> urls;
+  int64_t offset = 0;
   for (int32_t p = 0; p < map->partitionLengths.size(); ++p) {
-    if (map->partitionLengths[p] > 0) {
-      urls.push_back(shuffle::blockUrl(map->location, {shuffleId, mapId, p}));
+    const auto length = map->partitionLengths[p];
+    if (length > 0) {
+      urls.push_back(shuffle::blockUrl(
+          map->location, {shuffleId, mapId, p}, offset, length));
     }
+    offset += length;
   }
   return urls;
 }
@@ -124,8 +130,13 @@ std::vector<std::string> MapOutputTracker::blockUrls(
     const auto& lengths = maps[mapId]->partitionLengths;
     VELOX_CHECK_LT(reduceId, lengths.size());
     if (lengths[reduceId] > 0) {
+      const auto offset = std::accumulate(
+          lengths.begin(), lengths.begin() + reduceId, int64_t{0});
       urls.push_back(shuffle::blockUrl(
-          maps[mapId]->location, {shuffleId, mapId, reduceId}));
+          maps[mapId]->location,
+          {shuffleId, mapId, reduceId},
+          offset,
+          lengths[reduceId]));
     }
   }
   return urls;

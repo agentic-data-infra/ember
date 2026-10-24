@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <functional>
 #include <map>
 #include <mutex>
 
@@ -83,12 +84,101 @@ class ShuffleBlockStore : public std::enable_shared_from_this<ShuffleBlockStore>
       const std::string& tmpData,
       const std::string& tmpIndex);
 
+  /// Used by Kiln writers (KilnShuffle.h): records a map output held in
+  /// Kiln unless an earlier attempt committed. Returns false if one did.
+  bool commitKilnOutput(int32_t shuffleId, int32_t mapId, MapStatus status);
+
  private:
   std::vector<int64_t> readOffsets(int32_t shuffleId, int32_t mapId) const;
 
   const std::string location_;
   const std::string directory_;
-  std::mutex commitMutex_;
+  mutable std::mutex commitMutex_;
+  // Committed map outputs in Kiln, by (shuffle, map).
+  std::map<std::pair<int32_t, int32_t>, MapStatus> kilnOutputs_;
+};
+
+/// Base of the shuffle writers: buffers pages per partition in memory, spills
+/// them to run files in the store's directory, and at commit hands them to
+/// the output grouped by partition.
+class PartitionedPageWriter : public ShuffleWriter {
+ public:
+  /// Receives 'size' bytes at 'data'.
+  using Write = std::function<void(const void* data, size_t size)>;
+
+  PartitionedPageWriter(
+      std::shared_ptr<ShuffleBlockStore> store,
+      int32_t shuffleId,
+      int32_t mapId,
+      int32_t numPartitions,
+      std::string attemptTag,
+      int64_t spillThreshold);
+
+  ~PartitionedPageWriter() override;
+
+  void collect(int32_t partition, std::unique_ptr<folly::IOBuf> page) override;
+
+  MapStatus commit() override;
+
+  void abort() override;
+
+  int64_t bytesWritten() const override {
+    return bytesWritten_;
+  }
+
+  int64_t spillCount() const override {
+    return spillCount_;
+  }
+
+ protected:
+  /// Writes the output with writePartitions() and makes it visible.
+  virtual MapStatus commitOutput() = 0;
+
+  /// Writes all pages, partition by partition, through 'write'. Returns the
+  /// numPartitions + 1 offsets of the partitions.
+  std::vector<int64_t> writePartitions(const Write& write);
+
+  /// A file name in the store's directory, unique to this attempt.
+  std::string tmpPath(const std::string& suffix) const;
+
+  ShuffleBlockStore& store() const {
+    return *store_;
+  }
+
+  int32_t shuffleId() const {
+    return shuffleId_;
+  }
+
+  int32_t mapId() const {
+    return mapId_;
+  }
+
+  bool done() const {
+    return done_;
+  }
+
+ private:
+  // A run of spilled pages, laid out like a data file.
+  struct SpillRun {
+    std::string path;
+    std::vector<int64_t> offsets;
+  };
+
+  void spill();
+  void removeRuns();
+
+  const std::shared_ptr<ShuffleBlockStore> store_;
+  const int32_t shuffleId_;
+  const int32_t mapId_;
+  const int32_t numPartitions_;
+  const std::string attemptTag_;
+  const int64_t spillThreshold_;
+  std::vector<std::vector<std::unique_ptr<folly::IOBuf>>> pages_;
+  int64_t bufferedBytes_{0};
+  std::vector<SpillRun> runs_;
+  int64_t spillCount_{0};
+  int64_t bytesWritten_{0};
+  bool done_{false};
 };
 
 /// Serves blocks from stores registered in this process.

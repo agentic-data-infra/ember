@@ -1,7 +1,8 @@
 // Tracks where each map task's shuffle output lives. Reduce tasks get their
 // inputs from it as block URLs.
 //
-// Outputs are lost with the executor that holds them. Once a location is
+// Outputs are lost with the executor that holds them; outputs in Kiln are
+// not (their location names a chunk, not an executor). Once a location is
 // marked lost, its outputs count as missing, and outputs reported from it
 // later (by tasks that finished just before it died) are ignored, until an
 // executor registers at that location again.

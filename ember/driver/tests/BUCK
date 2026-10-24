@@ -5,6 +5,8 @@ cxx_test(
         "//ember/api:api",
         "//ember/driver:driver",
         "//ember/tests:test_main",
+        "kiln//kiln/client:client",
+        "kiln//kiln/local:local",
     ],
     # Archives must precede the prebuilt Velox/Axiom libraries they use.
     link_ordering = "topological",
@@ -17,6 +19,7 @@ cxx_test(
         "//ember/api:api",
         "//ember/tests:test_main",
         "//ember/tests:wordcount_util",
+        "kiln//kiln/local:local",
     ],
     env = {"EMBER_WORKER": "$(location //bin:ember_worker)"},
     # Archives must precede the prebuilt Velox/Axiom libraries they use.

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Generates third-party/generated/deps.bzl from a CMake build of Axiom.
 
+Then runs Kiln's own generator (third-party/kiln, a git submodule and the
+Buck cell kiln//) against the same --prefix.
+
 Also derives fbthrift's link line by configuring scripts/fbthrift_probe
 against the fbthrift that Velox's setup scripts build with GCC 12 into
 --prefix (default /opt/deps-gcc12), with the same folly as Velox.
@@ -184,6 +187,14 @@ def main():
         for name, value in values:
             f.write(f"{name} = {json.dumps(value, indent=4)}\n\n")
     print(f"wrote {os.path.normpath(os.path.join(out_dir, 'deps.bzl'))}")
+
+    kiln_gen = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "..", "third-party", "kiln", "scripts",
+                            "gen_third_party.py")
+    if not os.path.exists(kiln_gen):
+        raise SystemExit("third-party/kiln is empty: "
+                         "run git submodule update --init")
+    subprocess.run([kiln_gen, "--prefix", prefix], check=True)
 
 
 if __name__ == "__main__":

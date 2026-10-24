@@ -1,6 +1,7 @@
 #include "ember/shuffle/ShuffleRead.h"
 
 #include "ember/shuffle/FileShuffle.h"
+#include "ember/shuffle/KilnShuffle.h"
 #include "velox/exec/Exchange.h"
 #include "velox/exec/ExchangeSource.h"
 #include "velox/exec/Merge.h"
@@ -106,7 +107,7 @@ class ShuffleBlockSource : public exec::ExchangeSource {
       int destination,
       std::shared_ptr<exec::ExchangeQueue> queue,
       velox::memory::MemoryPool* pool)
-      : ExchangeSource(url, destination, std::move(queue), pool) {
+      : ExchangeSource(url, destination, std::move(queue), pool), url_{url} {
     std::tie(location_, block_) = parseBlockUrl(url);
   }
 
@@ -121,8 +122,10 @@ class ShuffleBlockSource : public exec::ExchangeSource {
       uint32_t /*maxBytes*/,
       std::chrono::microseconds /*maxWait*/) override {
     auto self = std::static_pointer_cast<ShuffleBlockSource>(shared_from_this());
-    return BlockTransport::instance()
-        ->fetchBlock(location_, block_)
+    auto fetch = isKilnLocation(location_)
+        ? fetchKilnBlock(url_)
+        : BlockTransport::instance()->fetchBlock(location_, block_);
+    return std::move(fetch)
         .deferValue([self](std::unique_ptr<folly::IOBuf> data) {
           return self->enqueue(std::move(data));
         })
@@ -165,6 +168,7 @@ class ShuffleBlockSource : public exec::ExchangeSource {
     return Response{bytes_, true, {}};
   }
 
+  const std::string url_;
   std::string location_;
   BlockId block_;
   int64_t bytes_{0};

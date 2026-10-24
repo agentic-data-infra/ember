@@ -9,6 +9,7 @@
 
 #include <iostream>
 
+#include "EnvConfig.h"
 #include "ember/Session.h"
 #include "ember/functions.h"
 
@@ -22,11 +23,11 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  auto ember = Session::builder()
-                   .appName("DataframeWordCount")
-                   .master(argc > 2 ? argv[2] : "local[*]")
-                   .config("ember.cluster.workers", argc > 3 ? argv[3] : "1")
-                   .getOrCreate();
+  auto builder = Session::builder();
+  builder.appName("DataframeWordCount")
+      .master(argc > 2 ? argv[2] : "local[*]")
+      .config("ember.cluster.workers", argc > 3 ? argv[3] : "1");
+  auto ember = examples::withEnvConfig(builder).getOrCreate();
 
   Dataframe lines = ember.read().text(argv[1]); // one column: "value"
 

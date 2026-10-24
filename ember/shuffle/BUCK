@@ -1,5 +1,5 @@
-# File-based sort shuffle: ShuffleWrite/ShuffleRead operators, data and index
-# files per map task, and the block transport.
+# Sort shuffle: ShuffleWrite/ShuffleRead operators, data and index files per
+# map task or one Kiln chunk per map task, and the block transport.
 
 cxx_library(
     name = "shuffle",
@@ -7,5 +7,6 @@ cxx_library(
     header_namespace = "ember/shuffle",
     exported_headers = glob(["*.h"]),
     exported_deps = ["//third-party:velox_axiom"],
+    deps = ["kiln//kiln/client:client"],
     visibility = ["PUBLIC"],
 )

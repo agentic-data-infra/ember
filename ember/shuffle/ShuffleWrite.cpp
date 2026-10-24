@@ -1,6 +1,7 @@
 #include "ember/shuffle/ShuffleWrite.h"
 
 #include "ember/shuffle/FileShuffle.h"
+#include "ember/shuffle/KilnShuffle.h"
 #include "ember/shuffle/ShuffleConfig.h"
 #include "velox/common/memory/ByteStream.h"
 #include "velox/exec/OperatorUtils.h"
@@ -155,14 +156,36 @@ class ShuffleWrite : public exec::Operator {
         "ShuffleWrite needs config {}",
         kExecutorLocation);
     auto* task = operatorCtx_->task().get();
-    writer_ = ShuffleBlockStore::lookup(*location)->createWriter(
-        node_->shuffleId(),
-        task->destination(),
-        node_->numPartitions(),
-        attemptTag(task->taskId()),
-        config.get<int64_t>(
-            std::string(kSpillThreshold),
-            ShuffleBlockStore::kDefaultSpillThreshold));
+    auto store = ShuffleBlockStore::lookup(*location);
+    const auto spillThreshold = config.get<int64_t>(
+        std::string(kSpillThreshold),
+        ShuffleBlockStore::kDefaultSpillThreshold);
+    const auto kind =
+        config.get<std::string>(std::string(kShuffleStore), "file");
+    if (kind == "kiln") {
+      auto metadata = config.get<std::string>(std::string(kKilnMetadata));
+      VELOX_USER_CHECK(
+          metadata.has_value(),
+          "{}=kiln needs config {}",
+          kShuffleStore,
+          kKilnMetadata);
+      writer_ = createKilnWriter(
+          std::move(store),
+          std::move(*metadata),
+          node_->shuffleId(),
+          task->destination(),
+          node_->numPartitions(),
+          attemptTag(task->taskId()),
+          spillThreshold);
+    } else {
+      VELOX_USER_CHECK_EQ(kind, "file", "Unknown {}", kShuffleStore);
+      writer_ = store->createWriter(
+          node_->shuffleId(),
+          task->destination(),
+          node_->numPartitions(),
+          attemptTag(task->taskId()),
+          spillThreshold);
+    }
   }
 
   bool needsInput() const override {

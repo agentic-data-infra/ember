@@ -13,6 +13,7 @@
 
 #include <iostream>
 
+#include "EnvConfig.h"
 #include "ember/Session.h"
 #include "ember/functions.h"
 
@@ -28,11 +29,11 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  auto ember = Session::builder()
-                   .appName("DomainReport")
-                   .master(argc > 2 ? argv[2] : "local[*]")
-                   .config("ember.cluster.workers", argc > 3 ? argv[3] : "1")
-                   .getOrCreate();
+  auto builder = Session::builder();
+  builder.appName("DomainReport")
+      .master(argc > 2 ? argv[2] : "local[*]")
+      .config("ember.cluster.workers", argc > 3 ? argv[3] : "1");
+  auto ember = examples::withEnvConfig(builder).getOrCreate();
 
   // Host of the url, lower case, without a leading "www.".
   Dataframe docs = ember.read().parquet(argv[1]).select(
