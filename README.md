@@ -32,13 +32,17 @@ workers.
 Ember builds with [Buck2](https://buck2.build). Velox and Axiom build with CMake
 and are wrapped as prebuilt libraries.
 
-Prerequisites: GCC 11+ for Velox and Axiom, GCC 12 (`g++-12`) for Ember
-itself, Velox's system dependencies (`velox/scripts/setup-ubuntu.sh`),
-ninja, ccache, and buck2 on `PATH`. Ember's RPC uses the fbthrift (and its
-`thrift1` compiler) that Velox's setup script installs, built with the same
-folly as Velox.
+Prerequisites: GCC 12 (`gcc-12`, `g++-12`), ninja, ccache, and buck2 on
+`PATH`. Velox, Axiom and Ember all build with GCC 12, against Velox's
+dependencies built with GCC 12 into `/opt/deps-gcc12`
+(`scripts/build_deps_gcc12.sh`, which runs Velox's own setup script; it
+leaves `/usr/local` alone). Ember's RPC uses the fbthrift (and its `thrift1`
+compiler) from there, built with the same folly as Velox.
 
 ```
+# Build Velox's dependencies into /opt/deps-gcc12 (once; takes a while).
+scripts/build_deps_gcc12.sh
+
 # Build Axiom + Velox (uses ~/source/axiom and ~/source/velox by default) and
 # generate third-party/generated/deps.bzl.
 scripts/build_deps.sh
@@ -47,7 +51,8 @@ buck2 build //...
 buck2 test //...
 ```
 
-`AXIOM_SRC`, `VELOX_SRC` and `BUILD_DIR` override the default locations.
+`PREFIX`, `AXIOM_SRC`, `VELOX_SRC` and `BUILD_DIR` override the default
+locations (`BUILD_DIR` defaults to `~/source/axiom/_build/release-gcc12`).
 Re-run `scripts/build_deps.sh` (or just `scripts/gen_third_party.py`) whenever
 Velox or Axiom change.
 

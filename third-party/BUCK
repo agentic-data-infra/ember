@@ -2,14 +2,20 @@
 # prebuilt libraries. Flags come from third-party/generated/deps.bzl, which
 # scripts/gen_third_party.py derives from the CMake build.
 
+load("//third-party:check_deps.bzl", "check_deps")
 load(
     "//third-party/generated:deps.bzl",
+    # Missing in files generated for GCC 11's folly: rerun
+    # scripts/gen_third_party.py.
+    "DEPS_PREFIX",
     "FBTHRIFT_LINKER_FLAGS",
     "LINKER_FLAGS",
     "PREPROCESSOR_FLAGS",
     "PYTHON_PREPROCESSOR_FLAGS",
     "TEST_LINKER_FLAGS",
 )
+
+check_deps(DEPS_PREFIX)
 
 # Velox, Axiom and their system dependencies (folly, glog, boost, ...).
 prebuilt_cxx_library(
