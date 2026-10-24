@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Builds Axiom (and with it Velox) with CMake, then regenerates the Buck
-# wrapper flags in third-party/generated/deps.bzl.
+# Builds Axiom (and with it Velox) with CMake and GCC 12 against the deps in
+# $PREFIX (Velox's setup scripts, built with GCC 12), then regenerates the
+# Buck wrapper flags in third-party/generated/deps.bzl.
 #
 # Ember uses a single Velox checkout: Axiom's velox/ submodule directory is
 # replaced by a symlink to $VELOX_SRC. Velox's sparksql functions are enabled
@@ -10,7 +11,8 @@ set -euo pipefail
 EMBER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 AXIOM_SRC="${AXIOM_SRC:-$HOME/source/axiom}"
 VELOX_SRC="${VELOX_SRC:-$HOME/source/velox}"
-BUILD_DIR="${BUILD_DIR:-$AXIOM_SRC/_build/release}"
+PREFIX="${PREFIX:-/opt/deps-gcc12}"
+BUILD_DIR="${BUILD_DIR:-$AXIOM_SRC/_build/release-gcc12}"
 NUM_THREADS="${NUM_THREADS:-$(nproc)}"
 
 if [ ! -L "$AXIOM_SRC/velox" ]; then
@@ -18,8 +20,11 @@ if [ ! -L "$AXIOM_SRC/velox" ]; then
   ln -s "$VELOX_SRC" "$AXIOM_SRC/velox"
 fi
 
+export CC=gcc-12 CXX=g++-12 PATH="$PREFIX/bin:$PATH"
 cmake -S "$AXIOM_SRC" -B "$BUILD_DIR" -GNinja \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH="$PREFIX" \
+  -DCMAKE_IGNORE_PREFIX_PATH=/usr/local \
   -DCMAKE_PROJECT_INCLUDE="$EMBER_DIR/scripts/axiom_preload.cmake" \
   -DAXIOM_BUILD_TESTING=ON \
   -DAXIOM_BUILD_TEST_UTILS=ON \
@@ -33,4 +38,4 @@ cmake -S "$AXIOM_SRC" -B "$BUILD_DIR" -GNinja \
 
 ninja -C "$BUILD_DIR" -j "$NUM_THREADS"
 
-"$EMBER_DIR/scripts/gen_third_party.py" --axiom-src "$AXIOM_SRC" --axiom-build "$BUILD_DIR"
+"$EMBER_DIR/scripts/gen_third_party.py" --prefix "$PREFIX" --axiom-src "$AXIOM_SRC" --axiom-build "$BUILD_DIR"
