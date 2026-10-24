@@ -157,7 +157,9 @@ def main():
     prefix = os.path.realpath(args.prefix)
     fbthrift_libs = unique(fbthrift_link_libraries(
         prefix, os.path.realpath(args.velox_src),
-        os.path.join(build_dir, "fbthrift_probe")))
+        # In this checkout: CMake ties a build directory to one source.
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                     "buck-out", "fbthrift_probe")))
     thrift1 = os.path.join(prefix, "bin", "thrift1")
     if not os.access(thrift1, os.X_OK):
         raise SystemExit(f"No thrift1 (fbthrift's compiler) in {prefix}/bin")
