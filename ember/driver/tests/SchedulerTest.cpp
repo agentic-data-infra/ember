@@ -978,5 +978,82 @@ TEST(MapOutputTrackerTest, kilnOutputsOutliveTheirExecutor) {
   EXPECT_EQ(tracker.removeOutputsAt(0, kiln), 1);
 }
 
+// Each scheduler stands for a program of its own: a later one finds the
+// outputs an earlier one kept in Kiln's catalog.
+TEST_F(SchedulerTest, reusesKilnOutputsAcrossPrograms) {
+  auto path = writeCorpus(3, 250);
+  auto df = wordCount(path);
+  const auto plan = df.physicalPlan();
+  auto expected = toStrings(df.collectBatches());
+  auto config = kilnConfig();
+  config[DagScheduler::kReuseInKiln] = "true";
+
+  std::vector<StageAttemptInfo> attempts;
+  auto onStage = [&](const StageAttemptInfo& info, auto&) {
+    attempts.push_back(info);
+  };
+  auto [first, firstBackend] = scheduler(config, nullptr, onStage);
+  EXPECT_EQ(toStrings(first->runJob(*plan, pool_.get())), expected);
+  const auto stages = first->stagePlan(*plan);
+  ASSERT_EQ(stages.stages.size(), 3);
+  // The second map stage's outputs, to evict one below.
+  std::vector<std::string> locations;
+  for (const auto& attempt : attempts) {
+    if (attempt.stageId == stages.stages[1].stageId) {
+      for (const auto& [mapId, location] : attempt.outputLocations) {
+        locations.push_back(location);
+      }
+    }
+  }
+  ASSERT_FALSE(locations.empty());
+  first.reset();
+
+  // Only the result stage runs.
+  attempts.clear();
+  auto [second, secondBackend] = scheduler(config, nullptr, onStage);
+  EXPECT_EQ(toStrings(second->runJob(*plan, pool_.get())), expected);
+  EXPECT_EQ(secondBackend->totalLaunches(), 1);
+  ASSERT_EQ(attempts.size(), 3);
+  EXPECT_TRUE(attempts[0].reused);
+  EXPECT_TRUE(attempts[1].reused);
+  second.reset();
+
+  // Kiln evicted a chunk of the second map stage: that stage runs again,
+  // from the first one's outputs, and is stored again.
+  auto client = shuffle::kilnClient(kilnMetadata());
+  for (const auto& location : locations) {
+    const auto chunk = shuffle::parseKilnLocation(location).second;
+    if (!chunk.empty()) {
+      folly::coro::blockingWait(client->co_remove(kiln::ChunkId::parse(chunk)));
+      break;
+    }
+  }
+  auto [third, thirdBackend] = scheduler(config);
+  EXPECT_EQ(toStrings(third->runJob(*plan, pool_.get())), expected);
+  EXPECT_EQ(thirdBackend->launches(stages.stages[0].stageId), 0);
+  EXPECT_GT(thirdBackend->launches(stages.stages[1].stageId), 0);
+  third.reset();
+
+  auto [fourth, fourthBackend] = scheduler(config);
+  EXPECT_EQ(toStrings(fourth->runJob(*plan, pool_.get())), expected);
+  EXPECT_EQ(fourthBackend->totalLaunches(), 1);
+}
+
+TEST_F(SchedulerTest, kilnReuseNeedsTheKilnStore) {
+  VELOX_ASSERT_THROW(
+      scheduler({{DagScheduler::kReuseInKiln, "true"}}),
+      "ember.reuse.kiln needs ember.shuffle.store=kiln");
+  // Off by default: nothing goes to Kiln without it.
+  auto path = writeCorpus(2, 50);
+  auto plan = wordCount(path).physicalPlan();
+  auto [first, firstBackend] = scheduler(kilnConfig());
+  first->runJob(*plan, pool_.get());
+  auto config = kilnConfig();
+  config[DagScheduler::kReuseInKiln] = "true";
+  auto [second, secondBackend] = scheduler(config);
+  second->runJob(*plan, pool_.get());
+  EXPECT_EQ(secondBackend->totalLaunches(), firstBackend->totalLaunches());
+}
+
 } // namespace
 } // namespace ember::driver

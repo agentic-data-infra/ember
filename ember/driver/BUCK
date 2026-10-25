@@ -6,5 +6,9 @@ cxx_library(
     header_namespace = "ember/driver",
     exported_headers = glob(["*.h"]),
     exported_deps = ["//ember/worker:worker"],
+    deps = [
+        "kiln//kiln/catalog:catalog",
+        "kiln//kiln/client:client",
+    ],
     visibility = ["PUBLIC"],
 )

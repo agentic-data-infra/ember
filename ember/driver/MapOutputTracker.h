@@ -60,6 +60,11 @@ class MapOutputTracker {
   /// blocks.
   std::vector<std::string> mapBlockUrls(int32_t shuffleId, int32_t mapId) const;
 
+  /// The map outputs of 'shuffleId' by map id, or std::nullopt if one is
+  /// missing.
+  std::optional<std::vector<shuffle::MapStatus>> mapStatuses(
+      int32_t shuffleId) const;
+
   /// Total bytes per reduce partition.
   std::vector<int64_t> partitionSizes(int32_t shuffleId) const;
 
