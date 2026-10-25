@@ -911,7 +911,9 @@ TEST_F(SchedulerTest, kilnStoreSpills) {
 }
 
 // Kiln evicted a map output's chunk before the reduce stage read it: the
-// reads fail to fetch, and the map tasks run again.
+// reads fail to fetch, and the map tasks run again. Each map output has a
+// location of its own, and a reduce task reports the first block it could
+// not fetch, so the losses may come to light over several attempts.
 TEST_F(SchedulerTest, recomputesEvictedKilnOutputs) {
   auto path = writeCorpus(2, 200);
   auto df = wordCount(path);
@@ -939,8 +941,16 @@ TEST_F(SchedulerTest, recomputesEvictedKilnOutputs) {
   ASSERT_GE(attempts.size(), 4);
   EXPECT_EQ(attempts[1].stageId, plan.stages[1].stageId);
   EXPECT_GT(attempts[1].fetchFailures.size(), 0);
-  EXPECT_EQ(attempts[2].stageId, *mapStage);
-  EXPECT_EQ(attempts[2].partitions, (std::vector<int32_t>{0, 1}));
+  // Both map tasks ran once more.
+  std::vector<int32_t> rerun;
+  for (const auto& attempt : attempts) {
+    if (attempt.stageId == *mapStage && attempt.attempt > 0) {
+      rerun.insert(
+          rerun.end(), attempt.partitions.begin(), attempt.partitions.end());
+    }
+  }
+  std::sort(rerun.begin(), rerun.end());
+  EXPECT_EQ(rerun, (std::vector<int32_t>{0, 1}));
   EXPECT_EQ(backend->launches(*mapStage), 2 * 2);
 }
 
