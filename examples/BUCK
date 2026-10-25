@@ -1,17 +1,20 @@
 cxx_binary(
     name = "word_count",
     srcs = ["WordCount.cpp"],
+    headers = ["EnvConfig.h"],
     deps = ["//ember/api:api"],
 )
 
 cxx_binary(
     name = "domain_report",
     srcs = ["DomainReport.cpp"],
+    headers = ["EnvConfig.h"],
     deps = ["//ember/api:api"],
 )
 
 cxx_binary(
     name = "threshold_sweep",
     srcs = ["ThresholdSweep.cpp"],
+    headers = ["EnvConfig.h"],
     deps = ["//ember/api:api"],
 )

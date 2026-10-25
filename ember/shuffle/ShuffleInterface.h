@@ -35,7 +35,8 @@ struct BlockId {
 /// What a map task reports to the driver when it commits: where its output
 /// lives and how many bytes each reduce partition holds.
 struct MapStatus {
-  /// Executor that holds the output; blocks are fetched from it.
+  /// Executor that holds the output, blocks are fetched from it; or, for an
+  /// output in Kiln, the chunk that holds it (see kilnLocation()).
   std::string location;
   std::vector<int64_t> partitionLengths;
 };
@@ -76,14 +77,30 @@ class BlockTransport {
 };
 
 /// Remote split id of a shuffle block, as read by ShuffleRead:
-/// "ember-shuffle://<location>/<shuffleId>/<mapId>/<reduceId>".
-std::string blockUrl(const std::string& location, const BlockId& id);
+/// "ember-shuffle://<location>/<shuffleId>/<mapId>/<reduceId>". For a block
+/// in Kiln, the block's bytes [offset, offset + length) of the chunk:
+/// "<kiln location>/<offset>/<length>/<shuffleId>/<mapId>/<reduceId>".
+std::string blockUrl(
+    const std::string& location,
+    const BlockId& id,
+    int64_t offset = 0,
+    int64_t length = 0);
 
 /// True if 'url' names a shuffle block.
 bool isBlockUrl(const std::string& url);
 
 /// Parses a blockUrl() into its location and block id.
 std::pair<std::string, BlockId> parseBlockUrl(const std::string& url);
+
+/// The location of a map output in Kiln chunk 'chunk' (hex) on the cluster
+/// of metadata server 'metadata': "kiln://<metadata>/<chunk>". It names no
+/// executor, so the output outlives the executor that wrote it.
+std::string kilnLocation(const std::string& metadata, const std::string& chunk);
+
+bool isKilnLocation(const std::string& location);
+
+/// The byte range [offset, offset + length) of a Kiln block URL.
+std::pair<int64_t, int64_t> kilnBlockRange(const std::string& url);
 
 /// A reduce task could not fetch a block: its map output is lost, e.g. the
 /// executor that holds it died. The driver then recomputes the output rather

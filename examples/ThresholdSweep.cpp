@@ -14,6 +14,7 @@
 #include <chrono>
 #include <iostream>
 
+#include "EnvConfig.h"
 #include "ember/Session.h"
 #include "ember/functions.h"
 
@@ -29,10 +30,10 @@ int main(int argc, char** argv) {
   }
   const bool useCache = argc < 3 || std::string(argv[2]) != "nocache";
 
-  auto ember = Session::builder()
-                   .appName("ThresholdSweep")
-                   .master(argc > 3 ? argv[3] : "local[*]")
-                   .getOrCreate();
+  auto builder = Session::builder();
+  builder.appName("ThresholdSweep")
+      .master(argc > 3 ? argv[3] : "local[*]");
+  auto ember = examples::withEnvConfig(builder).getOrCreate();
 
   auto text = col("text");
   Dataframe features = ember.read().parquet(argv[1]).select(

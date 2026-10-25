@@ -16,8 +16,10 @@
 #include <filesystem>
 
 #include "ember/driver/DagScheduler.h"
+#include "ember/shuffle/ShuffleConfig.h"
 #include "ember/tests/WordCountUtil.h"
 #include "ember/worker/Worker.h"
+#include "kiln/local/LocalCluster.h"
 #include "velox/common/base/tests/GTestUtils.h"
 
 extern char** environ;
@@ -398,6 +400,44 @@ TEST_F(ClusterTest, inProcessWorkers) {
   for (auto& thread : threads) {
     thread.join();
   }
+}
+
+// Map outputs in Kiln outlive the worker that wrote them: killing it after the
+// map stage loses none, so the map stage does not run again.
+TEST_F(ClusterTest, kilnOutputsSurviveAKilledWorker) {
+  kiln::local::LocalCluster kiln(kiln::local::LocalClusterOptions{
+      .dramServers = 1, .localFsServers = 0});
+  test::writeCorpus(dir_ / "input", 6, 2000);
+  const auto expected = test::shellWordCount(dir_ / "input");
+  startWorkers(/*count=*/3, /*slots=*/2);
+
+  StageLog log;
+  std::optional<int32_t> mapStage;
+  auto& session = startDriver(
+      3,
+      log.listener([&](const auto& info) {
+        if (mapStage.has_value()) {
+          return;
+        }
+        mapStage = info.stageId;
+        for (const auto& [mapId, location] : info.outputLocations) {
+          EXPECT_TRUE(location.starts_with("kiln://")) << location;
+        }
+        workers_[0]->kill();
+      }),
+      {{std::string(shuffle::kShuffleStore), "kiln"},
+       {std::string(shuffle::kKilnMetadata),
+        kiln.metadataEndpoint().toString()}});
+
+  EXPECT_EQ(
+      test::toMap(test::wordCount(session, (dir_ / "input").string()).collect()),
+      expected);
+  EXPECT_EQ(log.lastAttempt(*mapStage), 0);
+  for (const auto& attempt : log.attempts()) {
+    EXPECT_TRUE(attempt.fetchFailures.empty());
+  }
+  session.stop();
+  session_.reset();
 }
 
 } // namespace

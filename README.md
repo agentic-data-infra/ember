@@ -40,6 +40,9 @@ leaves `/usr/local` alone). Ember's RPC uses the fbthrift (and its `thrift1`
 compiler) from there, built with the same folly as Velox.
 
 ```
+# Kiln, the storage for the "kiln" shuffle store, is a git submodule.
+git submodule update --init
+
 # Build Velox's dependencies into /opt/deps-gcc12 (once; takes a while).
 scripts/build_deps_gcc12.sh
 
@@ -54,7 +57,8 @@ buck2 test //...
 `PREFIX`, `AXIOM_SRC`, `VELOX_SRC` and `BUILD_DIR` override the default
 locations (`BUILD_DIR` defaults to `~/source/axiom/_build/release-gcc12`).
 Re-run `scripts/build_deps.sh` (or just `scripts/gen_third_party.py`) whenever
-Velox or Axiom change.
+Velox or Axiom change. `scripts/gen_third_party.py` also generates Kiln's
+deps file in `third-party/kiln`, which Buck builds as the cell `kiln//`.
 
 ## Running WordCount
 
@@ -81,6 +85,20 @@ worker dies or hangs mid-job, its tasks, and the shuffle output it held, run
 again on the remaining workers.
 `scripts/run_local_cluster.sh -n 3 -- word_count path {master} {workers}`
 does all of this on one machine.
+
+To keep shuffle outputs in [Kiln](https://github.com/agentic-data-infra/kiln)
+instead of on the workers, so that they survive a worker, start a Kiln
+cluster and set `ember.shuffle.store=kiln` and
+`ember.shuffle.kiln.metadata=<kiln metadata host:port>`; the examples take
+extra config from `$EMBER_CONF`:
+
+```
+third-party/kiln/scripts/start_local_cluster.sh -d 1 -l 0 -r 4   # prints localhost:7470
+EMBER_CONF="ember.shuffle.store=kiln ember.shuffle.kiln.metadata=localhost:7470" \
+  buck2 run //examples:word_count -- path/to/text
+```
+
+See [ember/shuffle/README.md](ember/shuffle/README.md).
 
 ## More examples
 

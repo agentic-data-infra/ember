@@ -3,6 +3,7 @@
   prelude = prelude
   toolchains = toolchains
   none = none
+  kiln = third-party/kiln
 
 [cell_aliases]
   config = prelude
@@ -18,7 +19,8 @@
 [parser]
   target_platform_detector_spec = target:root//...->prelude//platforms:default \
     target:prelude//...->prelude//platforms:default \
-    target:toolchains//...->prelude//platforms:default
+    target:toolchains//...->prelude//platforms:default \
+    target:kiln//...->prelude//platforms:default
 
 [build]
   execution_platforms = prelude//platforms:default
