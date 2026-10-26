@@ -142,6 +142,19 @@ std::vector<std::string> MapOutputTracker::blockUrls(
   return urls;
 }
 
+std::optional<std::vector<shuffle::MapStatus>> MapOutputTracker::mapStatuses(
+    int32_t shuffleId) const {
+  std::lock_guard<std::mutex> l(mutex_);
+  std::vector<shuffle::MapStatus> statuses;
+  for (const auto& status : outputs_.at(shuffleId)) {
+    if (!status.has_value()) {
+      return std::nullopt;
+    }
+    statuses.push_back(*status);
+  }
+  return statuses;
+}
+
 std::vector<int64_t> MapOutputTracker::partitionSizes(int32_t shuffleId) const {
   std::lock_guard<std::mutex> l(mutex_);
   std::vector<int64_t> sizes;

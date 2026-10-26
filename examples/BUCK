@@ -3,6 +3,8 @@ cxx_binary(
     srcs = ["WordCount.cpp"],
     headers = ["EnvConfig.h"],
     deps = ["//ember/api:api"],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
 )
 
 cxx_binary(
@@ -10,6 +12,8 @@ cxx_binary(
     srcs = ["DomainReport.cpp"],
     headers = ["EnvConfig.h"],
     deps = ["//ember/api:api"],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
 )
 
 cxx_binary(
@@ -17,4 +21,6 @@ cxx_binary(
     srcs = ["ThresholdSweep.cpp"],
     headers = ["EnvConfig.h"],
     deps = ["//ember/api:api"],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
 )

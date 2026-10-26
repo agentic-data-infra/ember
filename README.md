@@ -13,6 +13,7 @@ queries, so Ember aims for these properties (✅ implemented today, ⬜ planned)
 - ✅ Memoization with `cache()`/`persist()`/`unpersist()`.
 - ✅ Fault tolerance through task retry and lineage recompute.
 - ⬜ Cost-based materialization: decide what to keep from predicted reuse.
+- ✅ Reuse across programs of the same build, through Kiln's catalog (`ember.reuse.kiln`).
 - ⬜ Reuse across sessions and agents, through a persistent driver and catalog.
 - ⬜ Shared scans across concurrent queries.
 - ⬜ Differential execution: compare a baseline with candidates from where they diverge.
@@ -98,7 +99,10 @@ EMBER_CONF="ember.shuffle.store=kiln ember.shuffle.kiln.metadata=localhost:7470"
   buck2 run //examples:word_count -- path/to/text
 ```
 
-See [ember/shuffle/README.md](ember/shuffle/README.md).
+See [ember/shuffle/README.md](ember/shuffle/README.md). Adding
+`ember.reuse.kiln=true` also keeps stage outputs in Kiln's catalog, so a
+second run of the same program reuses what the first one computed (see
+[ember/driver/README.md](ember/driver/README.md)).
 
 ## More examples
 

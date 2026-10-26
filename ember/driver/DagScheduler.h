@@ -10,7 +10,9 @@
 // Exact reuse: a map stage with a key keeps its shuffle output after the job,
 // in a memo by key. A later job's stage with the same key reads the stored
 // output instead of running; stages only it reads do not run either. Stored
-// outputs lost with their executor are recomputed as in any job.
+// outputs lost with their executor are recomputed as in any job. With
+// ember.reuse.kiln, kept outputs in Kiln also go into Kiln's catalog, where
+// later programs find them (KilnMemo.h).
 //
 // Cached Dataframes: a stage that reads a cached table (CachedTable.h) first
 // materializes it, as a job of its own over the cached plan whose last stage
@@ -28,6 +30,7 @@
 #include <string>
 
 #include "axiom/optimizer/MultiFragmentPlan.h"
+#include "ember/driver/KilnMemo.h"
 #include "ember/driver/MapOutputTracker.h"
 #include "ember/driver/StagePlan.h"
 #include "ember/driver/TaskScheduler.h"
@@ -80,6 +83,10 @@ class DagScheduler {
   /// Config key: keep keyed shuffle outputs for later jobs to reuse (default
   /// true).
   static constexpr const char* kReuseOutputs = "ember.reuse.outputs";
+  /// Config key: also store kept outputs in Kiln's catalog, and look stage
+  /// keys up there, so that later programs reuse them (KilnMemo.h; default
+  /// false). Needs the Kiln shuffle store.
+  static constexpr const char* kReuseInKiln = "ember.reuse.kiln";
 
   DagScheduler(
       std::shared_ptr<SchedulerBackend> backend,
@@ -144,10 +151,15 @@ class DagScheduler {
       JobContext& job);
 
   // The shuffle stored under 'key', if it can be reused by a stage with
-  // 'numTasks' tasks: one with as many map outputs.
+  // 'numTasks' tasks: one with as many map outputs. Looks in Kiln's catalog
+  // if the session has none.
   std::optional<int32_t> storedShuffle(
       const std::optional<std::string>& key,
       int32_t numTasks);
+
+  // Stores the complete output of shuffle 'shuffleId', kept under 'key', in
+  // Kiln's catalog, with ember.reuse.kiln.
+  void storeInKiln(const std::string& key, int32_t shuffleId);
 
   const DagSchedulerOptions options_;
   const bool reuseOutputs_;
@@ -164,6 +176,8 @@ class DagScheduler {
   // tracker, so losses are tracked as for any shuffle.
   std::mutex memoMutex_;
   std::map<std::string, int32_t> memo_;
+  // Kiln's catalog, with ember.reuse.kiln.
+  const std::unique_ptr<KilnMemo> kilnMemo_;
 };
 
 } // namespace ember::driver

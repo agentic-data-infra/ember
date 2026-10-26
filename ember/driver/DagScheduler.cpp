@@ -74,7 +74,8 @@ DagScheduler::DagScheduler(
       reuseOutputs_{
           !options_.config.contains(kReuseOutputs) ||
           folly::to<bool>(options_.config.at(kReuseOutputs))},
-      taskScheduler_{std::move(backend), options_.maxTaskAttempts} {
+      taskScheduler_{std::move(backend), options_.maxTaskAttempts},
+      kilnMemo_{KilnMemo::fromConfig(options_.config)} {
   for (const auto& [key, value] : options_.config) {
     if (!key.starts_with("ember.") || key == kMaxSplitBytes) {
       keyConfig_[key] = value;
@@ -139,11 +140,45 @@ std::optional<int32_t> DagScheduler::storedShuffle(
   }
   std::lock_guard<std::mutex> l(memoMutex_);
   auto it = memo_.find(*key);
+  if (it == memo_.end() && kilnMemo_ != nullptr) {
+    std::optional<std::vector<shuffle::MapStatus>> maps;
+    try {
+      maps = kilnMemo_->get(*key);
+    } catch (const std::exception& e) {
+      LOG(WARNING) << "Cannot look up stage " << *key << " in Kiln: "
+                   << e.what();
+    }
+    if (maps.has_value() && maps->size() == numTasks) {
+      const auto shuffleId = ++shuffleCounter_;
+      mapOutputTracker_.registerShuffle(shuffleId, numTasks);
+      for (int32_t mapId = 0; mapId < numTasks; ++mapId) {
+        mapOutputTracker_.registerMapOutput(
+            shuffleId, mapId, std::move((*maps)[mapId]));
+      }
+      it = memo_.emplace(*key, shuffleId).first;
+    }
+  }
   if (it == memo_.end() ||
       mapOutputTracker_.numMaps(it->second) != numTasks) {
     return std::nullopt;
   }
   return it->second;
+}
+
+void DagScheduler::storeInKiln(const std::string& key, int32_t shuffleId) {
+  // A cached table without a stage key is stored under its session's id.
+  if (kilnMemo_ == nullptr || key.starts_with("cached ")) {
+    return;
+  }
+  auto maps = mapOutputTracker_.mapStatuses(shuffleId);
+  if (!maps.has_value()) {
+    return;
+  }
+  try {
+    kilnMemo_->put(key, *maps);
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "Cannot store stage " << key << " in Kiln: " << e.what();
+  }
 }
 
 std::string DagScheduler::explain(const optimizer::MultiFragmentPlan& plan) {
@@ -428,6 +463,7 @@ std::vector<velox::RowVectorPtr> DagScheduler::runStages(
         std::lock_guard<std::mutex> l(memoMutex_);
         auto [it, inserted] = memo_.emplace(*key, shuffleId);
         if (inserted) {
+          storeInKiln(*key, shuffleId);
           continue;
         }
         if (!reused.contains(it->second) && !written.contains(it->second)) {
@@ -435,6 +471,7 @@ std::vector<velox::RowVectorPtr> DagScheduler::runStages(
           backend().removeShuffle(it->second);
           mapOutputTracker_.unregisterShuffle(it->second);
           it->second = shuffleId;
+          storeInKiln(*key, shuffleId);
           continue;
         }
       }
