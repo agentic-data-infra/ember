@@ -304,7 +304,7 @@ std::pair<std::string, BlockId> parseBlockUrl(const std::string& url) {
     auto parts = urlParts(url, kKilnScheme.size());
     VELOX_CHECK_EQ(parts.size(), 7, "Malformed shuffle block: {}", url);
     return {
-        kilnLocation(parts[0], parts[1]),
+        fmt::format("{}{}/{}", kKilnScheme, parts[0], parts[1]),
         BlockId{
             folly::to<int32_t>(parts[4]),
             folly::to<int32_t>(parts[5]),
@@ -321,7 +321,17 @@ std::pair<std::string, BlockId> parseBlockUrl(const std::string& url) {
 }
 
 std::string kilnLocation(const std::string& metadata, const std::string& chunk) {
-  return fmt::format("{}{}/{}", kKilnScheme, metadata, chunk);
+  // Only what would break the '/'-separated URL: a URL list such as
+  // "tcp://meta:7470,rdma://10.0.0.1:7471" keeps its other characters.
+  std::string escaped;
+  for (const char c : metadata) {
+    if (c == '/' || c == '%') {
+      escaped += fmt::format("%{:02X}", static_cast<unsigned char>(c));
+    } else {
+      escaped += c;
+    }
+  }
+  return fmt::format("{}{}/{}", kKilnScheme, escaped, chunk);
 }
 
 bool isKilnLocation(const std::string& location) {

@@ -18,7 +18,8 @@ inline constexpr std::string_view kSpillThreshold =
 /// or "kiln", one Kiln chunk per map output (see KilnShuffle.h).
 inline constexpr std::string_view kShuffleStore = "ember.shuffle.store";
 
-/// The Kiln metadata server ("host:port") of the "kiln" store.
+/// The Kiln metadata server of the "kiln" store: Kiln's URL list,
+/// "tcp://host:port,rdma://host:port", or just "host:port".
 inline constexpr std::string_view kKilnMetadata = "ember.shuffle.kiln.metadata";
 
 } // namespace ember::shuffle

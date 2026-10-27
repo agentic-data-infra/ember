@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -126,8 +127,12 @@ class SchedulerTest : public testing::Test {
     // Axiom's LocalRunner reads its exchanges in memory.
     velox::exec::ExchangeSource::registerFactory(
         velox::exec::test::createLocalExchangeSource);
-    kiln_ = new kiln::local::LocalCluster(kiln::local::LocalClusterOptions{
-        .dramServers = 1, .localFsServers = 0});
+    // $EMBER_TEST_KILN_METADATA (Kiln's URL list) names an external
+    // cluster to use instead, e.g. one that serves RDMA.
+    if (std::getenv("EMBER_TEST_KILN_METADATA") == nullptr) {
+      kiln_ = new kiln::local::LocalCluster(kiln::local::LocalClusterOptions{
+          .dramServers = 1, .localFsServers = 0});
+    }
   }
 
   static void TearDownTestCase() {
@@ -145,7 +150,9 @@ class SchedulerTest : public testing::Test {
   }
 
   static std::string kilnMetadata() {
-    return kiln_->metadataEndpoint().toString();
+    const char* external = std::getenv("EMBER_TEST_KILN_METADATA");
+    return external != nullptr ? std::string(external)
+                               : kiln_->metadataAddress().toString();
   }
 
   void SetUp() override {
