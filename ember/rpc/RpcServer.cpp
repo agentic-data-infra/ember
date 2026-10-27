@@ -99,8 +99,8 @@ std::unique_ptr<apache::thrift::ScopedServerInterfaceThread> serve(
         [](apache::thrift::ThriftServer& server) {
           // ScopedServerInterfaceThread is made for tests and gives the
           // server one IO and one handler thread. Then one blocked handler
-          // stalls every other call, and stopping, which runs the services'
-          // onStopRequested on the handler threads, never finishes.
+          // stalls every other call, and stopping too, which runs the
+          // services' onStopRequested on the handler threads.
           server.setNumIOWorkerThreads(kIoThreads);
           server.setNumCPUWorkerThreads(kHandlerThreads);
           // Calls wait for a handler thread as long as it takes, rather than
