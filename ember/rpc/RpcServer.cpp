@@ -46,13 +46,10 @@ class WorkerService
   explicit WorkerService(std::shared_ptr<WorkerHandler> handler)
       : handler_{std::move(handler)} {}
 
-  folly::SemiFuture<std::unique_ptr<std::string>> semifuture_launchTask(
+  folly::coro::Task<std::unique_ptr<std::string>> co_launchTask(
       std::unique_ptr<std::string> task) override {
-    return folly::makeSemiFutureWith(
-               [&] { return handler_->launchTask(std::move(*task)); })
-        .deferValue([](std::string result) {
-          return std::make_unique<std::string>(std::move(result));
-        });
+    co_return std::make_unique<std::string>(
+        co_await handler_->co_launchTask(std::move(*task)));
   }
 
   void sync_removeShuffle(int32_t shuffleId) override {
@@ -63,14 +60,13 @@ class WorkerService
     handler_->shutdown();
   }
 
-  folly::SemiFuture<std::unique_ptr<folly::IOBuf>> semifuture_fetchBlock(
+  folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
       std::unique_ptr<thrift::BlockId> block) override {
-    return folly::makeSemiFutureWith([&] {
-      return handler_->fetchBlock(BlockId{
-          .shuffleId = *block->shuffleId(),
-          .mapId = *block->mapId(),
-          .reduceId = *block->reduceId()});
-    });
+    const BlockId id{
+        .shuffleId = *block->shuffleId(),
+        .mapId = *block->mapId(),
+        .reduceId = *block->reduceId()};
+    co_return co_await handler_->co_fetchBlock(id);
   }
 
  private:

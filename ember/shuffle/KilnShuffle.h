@@ -44,7 +44,7 @@ std::unique_ptr<ShuffleWriter> createKilnWriter(
     int64_t spillThreshold);
 
 /// The bytes of the Kiln block at block URL 'url' (see blockUrl()).
-folly::SemiFuture<std::unique_ptr<folly::IOBuf>> fetchKilnBlock(
-    const std::string& url);
+folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchKilnBlock(
+    std::string url);
 
 } // namespace ember::shuffle

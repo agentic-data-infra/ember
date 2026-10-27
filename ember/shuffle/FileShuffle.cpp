@@ -519,11 +519,9 @@ std::shared_ptr<ShuffleBlockStore> ShuffleBlockStore::find(
   return it == stores().end() ? nullptr : it->second;
 }
 
-folly::SemiFuture<std::unique_ptr<folly::IOBuf>> LocalBlockTransport::fetchBlock(
-    const std::string& location,
-    const BlockId& id) {
-  return folly::makeSemiFutureWith(
-      [&]() { return ShuffleBlockStore::lookup(location)->readBlock(id); });
+folly::coro::Task<std::unique_ptr<folly::IOBuf>>
+LocalBlockTransport::co_fetchBlock(std::string location, BlockId id) {
+  co_return ShuffleBlockStore::lookup(location)->readBlock(id);
 }
 
 std::vector<std::unique_ptr<folly::IOBuf>> splitFrames(

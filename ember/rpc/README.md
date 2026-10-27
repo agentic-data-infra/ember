@@ -18,8 +18,8 @@ workers.
 | `ember.thrift` | The services and their messages. |
 | `Messages` | The messages as plain structs (`RegisterWorkerRequest`, `BlockId`, ...). |
 | `Handlers` | `DriverHandler` and `WorkerHandler`, implemented by the driver and workers. |
-| `Clients` | `DriverClient`, `WorkerClient`, `ShuffleBlockClient`: `connect(address)`, then calls returning futures, from any thread. Calls on one client run concurrently; a broken connection or `close()` fails every pending call, and every failure is an `RpcError`. No default call timeout. |
-| `RpcServer` | Serves a `DriverHandler` or `WorkerHandler` on a port. Handlers return futures, so long work (a task) runs elsewhere. |
+| `Clients` | `DriverClient`, `WorkerClient`, `ShuffleBlockClient`: `connect(address)`, then coroutine calls (`co_launchTask`, ...) returning `folly::coro::Task`, from any thread. Calls on one client run concurrently; a broken connection or `close()` fails every pending call, and every failure is an `RpcError`. No default call timeout. |
+| `RpcServer` | Serves a `DriverHandler` or `WorkerHandler` on a port. Handlers' long calls are coroutines, so long work (a task) runs elsewhere. |
 | `Rpc` | `RpcError` and `HostAndPort`. |
 | `ThriftConnection` | Internal: a Rocket channel on a process-wide IO pool, and the call helper the clients share. |
 

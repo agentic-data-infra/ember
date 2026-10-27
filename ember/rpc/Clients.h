@@ -1,11 +1,12 @@
 // The calling side of Ember's RPC: a client per service, usable from any
 // thread.
 //
-// Any number of calls may be in flight on a client and complete in any
-// order. Calls fail with RpcError: when the server's handler threw, when the
-// connection broke (which fails every pending call), or after close(). There
-// is no default call timeout, since a task runs as long as it takes; callers
-// bound their waits.
+// Calls are coroutines: a call is sent when its task is awaited, and the
+// client must outlive it. Any number of calls may be in flight on a client
+// and complete in any order. Calls fail with RpcError: when the server's
+// handler threw, when the connection broke (which fails every pending
+// call), or after close(). There is no default call timeout, since a task
+// runs as long as it takes; callers bound their waits.
 
 #pragma once
 
@@ -13,7 +14,7 @@
 #include <memory>
 #include <string>
 
-#include <folly/futures/Future.h>
+#include <folly/coro/Task.h>
 #include <folly/io/IOBuf.h>
 
 #include "ember/rpc/Messages.h"
@@ -59,11 +60,11 @@ class DriverClient : public Client {
 
   ~DriverClient() override;
 
-  folly::SemiFuture<RegisterWorkerResponse> registerWorker(
-      const RegisterWorkerRequest& request);
+  folly::coro::Task<RegisterWorkerResponse> co_registerWorker(
+      RegisterWorkerRequest request);
 
   /// Whether the driver still counts 'workerId' as registered.
-  folly::SemiFuture<bool> heartbeat(const std::string& workerId);
+  folly::coro::Task<bool> co_heartbeat(std::string workerId);
 
  private:
   struct Stub;
@@ -83,11 +84,11 @@ class WorkerClient : public Client {
   ~WorkerClient() override;
 
   /// Runs a TaskDescription; the result is its TaskResult.
-  folly::SemiFuture<std::string> launchTask(const std::string& task);
+  folly::coro::Task<std::string> co_launchTask(std::string task);
 
-  folly::SemiFuture<folly::Unit> removeShuffle(int32_t shuffleId);
+  folly::coro::Task<void> co_removeShuffle(int32_t shuffleId);
 
-  folly::SemiFuture<folly::Unit> shutdown();
+  folly::coro::Task<void> co_shutdown();
 
  private:
   struct Stub;
@@ -106,8 +107,8 @@ class ShuffleBlockClient : public Client {
 
   ~ShuffleBlockClient() override;
 
-  folly::SemiFuture<std::unique_ptr<folly::IOBuf>> fetchBlock(
-      const BlockId& block);
+  folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
+      BlockId block);
 
  private:
   struct Stub;

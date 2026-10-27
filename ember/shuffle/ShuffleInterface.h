@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-#include <folly/futures/Future.h>
+#include <folly/coro/Task.h>
 #include <folly/io/IOBuf.h>
 
 namespace ember::shuffle {
@@ -67,9 +67,9 @@ class BlockTransport {
 
   /// Returns the bytes of block 'id' held by the executor at 'location': a
   /// sequence of framed pages (see FileShuffle.h). An empty block has no bytes.
-  virtual folly::SemiFuture<std::unique_ptr<folly::IOBuf>> fetchBlock(
-      const std::string& location,
-      const BlockId& id) = 0;
+  virtual folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
+      std::string location,
+      BlockId id) = 0;
 
   /// The process-wide transport used by shuffle reads.
   static void setInstance(std::shared_ptr<BlockTransport> transport);

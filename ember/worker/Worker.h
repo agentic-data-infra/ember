@@ -21,7 +21,7 @@
 #include <mutex>
 #include <string>
 
-#include <folly/futures/Future.h>
+#include <folly/coro/Task.h>
 
 #include "ember/rpc/RpcServer.h"
 #include "ember/shuffle/ShuffleInterface.h"
@@ -90,8 +90,8 @@ class Worker {
   // Serves the driver's and other workers' calls.
   class Handler;
 
-  folly::SemiFuture<std::string> launchTask(std::string task);
-  folly::SemiFuture<std::unique_ptr<folly::IOBuf>> fetchBlock(
+  folly::coro::Task<std::string> co_launchTask(std::string task);
+  folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
       shuffle::BlockId id);
   void removeShuffle(int32_t shuffleId);
   void shutdown();

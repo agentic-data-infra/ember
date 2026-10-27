@@ -1,7 +1,9 @@
 #include "ember/driver/ClusterBackend.h"
 
+#include <folly/coro/BlockingWait.h>
+#include <folly/coro/Collect.h>
+#include <folly/coro/Timeout.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
-#include <folly/futures/Future.h>
 #include <glog/logging.h>
 
 #include "ember/worker/TaskDescription.h"
@@ -166,11 +168,11 @@ void ClusterBackend::dispatch() {
     }
   }
   for (auto& [worker, task] : launches) {
-    auto result = worker->client->launchTask(task.task);
-    std::move(result)
-        .via(callbacks_.get())
-        .thenTry([this, worker, task = std::move(task)](
-                     folly::Try<std::string> result) mutable {
+    auto call = worker->client->co_launchTask(task.task);
+    folly::coro::co_withExecutor(
+        folly::getKeepAliveToken(callbacks_.get()), std::move(call))
+        .start([this, worker, task = std::move(task)](
+                   folly::Try<std::string>&& result) mutable {
           onTaskDone(worker, std::move(task), std::move(result));
         });
   }
@@ -275,12 +277,14 @@ void ClusterBackend::removeShuffle(int32_t shuffleId) {
       clients.push_back(worker->client);
     }
   }
-  std::vector<folly::SemiFuture<folly::Unit>> calls;
+  std::vector<folly::coro::Task<void>> calls;
   for (const auto& client : clients) {
-    calls.push_back(client->removeShuffle(shuffleId));
+    calls.push_back(folly::coro::timeout(
+        client->co_removeShuffle(shuffleId), kRemoveShuffleTimeout));
   }
-  for (auto& call : calls) {
-    auto result = std::move(call).getTry(kRemoveShuffleTimeout);
+  const auto results = folly::coro::blockingWait(
+      folly::coro::collectAllTryRange(std::move(calls)));
+  for (const auto& result : results) {
     if (result.hasException()) {
       LOG(WARNING) << "Removing shuffle " << shuffleId
                    << " failed: " << result.exception().what();
@@ -303,13 +307,12 @@ void ClusterBackend::stop() {
   changed_.notify_all();
   monitor_.join();
 
-  std::vector<folly::SemiFuture<folly::Unit>> calls;
+  std::vector<folly::coro::Task<void>> calls;
   for (const auto& [id, worker] : workers) {
-    calls.push_back(worker->client->shutdown());
+    calls.push_back(
+        folly::coro::timeout(worker->client->co_shutdown(), kShutdownTimeout));
   }
-  for (auto& call : calls) {
-    std::move(call).getTry(kShutdownTimeout);
-  }
+  folly::coro::blockingWait(folly::coro::collectAllTryRange(std::move(calls)));
   for (const auto& [id, worker] : workers) {
     worker->client->close();
   }

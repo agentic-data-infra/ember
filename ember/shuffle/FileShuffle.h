@@ -184,9 +184,9 @@ class PartitionedPageWriter : public ShuffleWriter {
 /// Serves blocks from stores registered in this process.
 class LocalBlockTransport : public BlockTransport {
  public:
-  folly::SemiFuture<std::unique_ptr<folly::IOBuf>> fetchBlock(
-      const std::string& location,
-      const BlockId& id) override;
+  folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
+      std::string location,
+      BlockId id) override;
 };
 
 /// Splits a block into its pages.
