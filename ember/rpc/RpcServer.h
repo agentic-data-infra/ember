@@ -37,8 +37,9 @@ class RpcServer {
     return port_;
   }
 
-  /// Stops accepting and closes every connection. Calls still running are
-  /// not answered.
+  /// Stops accepting, answers the calls in flight, and closes every
+  /// connection. Handlers must finish within 10 s: fbthrift aborts the
+  /// process if a call still runs then.
   void stop();
 
  private:

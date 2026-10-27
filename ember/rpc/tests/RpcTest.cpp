@@ -1,7 +1,15 @@
 // The RPC layer on its own: concurrent calls on one connection, handler
-// errors, and calls failing when a connection breaks.
+// errors, calls failing when a connection breaks, and blocked handlers
+// delaying but not failing other calls.
 
 #include <gtest/gtest.h>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <thread>
 
 #include <folly/coro/BlockingWait.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
@@ -185,13 +193,84 @@ TEST_F(RpcTest, errors) {
   EXPECT_EQ(echo(*client, "still"), "still");
 }
 
+// A peer that accepts one connection, reads until it has seen 'marker' (a
+// call's method name), then closes the connection: a server that dies with
+// the call in flight.
+class DroppingPeer {
+ public:
+  explicit DroppingPeer(std::string marker) : marker_{std::move(marker)} {
+    listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t length = sizeof(address);
+    EXPECT_EQ(::bind(listener_, (sockaddr*)&address, length), 0);
+    EXPECT_EQ(::listen(listener_, 1), 0);
+    ::getsockname(listener_, (sockaddr*)&address, &length);
+    port_ = ntohs(address.sin_port);
+    thread_ = std::thread([this] { run(); });
+  }
+
+  ~DroppingPeer() {
+    thread_.join();
+    ::close(listener_);
+  }
+
+  HostAndPort address() const {
+    return HostAndPort{"127.0.0.1", port_};
+  }
+
+ private:
+  void run() {
+    const int connection = ::accept(listener_, nullptr, nullptr);
+    std::string received;
+    char buffer[4096];
+    while (received.find(marker_) == std::string::npos) {
+      const auto n = ::read(connection, buffer, sizeof(buffer));
+      if (n <= 0) {
+        break;
+      }
+      received.append(buffer, n);
+    }
+    ::close(connection);
+  }
+
+  const std::string marker_;
+  int listener_;
+  uint16_t port_;
+  std::thread thread_;
+};
+
 TEST_F(RpcTest, pendingCallsFailWhenConnectionBreaks) {
-  auto client = WorkerClient::connect(address());
+  DroppingPeer peer("removeShuffle");
+  auto client = WorkerClient::connect(peer.address());
   auto pending = start(client->co_removeShuffle(1));
-  server_.stop();
   EXPECT_THROW(std::move(pending).get(std::chrono::seconds(10)), RpcError);
   EXPECT_FALSE(client->isOpen());
   EXPECT_THROW(echo(*client, "x"), RpcError);
+}
+
+TEST_F(RpcTest, blockedHandlersDelayButDoNotFailOtherCalls) {
+  auto client = WorkerClient::connect(address());
+  // A blocked handler leaves the other handler threads to other calls.
+  std::vector<folly::SemiFuture<folly::Unit>> blocked;
+  blocked.push_back(start(client->co_removeShuffle(0)));
+  start(client->co_shutdown()).get(std::chrono::seconds(10));
+  EXPECT_EQ(echo(*client, "other"), "other");
+
+  // With every handler thread blocked, calls wait for one, however long.
+  for (int i = 1; i < 4; ++i) {
+    blocked.push_back(start(client->co_removeShuffle(i)));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  auto queued = start(client->co_launchTask("queued"));
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  EXPECT_FALSE(queued.isReady());
+  handler_->release();
+  EXPECT_EQ(std::move(queued).get(std::chrono::seconds(10)), "queued");
+  for (auto& call : blocked) {
+    std::move(call).get(std::chrono::seconds(10));
+  }
 }
 
 TEST_F(RpcTest, closeFailsPendingCalls) {
