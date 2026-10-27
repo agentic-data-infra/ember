@@ -12,6 +12,7 @@ queries, so Ember aims for these properties (✅ implemented today, ⬜ planned)
 - ✅ Reuse of identical stages across jobs in a session.
 - ✅ Memoization with `cache()`/`persist()`/`unpersist()`.
 - ✅ Fault tolerance through task retry and lineage recompute.
+- ✅ RDMA-based shuffle: map outputs in Kiln outlive their workers and move over one-sided RDMA (`ember.shuffle.store=kiln`, see [Kiln over RDMA](#kiln-over-rdma)).
 - ⬜ Cost-based materialization: decide what to keep from predicted reuse.
 - ✅ Reuse across programs of the same build, through Kiln's catalog (`ember.reuse.kiln`).
 - ⬜ Reuse across sessions and agents, through a persistent driver and catalog.
