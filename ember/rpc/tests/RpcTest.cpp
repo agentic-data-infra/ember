@@ -3,7 +3,9 @@
 
 #include <gtest/gtest.h>
 
+#include <folly/coro/BlockingWait.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
+#include <folly/executors/InlineExecutor.h>
 #include <folly/futures/SharedPromise.h>
 
 #include "ember/rpc/Clients.h"
@@ -13,8 +15,9 @@ namespace ember::rpc {
 namespace {
 
 // launchTask echoes its task after the number of ms it starts with, if any;
-// "throw" throws and "fail" fails its future. removeShuffle does not return
-// until the test lets it. fetchBlock returns a block of 'reduceId' bytes.
+// "throw" throws right away and "fail" throws on the handler's pool.
+// removeShuffle does not return until the test lets it. fetchBlock returns a
+// block of 'reduceId' bytes.
 class TestHandler : public WorkerHandler {
  public:
   TestHandler() : pool_{std::make_unique<folly::CPUThreadPoolExecutor>(8)} {}
@@ -30,22 +33,22 @@ class TestHandler : public WorkerHandler {
     }
   }
 
-  folly::SemiFuture<std::string> launchTask(std::string task) override {
+  folly::coro::Task<std::string> co_launchTask(std::string task) override {
     if (task == "throw") {
       throw std::runtime_error("handler threw");
     }
-    if (task == "fail") {
-      return folly::makeSemiFuture<std::string>(
-          std::runtime_error("future failed"));
-    }
-    return folly::via(pool_.get(), [task = std::move(task)]() mutable {
-             auto delay = folly::tryTo<int32_t>(task.substr(0, task.find(' ')));
-             if (delay.hasValue()) {
-               std::this_thread::sleep_for(std::chrono::milliseconds(*delay));
-             }
-             return std::move(task);
-           })
-        .semi();
+    auto run = [](std::string task) -> folly::coro::Task<std::string> {
+      if (task == "fail") {
+        throw std::runtime_error("task failed");
+      }
+      auto delay = folly::tryTo<int32_t>(task.substr(0, task.find(' ')));
+      if (delay.hasValue()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(*delay));
+      }
+      co_return task;
+    };
+    co_return co_await folly::coro::co_withExecutor(
+        folly::getKeepAliveToken(pool_.get()), run(std::move(task)));
   }
 
   void removeShuffle(int32_t /*shuffleId*/) override {
@@ -54,13 +57,13 @@ class TestHandler : public WorkerHandler {
 
   void shutdown() override {}
 
-  folly::SemiFuture<std::unique_ptr<folly::IOBuf>> fetchBlock(
-      const BlockId& block) override {
+  folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
+      BlockId block) override {
     std::string bytes(block.reduceId, '\0');
     for (size_t i = 0; i < bytes.size(); ++i) {
       bytes[i] = static_cast<char>(i * 7);
     }
-    return folly::makeSemiFuture(folly::IOBuf::fromString(std::move(bytes)));
+    co_return folly::IOBuf::fromString(std::move(bytes));
   }
 
  private:
@@ -84,10 +87,16 @@ class RpcTest : public testing::Test {
     return HostAndPort{"localhost", server_.port()};
   }
 
-  static folly::SemiFuture<std::string> echo(
-      WorkerClient& client,
-      const std::string& task) {
-    return client.launchTask(task);
+  static std::string echo(WorkerClient& client, const std::string& task) {
+    return folly::coro::blockingWait(client.co_launchTask(task));
+  }
+
+  // Starts a call, which is sent before start() returns.
+  template <typename T>
+  static auto start(folly::coro::Task<T> call) {
+    return folly::coro::co_withExecutor(
+               &folly::InlineExecutor::instance(), std::move(call))
+        .start();
   }
 
   std::shared_ptr<TestHandler> handler_;
@@ -106,18 +115,19 @@ TEST_F(RpcTest, hostAndPort) {
 
 TEST_F(RpcTest, roundTrip) {
   auto client = WorkerClient::connect(address());
-  EXPECT_EQ(echo(*client, "hello").get(), "hello");
-  EXPECT_EQ(echo(*client, "").get(), "");
+  EXPECT_EQ(echo(*client, "hello"), "hello");
+  EXPECT_EQ(echo(*client, ""), "");
 
   // A payload larger than socket buffers, with every byte value.
   std::string big(16 << 20, '\0');
   for (size_t i = 0; i < big.size(); ++i) {
     big[i] = static_cast<char>(i * 7);
   }
-  EXPECT_EQ(echo(*client, big).get(), big);
+  EXPECT_EQ(echo(*client, big), big);
 
   auto blocks = ShuffleBlockClient::connect(address());
-  auto bytes = blocks->fetchBlock(BlockId{.reduceId = 16 << 20}).get();
+  auto bytes = folly::coro::blockingWait(
+      blocks->co_fetchBlock(BlockId{.reduceId = 16 << 20}));
   EXPECT_EQ(bytes->computeChainDataLength(), big.size());
   EXPECT_EQ(bytes->to<std::string>(), big);
 }
@@ -125,10 +135,10 @@ TEST_F(RpcTest, roundTrip) {
 TEST_F(RpcTest, concurrentCallsCompleteOutOfOrder) {
   auto client = WorkerClient::connect(address());
   // The first call answers last.
-  auto slow = echo(*client, "300 slow");
+  auto slow = start(client->co_launchTask("300 slow"));
   std::vector<folly::SemiFuture<std::string>> fast;
   for (int i = 0; i < 100; ++i) {
-    fast.push_back(echo(*client, fmt::format("0 {}", i)));
+    fast.push_back(start(client->co_launchTask(fmt::format("0 {}", i))));
   }
   for (int i = 0; i < 100; ++i) {
     EXPECT_EQ(std::move(fast[i]).get(), fmt::format("0 {}", i));
@@ -145,7 +155,7 @@ TEST_F(RpcTest, manyClients) {
       auto client = WorkerClient::connect(address());
       for (int i = 0; i < 50; ++i) {
         auto payload = fmt::format("x{}-{}", t, i);
-        if (echo(*client, payload).get() == payload) {
+        if (echo(*client, payload) == payload) {
           ++ok;
         }
       }
@@ -162,7 +172,7 @@ TEST_F(RpcTest, errors) {
   EXPECT_THROW(
       {
         try {
-          echo(*client, "throw").get();
+          echo(*client, "throw");
         } catch (const RpcError& e) {
           EXPECT_NE(
               std::string(e.what()).find("handler threw"), std::string::npos);
@@ -170,23 +180,23 @@ TEST_F(RpcTest, errors) {
         }
       },
       RpcError);
-  EXPECT_THROW(echo(*client, "fail").get(), RpcError);
+  EXPECT_THROW(echo(*client, "fail"), RpcError);
   // Errors leave the connection usable.
-  EXPECT_EQ(echo(*client, "still").get(), "still");
+  EXPECT_EQ(echo(*client, "still"), "still");
 }
 
 TEST_F(RpcTest, pendingCallsFailWhenConnectionBreaks) {
   auto client = WorkerClient::connect(address());
-  auto pending = client->removeShuffle(1);
+  auto pending = start(client->co_removeShuffle(1));
   server_.stop();
   EXPECT_THROW(std::move(pending).get(std::chrono::seconds(10)), RpcError);
   EXPECT_FALSE(client->isOpen());
-  EXPECT_THROW(echo(*client, "x").get(), RpcError);
+  EXPECT_THROW(echo(*client, "x"), RpcError);
 }
 
 TEST_F(RpcTest, closeFailsPendingCalls) {
   auto client = WorkerClient::connect(address());
-  auto pending = client->removeShuffle(1);
+  auto pending = start(client->co_removeShuffle(1));
   client->close();
   EXPECT_THROW(std::move(pending).get(std::chrono::seconds(10)), RpcError);
   EXPECT_FALSE(client->isOpen());

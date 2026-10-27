@@ -2,6 +2,8 @@
 
 #include <unistd.h>
 
+#include <folly/coro/BlockingWait.h>
+#include <folly/coro/Timeout.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <glog/logging.h>
 
@@ -21,8 +23,8 @@ class Worker::Handler : public rpc::WorkerHandler {
  public:
   explicit Handler(Worker* worker) : worker_{worker} {}
 
-  folly::SemiFuture<std::string> launchTask(std::string task) override {
-    return worker_->launchTask(std::move(task));
+  folly::coro::Task<std::string> co_launchTask(std::string task) override {
+    return worker_->co_launchTask(std::move(task));
   }
 
   void removeShuffle(int32_t shuffleId) override {
@@ -33,9 +35,9 @@ class Worker::Handler : public rpc::WorkerHandler {
     worker_->shutdown();
   }
 
-  folly::SemiFuture<std::unique_ptr<folly::IOBuf>> fetchBlock(
-      const rpc::BlockId& block) override {
-    return worker_->fetchBlock(shuffle::BlockId{
+  folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
+      rpc::BlockId block) override {
+    return worker_->co_fetchBlock(shuffle::BlockId{
         block.shuffleId, block.mapId, block.reduceId});
   }
 
@@ -102,17 +104,16 @@ void Worker::shutdown() {
   wakeup_.notify_all();
 }
 
-folly::SemiFuture<std::unique_ptr<folly::IOBuf>> Worker::fetchBlock(
+folly::coro::Task<std::unique_ptr<folly::IOBuf>> Worker::co_fetchBlock(
     shuffle::BlockId id) {
-  return folly::via(
-             blockReaders_.get(),
-             [this, id]() -> std::unique_ptr<folly::IOBuf> {
-               auto store = shuffle::ShuffleBlockStore::find(address_);
-               VELOX_CHECK_NOT_NULL(
-                   store, "No executor serves shuffle blocks here");
-               return store->readBlock(id);
-             })
-      .semi();
+  auto read = [](std::string address, shuffle::BlockId id)
+      -> folly::coro::Task<std::unique_ptr<folly::IOBuf>> {
+    auto store = shuffle::ShuffleBlockStore::find(address);
+    VELOX_CHECK_NOT_NULL(store, "No executor serves shuffle blocks here");
+    co_return store->readBlock(id);
+  };
+  co_return co_await folly::coro::co_withExecutor(
+      folly::getKeepAliveToken(blockReaders_.get()), read(address_, id));
 }
 
 void Worker::stop() {
@@ -163,12 +164,10 @@ bool Worker::serveDriver(std::chrono::milliseconds connectTimeout) {
   startExecutor();
   rpc::RegisterWorkerResponse reply;
   try {
-    reply = driver
-                ->registerWorker(rpc::RegisterWorkerRequest{
-                    .workerId = address_,
-                    .address = address_,
-                    .slots = options_.slots})
-                .get(kCallTimeout);
+    rpc::RegisterWorkerRequest request{
+        .workerId = address_, .address = address_, .slots = options_.slots};
+    reply = folly::coro::blockingWait(folly::coro::timeout(
+        driver->co_registerWorker(std::move(request)), kCallTimeout));
     LOG(INFO) << "Registered with driver " << options_.driver.toString()
               << " of " << reply.appName << ", " << options_.slots
               << " slots";
@@ -192,7 +191,8 @@ bool Worker::serveDriver(std::chrono::milliseconds connectTimeout) {
       }
     }
     try {
-      if (!driver->heartbeat(address_).get(kCallTimeout)) {
+      if (!folly::coro::blockingWait(folly::coro::timeout(
+              driver->co_heartbeat(address_), kCallTimeout))) {
         LOG(WARNING) << "Driver no longer knows this worker";
         break;
       }
@@ -239,7 +239,7 @@ void Worker::stopExecutor() {
   }
 }
 
-folly::SemiFuture<std::string> Worker::launchTask(std::string task) {
+folly::coro::Task<std::string> Worker::co_launchTask(std::string task) {
   std::shared_ptr<Executor> executor;
   std::shared_ptr<folly::CPUThreadPoolExecutor> slots;
   {
@@ -248,12 +248,13 @@ folly::SemiFuture<std::string> Worker::launchTask(std::string task) {
     slots = slots_;
   }
   VELOX_CHECK_NOT_NULL(executor, "Worker {} has no driver", address_);
-  return folly::via(
-             slots.get(),
-             [executor, task = std::move(task)] {
-               return executor->runTask(task);
-             })
-      .semi();
+  auto run = [](std::shared_ptr<Executor> executor,
+                std::string task) -> folly::coro::Task<std::string> {
+    co_return executor->runTask(task);
+  };
+  co_return co_await folly::coro::co_withExecutor(
+      folly::getKeepAliveToken(slots.get()),
+      run(std::move(executor), std::move(task)));
 }
 
 } // namespace ember

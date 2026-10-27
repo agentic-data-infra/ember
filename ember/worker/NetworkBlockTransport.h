@@ -27,9 +27,9 @@ class NetworkBlockTransport : public shuffle::BlockTransport {
       std::chrono::milliseconds fetchTimeout = std::chrono::seconds(120))
       : fetchLocalBlocks_{fetchLocalBlocks}, fetchTimeout_{fetchTimeout} {}
 
-  folly::SemiFuture<std::unique_ptr<folly::IOBuf>> fetchBlock(
-      const std::string& location,
-      const shuffle::BlockId& id) override;
+  folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
+      std::string location,
+      shuffle::BlockId id) override;
 
   /// Fetches that went over the network.
   int64_t remoteFetches() const {

@@ -5,6 +5,8 @@
 
 #include <filesystem>
 
+#include <folly/coro/BlockingWait.h>
+
 #include "ember/shuffle/FileShuffle.h"
 
 namespace ember::shuffle {
@@ -40,9 +42,9 @@ class FileShuffleTest : public testing::Test {
   }
 
   std::vector<std::string> readBlock(int32_t shuffleId, int32_t mapId, int32_t reduceId) {
-    return pages(BlockTransport::instance()
-                     ->fetchBlock("test-executor", {shuffleId, mapId, reduceId})
-                     .get());
+    return pages(folly::coro::blockingWait(
+        BlockTransport::instance()->co_fetchBlock(
+            "test-executor", {shuffleId, mapId, reduceId})));
   }
 
   // Writes pages "<p>-<i>" for i < count[p] in round-robin order over the
@@ -146,10 +148,12 @@ TEST_F(FileShuffleTest, removeShuffle) {
 
 TEST_F(FileShuffleTest, missingBlockFailsTheFetch) {
   EXPECT_THROW(
-      BlockTransport::instance()->fetchBlock("test-executor", {9, 0, 0}).get(),
+      folly::coro::blockingWait(BlockTransport::instance()->co_fetchBlock(
+          "test-executor", {9, 0, 0})),
       std::exception);
   EXPECT_THROW(
-      BlockTransport::instance()->fetchBlock("nowhere", {0, 0, 0}).get(),
+      folly::coro::blockingWait(
+          BlockTransport::instance()->co_fetchBlock("nowhere", {0, 0, 0})),
       std::exception);
 }
 

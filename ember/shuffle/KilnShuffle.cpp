@@ -129,8 +129,8 @@ std::unique_ptr<ShuffleWriter> createKilnWriter(
       spillThreshold);
 }
 
-folly::SemiFuture<std::unique_ptr<folly::IOBuf>> fetchKilnBlock(
-    const std::string& url) {
+folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchKilnBlock(
+    std::string url) {
   const auto [metadata, chunk] = parseKilnLocation(parseBlockUrl(url).first);
   auto client = kilnClient(metadata);
   const auto id = kiln::ChunkId::parse(chunk);
@@ -138,22 +138,11 @@ folly::SemiFuture<std::unique_ptr<folly::IOBuf>> fetchKilnBlock(
   // Kiln reads straight into the block's IOBuf.
   auto data = folly::IOBuf::create(length);
   auto buffer = client->registerMemory(data->writableData(), length);
-  return folly::coro::co_invoke(
-             [client,
-              id,
-              offset,
-              length,
-              data = std::move(data),
-              buffer = std::move(buffer)]() mutable
-             -> folly::coro::Task<std::unique_ptr<folly::IOBuf>> {
-               auto read = co_await client->co_read(
-                   id, offset, length, std::move(buffer));
-               VELOX_CHECK_EQ(
-                   read.size(), length, "Short read of Kiln chunk {}", id.toString());
-               data->append(length);
-               co_return std::move(data);
-             })
-      .semi();
+  auto read = co_await client->co_read(id, offset, length, std::move(buffer));
+  VELOX_CHECK_EQ(
+      read.size(), length, "Short read of Kiln chunk {}", id.toString());
+  data->append(length);
+  co_return data;
 }
 
 } // namespace ember::shuffle

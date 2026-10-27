@@ -1,7 +1,10 @@
 #include "ember/rpc/ThriftConnection.h"
 
+#include <optional>
+
 #include <folly/executors/IOThreadPoolExecutor.h>
 #include <folly/io/async/AsyncSocket.h>
+#include <folly/synchronization/Baton.h>
 #include <thrift/lib/cpp2/async/RocketClientChannel.h>
 
 namespace ember::rpc::detail {
@@ -17,20 +20,24 @@ folly::EventBase* nextEventBase() {
 
 class ConnectCallback : public folly::AsyncSocket::ConnectCallback {
  public:
-  folly::SemiFuture<folly::Unit> future() {
-    return promise_.getSemiFuture();
+  // Waits for the outcome; returns the error, if any.
+  std::optional<std::string> wait() {
+    done_.wait();
+    return error_;
   }
 
   void connectSuccess() noexcept override {
-    promise_.setValue();
+    done_.post();
   }
 
   void connectErr(const folly::AsyncSocketException& error) noexcept override {
-    promise_.setException(RpcError(error.what()));
+    error_ = error.what();
+    done_.post();
   }
 
  private:
-  folly::Promise<folly::Unit> promise_;
+  folly::Baton<> done_;
+  std::optional<std::string> error_;
 };
 
 } // namespace
@@ -53,13 +60,10 @@ Connection::Connection(
     socket = folly::AsyncSocket::UniquePtr(new folly::AsyncSocket(eventBase_));
     socket->connect(&connected, socketAddress, timeout.count());
   });
-  auto result = connected.future().getTry();
-  if (result.hasException()) {
+  if (auto error = connected.wait()) {
     eventBase_->runInEventBaseThreadAndWait([&] { socket.reset(); });
-    throw RpcError(fmt::format(
-        "Cannot connect to {}: {}",
-        address.toString(),
-        result.exception().get_exception()->what()));
+    throw RpcError(
+        fmt::format("Cannot connect to {}: {}", address.toString(), *error));
   }
 
   eventBase_->runInEventBaseThreadAndWait([&] {

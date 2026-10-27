@@ -1,33 +1,31 @@
 #include "ember/worker/NetworkBlockTransport.h"
 
+#include <folly/coro/Timeout.h>
+
 #include "velox/common/base/Exceptions.h"
 
 namespace ember {
 
-folly::SemiFuture<std::unique_ptr<folly::IOBuf>>
-NetworkBlockTransport::fetchBlock(
-    const std::string& location,
-    const shuffle::BlockId& id) {
+folly::coro::Task<std::unique_ptr<folly::IOBuf>>
+NetworkBlockTransport::co_fetchBlock(
+    std::string location,
+    shuffle::BlockId id) {
   if (fetchLocalBlocks_ && shuffle::ShuffleBlockStore::find(location)) {
-    return shuffle::LocalBlockTransport().fetchBlock(location, id);
+    shuffle::LocalBlockTransport local;
+    co_return co_await local.co_fetchBlock(std::move(location), id);
   }
   ++remoteFetches_;
-  std::shared_ptr<rpc::ShuffleBlockClient> connection;
-  try {
-    connection = client(location);
-  } catch (...) {
-    return folly::makeSemiFuture<std::unique_ptr<folly::IOBuf>>(
-        folly::exception_wrapper(std::current_exception()));
+  auto connection = client(location);
+  const rpc::BlockId block{
+      .shuffleId = id.shuffleId, .mapId = id.mapId, .reduceId = id.reduceId};
+  // A fetch that times out is cancelled.
+  auto result = co_await folly::coro::co_awaitTry(
+      folly::coro::timeout(connection->co_fetchBlock(block), fetchTimeout_));
+  if (result.hasException<folly::FutureTimeout>()) {
+    throw std::runtime_error(fmt::format(
+        "No reply from {} within {} ms", location, fetchTimeout_.count()));
   }
-  return connection
-      ->fetchBlock(rpc::BlockId{
-          .shuffleId = id.shuffleId, .mapId = id.mapId, .reduceId = id.reduceId})
-      .within(
-          fetchTimeout_,
-          std::runtime_error(fmt::format(
-              "No reply from {} within {} ms",
-              location,
-              fetchTimeout_.count())));
+  co_return std::move(result).value();
 }
 
 std::shared_ptr<rpc::ShuffleBlockClient> NetworkBlockTransport::client(

@@ -57,31 +57,25 @@ std::shared_ptr<DriverClient> DriverClient::connect(
   return std::shared_ptr<DriverClient>(new DriverClient(address, timeout));
 }
 
-folly::SemiFuture<RegisterWorkerResponse> DriverClient::registerWorker(
-    const RegisterWorkerRequest& request) {
+folly::coro::Task<RegisterWorkerResponse> DriverClient::co_registerWorker(
+    RegisterWorkerRequest request) {
   thrift::RegisterWorkerRequest message;
-  message.workerId() = request.workerId;
-  message.address() = request.address;
+  message.workerId() = std::move(request.workerId);
+  message.address() = std::move(request.address);
   message.slots() = request.slots;
-  return detail::call(
-             *connection_,
-             [&] { return stub_->client->semifuture_registerWorker(message); })
-      .deferValue([](thrift::RegisterWorkerResponse response) {
-        return RegisterWorkerResponse{
-            .appName = std::move(*response.appName()),
-            .heartbeatIntervalMs = *response.heartbeatIntervalMs()};
-      });
+  auto response = co_await detail::call(
+      *connection_, stub_->client->co_registerWorker(message));
+  co_return RegisterWorkerResponse{
+      .appName = std::move(*response.appName()),
+      .heartbeatIntervalMs = *response.heartbeatIntervalMs()};
 }
 
-folly::SemiFuture<bool> DriverClient::heartbeat(const std::string& workerId) {
+folly::coro::Task<bool> DriverClient::co_heartbeat(std::string workerId) {
   thrift::HeartbeatRequest message;
-  message.workerId() = workerId;
-  return detail::call(
-             *connection_,
-             [&] { return stub_->client->semifuture_heartbeat(message); })
-      .deferValue([](thrift::HeartbeatResponse response) {
-        return *response.registered();
-      });
+  message.workerId() = std::move(workerId);
+  auto response =
+      co_await detail::call(*connection_, stub_->client->co_heartbeat(message));
+  co_return *response.registered();
 }
 
 struct WorkerClient::Stub : GeneratedClient<thrift::WorkerService> {
@@ -102,21 +96,18 @@ std::shared_ptr<WorkerClient> WorkerClient::connect(
   return std::shared_ptr<WorkerClient>(new WorkerClient(address, timeout));
 }
 
-folly::SemiFuture<std::string> WorkerClient::launchTask(
-    const std::string& task) {
-  return detail::call(
-      *connection_, [&] { return stub_->client->semifuture_launchTask(task); });
+folly::coro::Task<std::string> WorkerClient::co_launchTask(std::string task) {
+  co_return co_await detail::call(
+      *connection_, stub_->client->co_launchTask(task));
 }
 
-folly::SemiFuture<folly::Unit> WorkerClient::removeShuffle(int32_t shuffleId) {
-  return detail::call(*connection_, [&] {
-    return stub_->client->semifuture_removeShuffle(shuffleId);
-  });
+folly::coro::Task<void> WorkerClient::co_removeShuffle(int32_t shuffleId) {
+  co_await detail::call(
+      *connection_, stub_->client->co_removeShuffle(shuffleId));
 }
 
-folly::SemiFuture<folly::Unit> WorkerClient::shutdown() {
-  return detail::call(
-      *connection_, [&] { return stub_->client->semifuture_shutdown(); });
+folly::coro::Task<void> WorkerClient::co_shutdown() {
+  co_await detail::call(*connection_, stub_->client->co_shutdown());
 }
 
 struct ShuffleBlockClient::Stub
@@ -139,18 +130,15 @@ std::shared_ptr<ShuffleBlockClient> ShuffleBlockClient::connect(
       new ShuffleBlockClient(address, timeout));
 }
 
-folly::SemiFuture<std::unique_ptr<folly::IOBuf>> ShuffleBlockClient::fetchBlock(
-    const BlockId& block) {
+folly::coro::Task<std::unique_ptr<folly::IOBuf>>
+ShuffleBlockClient::co_fetchBlock(BlockId block) {
   thrift::BlockId message;
   message.shuffleId() = block.shuffleId;
   message.mapId() = block.mapId;
   message.reduceId() = block.reduceId;
-  return detail::call(
-             *connection_,
-             [&] { return stub_->client->semifuture_fetchBlock(message); })
-      .deferValue([](folly::IOBuf bytes) {
-        return std::make_unique<folly::IOBuf>(std::move(bytes));
-      });
+  auto bytes = co_await detail::call(
+      *connection_, stub_->client->co_fetchBlock(message));
+  co_return std::make_unique<folly::IOBuf>(std::move(bytes));
 }
 
 } // namespace ember::rpc

@@ -1,5 +1,7 @@
 #include "ember/shuffle/ShuffleRead.h"
 
+#include <folly/coro/Invoke.h>
+
 #include "ember/shuffle/FileShuffle.h"
 #include "ember/shuffle/KilnShuffle.h"
 #include "velox/exec/Exchange.h"
@@ -121,18 +123,10 @@ class ShuffleBlockSource : public exec::ExchangeSource {
   folly::SemiFuture<Response> request(
       uint32_t /*maxBytes*/,
       std::chrono::microseconds /*maxWait*/) override {
+    // Velox takes a SemiFuture; the fetch starts on the executor it puts
+    // the future on.
     auto self = std::static_pointer_cast<ShuffleBlockSource>(shared_from_this());
-    auto fetch = isKilnLocation(location_)
-        ? fetchKilnBlock(url_)
-        : BlockTransport::instance()->fetchBlock(location_, block_);
-    return std::move(fetch)
-        .deferValue([self](std::unique_ptr<folly::IOBuf> data) {
-          return self->enqueue(std::move(data));
-        })
-        .deferError([self](folly::exception_wrapper error) -> Response {
-          const FetchFailure failure{self->location_, self->block_};
-          VELOX_FAIL(failure.message(error.what().toStdString()));
-        });
+    return folly::coro::co_invoke([self] { return self->co_request(); }).semi();
   }
 
   folly::SemiFuture<Response> requestDataSizes(
@@ -147,6 +141,22 @@ class ShuffleBlockSource : public exec::ExchangeSource {
   }
 
  private:
+  folly::coro::Task<Response> co_request() {
+    folly::Try<std::unique_ptr<folly::IOBuf>> data;
+    if (isKilnLocation(location_)) {
+      data = co_await folly::coro::co_awaitTry(co_fetchKilnBlock(url_));
+    } else {
+      auto transport = BlockTransport::instance();
+      data = co_await folly::coro::co_awaitTry(
+          transport->co_fetchBlock(location_, block_));
+    }
+    if (data.hasException()) {
+      const FetchFailure failure{location_, block_};
+      VELOX_FAIL(failure.message(data.exception().what().toStdString()));
+    }
+    co_return enqueue(std::move(data).value());
+  }
+
   Response enqueue(std::unique_ptr<folly::IOBuf> data) {
     auto pages = splitFrames(std::move(data));
     std::vector<velox::ContinuePromise> promises;

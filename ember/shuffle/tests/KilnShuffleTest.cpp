@@ -93,7 +93,8 @@ class KilnShuffleTest : public testing::Test {
     auto url = blockUrl(
         status.location, {0, 0, reduceId}, offset, status.partitionLengths[reduceId]);
     std::vector<std::string> pages;
-    for (auto& page : splitFrames(fetchKilnBlock(url).get())) {
+    auto block = folly::coro::blockingWait(co_fetchKilnBlock(url));
+    for (auto& page : splitFrames(std::move(block))) {
       pages.push_back(page->moveToFbString().toStdString());
     }
     return pages;

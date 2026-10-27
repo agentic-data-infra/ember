@@ -15,7 +15,7 @@
 #include <memory>
 
 #include <fmt/format.h>
-#include <folly/futures/Future.h>
+#include <folly/coro/Task.h>
 #include <folly/io/async/EventBase.h>
 #include <thrift/lib/cpp2/async/RequestCallback.h>
 #include <thrift/lib/cpp2/async/RequestChannel.h>
@@ -96,24 +96,25 @@ void destroyClient(
       [&] { client.reset(); });
 }
 
-/// Makes a call with a generated client, e.g.
+/// Awaits a call of a generated client, e.g.
 ///
-///   call(connection, [&] { return client->semifuture_heartbeat(request); })
+///   co_await call(connection, client->co_heartbeat(request));
 ///
 /// Fails with RpcError if the connection is closed or the call fails. The
-/// arguments are serialized before call() returns.
-template <typename MakeCall>
-auto call(const Connection& connection, MakeCall&& makeCall) {
-  using Result = typename decltype(makeCall())::value_type;
+/// call's arguments must stay alive until it completes.
+template <typename T>
+folly::coro::Task<T> call(
+    const Connection& connection,
+    folly::coro::Task<T> call) {
   if (!connection.isOpen()) {
-    return folly::makeSemiFuture<Result>(RpcError(fmt::format(
-        "Connection to {} is closed", connection.address().toString())));
+    throw RpcError(fmt::format(
+        "Connection to {} is closed", connection.address().toString()));
   }
-  return makeCall().deferError(
-      [address = connection.address()](
-          folly::exception_wrapper error) -> Result {
-        throwRpcError(address, error);
-      });
+  auto result = co_await folly::coro::co_awaitTry(std::move(call));
+  if (result.hasException()) {
+    throwRpcError(connection.address(), result.exception());
+  }
+  co_return std::move(result).value();
 }
 
 } // namespace ember::rpc::detail
