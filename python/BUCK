@@ -23,6 +23,9 @@ cxx_library(
         # whichever library loaded first.
         "-Wl,--push-state,--no-as-needed",
         "-lgcc_s",
+        # Shared gflags ahead of the link lines: rlib's (RDMA builds) lists
+        # the static, non-PIC libgflags.a first.
+        "-lgflags",
         "-Wl,--pop-state",
         "-Wl,--version-script=$(location :exports)",
         "-Wl,--exclude-libs,ALL",

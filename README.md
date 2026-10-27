@@ -104,6 +104,39 @@ See [ember/shuffle/README.md](ember/shuffle/README.md). Adding
 second run of the same program reuses what the first one computed (see
 [ember/driver/README.md](ember/driver/README.md)).
 
+### Kiln over RDMA
+
+Kiln can move shuffle data and its metadata calls over RDMA; Ember just
+passes Kiln's metadata URL list through. RDMA is a build option, off by
+default: the default build does not depend on rdma-core or
+[rlib](https://github.com/agentic-data-infra/rlib). To build with it, link an
+rlib checkout into the Kiln submodule (it becomes the Buck cell `rlib//`) and
+pass `-c kiln.rdma=true`, which the `kiln//` cell reads:
+
+```
+third-party/kiln/scripts/link_rlib.sh ~/source/rlib   # needs libibverbs-dev, librdmacm-dev
+buck2 build -c kiln.rdma=true //...
+buck2 test -c kiln.rdma=true //...
+```
+
+(`buck2 --isolation-dir rdma ...` keeps a second build tree, so switching
+modes does not rebuild everything.) Then start Kiln with RDMA
+(`kiln_meta --rdma`, `kiln_server --rdma`, or
+`third-party/kiln/scripts/start_local_cluster.sh -R`) and give Ember the URL
+list kiln_meta prints:
+
+```
+EMBER_CONF="ember.shuffle.store=kiln ember.shuffle.kiln.metadata=tcp://meta:7470,rdma://10.0.0.1:7471" \
+  word_count path/to/text ember://driver-host:7077 3
+```
+
+Clients use shared memory for storage servers on their own host and RDMA for
+the others; without an RDMA device, or in a default build, everything goes
+over TCP. See Kiln's README for Soft-RoCE (no RDMA NIC) and the transport
+rules. With `$EMBER_TEST_KILN_METADATA` (and `$EMBER_TEST_KILN_RDMA=1`),
+`kiln_shuffle_test` and `scheduler_test` run against an external cluster,
+and the former checks that reads and writes go over RDMA without copies.
+
 ## More examples
 
 `examples/DomainReport.cpp` reads FineWeb-Edu style parquet (`url`, `score`,

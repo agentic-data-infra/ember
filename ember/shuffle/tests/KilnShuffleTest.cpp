@@ -1,9 +1,15 @@
 // The Kiln shuffle store against an in-process Kiln cluster: one chunk per
 // map output, block reads by byte range, spills, empty outputs, first commit
 // wins, and removed chunks.
+//
+// With $EMBER_TEST_KILN_METADATA set (Kiln's URL list), the tests use that
+// cluster instead; with $EMBER_TEST_KILN_RDMA=1 too, rdmaTransfersWithoutCopies
+// checks that the client moves data over RDMA without copies, e.g. against a
+// `start_local_cluster.sh -R` cluster that runs as another host.
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
 #include <filesystem>
 
 #include <folly/coro/BlockingWait.h>
@@ -20,8 +26,10 @@ namespace fs = std::filesystem;
 class KilnShuffleTest : public testing::Test {
  protected:
   static void SetUpTestSuite() {
-    cluster_ = new kiln::local::LocalCluster(kiln::local::LocalClusterOptions{
-        .dramServers = 1, .localFsServers = 0});
+    if (std::getenv("EMBER_TEST_KILN_METADATA") == nullptr) {
+      cluster_ = new kiln::local::LocalCluster(kiln::local::LocalClusterOptions{
+          .dramServers = 1, .localFsServers = 0});
+    }
   }
 
   static void TearDownTestSuite() {
@@ -40,8 +48,11 @@ class KilnShuffleTest : public testing::Test {
     fs::remove_all(dir_);
   }
 
+  // As a URL list, "tcp://host:port", which block URLs must carry intact.
   static std::string metadata() {
-    return cluster_->metadataEndpoint().toString();
+    const char* external = std::getenv("EMBER_TEST_KILN_METADATA");
+    return external != nullptr ? std::string(external)
+                               : cluster_->metadataAddress().toString();
   }
 
   std::unique_ptr<ShuffleWriter> writer(
@@ -168,6 +179,59 @@ TEST_F(KilnShuffleTest, firstCommitWins) {
   EXPECT_EQ(readBlock(status, 0), (std::vector<std::string>{"second, longer"}));
 }
 
+TEST_F(KilnShuffleTest, manyBlocksHeldAtOnce) {
+  // More blocks than pooled buffers, all held at once as Velox may: the
+  // later ones take unpooled memory. Then again, reusing the pool.
+  std::vector<int32_t> counts(40, 0);
+  for (size_t p = 0; p < counts.size(); ++p) {
+    counts[p] = p + 1;
+  }
+  auto status = writeMap(6, 0, counts);
+  for (int round = 0; round < 2; ++round) {
+    std::vector<std::unique_ptr<folly::IOBuf>> blocks;
+    int64_t offset = 0;
+    for (int32_t p = 0; p < counts.size(); ++p) {
+      const auto length = status.partitionLengths[p];
+      blocks.push_back(folly::coro::blockingWait(co_fetchKilnBlock(
+          blockUrl(status.location, {6, 0, p}, offset, length))));
+      offset += length;
+    }
+    for (int32_t p = 0; p < counts.size(); ++p) {
+      auto pages = splitFrames(std::move(blocks[p]));
+      ASSERT_EQ(pages.size(), counts[p]);
+      EXPECT_EQ(
+          pages.back()->moveToFbString().toStdString(),
+          fmt::format("{}-{}", p, counts[p] - 1));
+    }
+  }
+}
+
+TEST_F(KilnShuffleTest, rdmaTransfersWithoutCopies) {
+  const char* rdma = std::getenv("EMBER_TEST_KILN_RDMA");
+  if (rdma == nullptr || std::string(rdma) != "1") {
+    GTEST_SKIP() << "Needs EMBER_TEST_KILN_RDMA=1 and an RDMA cluster";
+  }
+  auto client = kilnClient(metadata());
+  const auto before = client->stats();
+  const std::string data(1 << 20, 'r');
+  auto mapWriter = writer(7, 0, 2);
+  for (int i = 0; i < 6; ++i) {
+    // Partition 1 is larger than a pooled buffer.
+    mapWriter->collect(i == 0 ? 0 : 1, folly::IOBuf::copyBuffer(data));
+  }
+  auto status = mapWriter->commit();
+  EXPECT_EQ(readBlock(status, 0).size(), 1);
+  EXPECT_EQ(readBlock(status, 1).size(), 5);
+
+  const auto after = client->stats();
+  EXPECT_TRUE(after.rdmaMetadata);
+  EXPECT_TRUE(after.rdmaData);
+  // Written once and read once, all straight from registered memory.
+  const auto bytes = status.partitionLengths[0] + status.partitionLengths[1];
+  EXPECT_GE(after.rdmaBytes - before.rdmaBytes, 2 * bytes);
+  EXPECT_EQ(after.rdmaCopiedBytes, before.rdmaCopiedBytes);
+}
+
 TEST_F(KilnShuffleTest, removedChunkFailsTheFetch) {
   auto status = writeMap(5, 0, {2});
   const auto chunk =
@@ -187,6 +251,21 @@ TEST(KilnBlockUrlTest, roundTrip) {
   EXPECT_EQ(parsedLocation, location);
   EXPECT_EQ(parsed, id);
   EXPECT_EQ(kilnBlockRange(url), (std::pair<int64_t, int64_t>{100, 42}));
+
+  // Kiln's URL lists keep their '/'s escaped inside the location.
+  const auto urls = "tcp://meta:7470,rdma://10.0.0.1:7471";
+  const auto listed = kilnLocation(urls, "abc123");
+  EXPECT_EQ(
+      listed, "kiln://tcp:%2F%2Fmeta:7470,rdma:%2F%2F10.0.0.1:7471/abc123");
+  EXPECT_EQ(
+      parseKilnLocation(listed),
+      (std::pair<std::string, std::string>{urls, "abc123"}));
+  const auto listedUrl = blockUrl(listed, id, 100, 42);
+  EXPECT_EQ(parseBlockUrl(listedUrl).first, listed);
+  EXPECT_EQ(kilnBlockRange(listedUrl), (std::pair<int64_t, int64_t>{100, 42}));
+  EXPECT_EQ(
+      parseKilnLocation(kilnLocation("odd%name/x:1", "")).first,
+      "odd%name/x:1");
 
   // A fetch failure names the map output's location, as the driver knows it.
   const FetchFailure failure{location, id};

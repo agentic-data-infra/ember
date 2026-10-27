@@ -23,7 +23,9 @@ class Client;
 namespace ember::shuffle {
 
 /// The process's client of the Kiln cluster of metadata server 'metadata'
-/// ("host:port"), which all Kiln writers and reads of that cluster share.
+/// (Kiln's URL list, "tcp://host:port,rdma://host:port", or "host:port"),
+/// which all Kiln writers and reads of that cluster share. Kiln picks the
+/// transports: RDMA where the URLs, the build and the device allow.
 std::shared_ptr<kiln::client::Client> kilnClient(const std::string& metadata);
 
 /// The metadata server and chunk (hex) of a kilnLocation().
@@ -31,7 +33,7 @@ std::pair<std::string, std::string> parseKilnLocation(
     const std::string& location);
 
 /// A writer for map task 'mapId' of shuffle 'shuffleId' that commits the
-/// output to the Kiln cluster of metadata server 'metadata' ("host:port").
+/// output to the Kiln cluster of metadata server 'metadata' (as kilnClient()).
 /// It spills to 'store''s directory like a file shuffle writer and records
 /// the committed output in 'store', so that the executor reports it.
 std::unique_ptr<ShuffleWriter> createKilnWriter(

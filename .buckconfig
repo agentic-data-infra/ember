@@ -4,6 +4,9 @@
   toolchains = toolchains
   none = none
   kiln = third-party/kiln
+  # rlib, for Kiln's RDMA transport (-c kiln.rdma=true): the symlink Kiln's
+  # scripts/link_rlib.sh makes in the Kiln checkout. Unused without RDMA.
+  rlib = third-party/kiln/third-party/rlib
 
 [cell_aliases]
   config = prelude
@@ -20,7 +23,8 @@
   target_platform_detector_spec = target:root//...->prelude//platforms:default \
     target:prelude//...->prelude//platforms:default \
     target:toolchains//...->prelude//platforms:default \
-    target:kiln//...->prelude//platforms:default
+    target:kiln//...->prelude//platforms:default \
+    target:rlib//...->prelude//platforms:default
 
 [build]
   execution_platforms = prelude//platforms:default

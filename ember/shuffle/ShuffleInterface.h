@@ -93,8 +93,10 @@ bool isBlockUrl(const std::string& url);
 std::pair<std::string, BlockId> parseBlockUrl(const std::string& url);
 
 /// The location of a map output in Kiln chunk 'chunk' (hex) on the cluster
-/// of metadata server 'metadata': "kiln://<metadata>/<chunk>". It names no
-/// executor, so the output outlives the executor that wrote it.
+/// of metadata server 'metadata' (Kiln's URL list, or "host:port"):
+/// "kiln://<metadata>/<chunk>", with '/' and '%' in the metadata
+/// percent-encoded. It names no executor, so the output outlives the
+/// executor that wrote it.
 std::string kilnLocation(const std::string& metadata, const std::string& chunk);
 
 bool isKilnLocation(const std::string& location);
