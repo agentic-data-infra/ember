@@ -292,5 +292,15 @@ TEST_F(RpcTest, connectFails) {
       RpcError);
 }
 
+TEST_F(RpcTest, startFailsWhenPortIsTaken) {
+  RpcServer other;
+  EXPECT_THROW(
+      other.start(std::make_shared<TestHandler>(), "", server_.port()),
+      RpcError);
+  // The first server still answers.
+  auto client = WorkerClient::connect(address());
+  EXPECT_EQ(echo(*client, "hello"), "hello");
+}
+
 } // namespace
 } // namespace ember::rpc
