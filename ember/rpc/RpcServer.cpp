@@ -81,6 +81,10 @@ struct RpcServer::Impl {
 
 namespace {
 
+constexpr int kIoThreads = 4;
+constexpr int kHandlerThreads = 4;
+constexpr auto kStopTimeout = std::chrono::seconds(10);
+
 std::unique_ptr<apache::thrift::ScopedServerInterfaceThread> serve(
     std::shared_ptr<apache::thrift::AsyncProcessorFactory> service,
     const std::string& host,
@@ -93,11 +97,22 @@ std::unique_ptr<apache::thrift::ScopedServerInterfaceThread> serve(
         bindHost,
         port,
         [](apache::thrift::ThriftServer& server) {
+          // ScopedServerInterfaceThread is made for tests and gives the
+          // server one IO and one handler thread. Then one blocked handler
+          // stalls every other call, and stopping, which runs the services'
+          // onStopRequested on the handler threads, never finishes.
+          server.setNumIOWorkerThreads(kIoThreads);
+          server.setNumCPUWorkerThreads(kHandlerThreads);
+          // Calls wait for a handler thread as long as it takes, rather than
+          // failing after fbthrift's 100 ms queue timeout, which the driver
+          // would take for a lost worker.
+          server.setQueueTimeout(std::chrono::milliseconds(0));
           // Connections stay up between jobs; a broken one means a lost
           // peer.
           server.setIdleTimeout(std::chrono::milliseconds(0));
-          // Stopping does not wait for running tasks.
-          server.setWorkersJoinTimeout(std::chrono::seconds(1));
+          // Stopping waits this long for calls in flight, e.g. a peer's
+          // block fetch; fbthrift aborts the process if one still runs then.
+          server.setWorkersJoinTimeout(kStopTimeout);
         });
   } catch (const std::exception& e) {
     throw RpcError(fmt::format(
