@@ -104,6 +104,12 @@ class DagScheduler {
       const facebook::axiom::optimizer::MultiFragmentPlan& plan,
       facebook::velox::memory::MemoryPool* pool);
 
+  /// Runs 'plan' with each result task writing its rows to a part file of
+  /// 'files' (TaskDescription.h). Returns the number of rows written.
+  int64_t write(
+      const facebook::axiom::optimizer::MultiFragmentPlan& plan,
+      const OutputFiles& files);
+
   /// The stages 'plan' runs as.
   StagePlan stagePlan(const facebook::axiom::optimizer::MultiFragmentPlan& plan);
 
@@ -127,13 +133,16 @@ class DagScheduler {
   struct StageState;
 
   // Runs 'stages' as one job. The last stage is the result stage, whose rows
-  // are returned, or, with 'outputKey', a map stage whose output is kept in
+  // are returned, or written to 'outputFiles' (then 'writtenRows' is set to
+  // their number), or, with 'outputKey', a map stage whose output is kept in
   // the memo under that key; then 'outputShuffle' is set to its shuffle.
   std::vector<facebook::velox::RowVectorPtr> runStages(
       StagePlan& stages,
       const std::optional<std::string>& outputKey,
       facebook::velox::memory::MemoryPool* pool,
-      int32_t* outputShuffle = nullptr);
+      int32_t* outputShuffle = nullptr,
+      const OutputFiles* outputFiles = nullptr,
+      int64_t* writtenRows = nullptr);
 
   // Runs 'stage' until all its partitions are done, first rerunning lost
   // outputs of the stages it reads.

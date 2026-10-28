@@ -27,6 +27,7 @@
 
 #include "ember/Dataframe.h"
 #include "ember/DataframeReader.h"
+#include "ember/DataframeWriter.h"
 
 namespace ember::driver {
 class DagScheduler;
@@ -38,6 +39,8 @@ struct PlanAndStats;
 }
 
 namespace ember {
+
+struct OutputFiles;
 
 /// Shared state behind a Session and its Dataframes.
 class SessionState {
@@ -106,6 +109,12 @@ class SessionState {
   /// batches.
   std::vector<facebook::velox::RowVectorPtr> execute(
       const facebook::axiom::optimizer::MultiFragmentPlanPtr& plan);
+
+  /// Runs an optimized plan whose result tasks write their rows to 'files'.
+  /// Returns the number of rows written.
+  int64_t write(
+      const facebook::axiom::optimizer::MultiFragmentPlanPtr& plan,
+      const OutputFiles& files);
 
   /// The stages 'plan' runs as, with their shuffle reads and writes.
   std::string explainStages(

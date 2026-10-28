@@ -23,6 +23,7 @@
 namespace ember {
 
 struct CachedTable;
+class DataframeWriter;
 class GroupedData;
 class SessionState;
 
@@ -228,6 +229,9 @@ class Dataframe {
   std::vector<Row> take(int64_t n) const {
     return limit(n).collect();
   }
+
+  /// Writes the rows to files (DataframeWriter.h).
+  DataframeWriter write() const;
 
   /// Prints the first 'numRows' rows as a table. With
   /// 'truncate', values longer than 20 characters are cut and cells are

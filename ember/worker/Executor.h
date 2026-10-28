@@ -3,8 +3,11 @@
 // An executor takes a serialized TaskDescription, rebuilds the plan fragment
 // with Velox serde, runs it, and returns a serialized TaskResult. Map tasks
 // write their output to the executor's shuffle store; result tasks return
-// their rows. In local mode the driver calls an executor in the same process;
-// an ember-worker process wraps one behind RPC.
+// their rows, or write them to part files and return only counts. Velox's
+// spill_enabled lets tasks spill into the shuffle directory; spilling starts
+// when a task reaches query_max_memory_per_node. In local mode the driver
+// calls an executor in the same process; an ember-worker process wraps one
+// behind RPC.
 
 #pragma once
 
@@ -26,7 +29,8 @@ namespace ember {
 struct ExecutorOptions {
   /// Identifies the executor; readers fetch its shuffle blocks by it.
   std::string location;
-  /// Holds shuffle files. Created if missing, removed with the executor.
+  /// Holds shuffle files, and spill files under spill/. Created if missing,
+  /// removed with the executor.
   std::string shuffleDirectory;
   /// Threads that run Velox drivers.
   int32_t numThreads{4};
@@ -57,6 +61,7 @@ class Executor {
   const ExecutorOptions options_;
   std::shared_ptr<shuffle::ShuffleBlockStore> blockStore_;
   std::unique_ptr<folly::CPUThreadPoolExecutor> driverExecutor_;
+  std::unique_ptr<folly::CPUThreadPoolExecutor> spillExecutor_;
   std::shared_ptr<facebook::velox::memory::MemoryPool> rootPool_;
   std::shared_ptr<facebook::velox::memory::MemoryPool> resultPool_;
   // Holds constants of deserialized plans.
