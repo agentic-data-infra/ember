@@ -1,0 +1,75 @@
+# Kiln for Ember's shuffle outputs: one metadata server and a storage server
+# on every node. The storage servers use the node's network and /dev/shm, so
+# Ember workers on the same node map their DRAM regions directly and others
+# read them over TCP.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kiln-meta
+  namespace: ember
+spec:
+  selector:
+    app: kiln-meta
+  ports:
+    - port: 7470
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kiln-meta
+  namespace: ember
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kiln-meta
+  template:
+    metadata:
+      labels:
+        app: kiln-meta
+    spec:
+      containers:
+        - name: kiln-meta
+          image: ember:dev
+          command: ["kiln_meta", "--port=7470"]
+          ports:
+            - containerPort: 7470
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kiln-server
+  namespace: ember
+spec:
+  selector:
+    matchLabels:
+      app: kiln-server
+  template:
+    metadata:
+      labels:
+        app: kiln-server
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: kiln-server
+          image: ember:dev
+          command:
+            - kiln_server
+            - --metadata=kiln-meta.ember.svc.cluster.local:7470
+            - --port=7480
+            - --host=$(NODE_IP)
+            - --regions=1
+            - --region_size_mb=2048
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: shm
+          hostPath:
+            path: /dev/shm

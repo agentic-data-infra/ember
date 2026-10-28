@@ -1,0 +1,54 @@
+# The sort benchmark's driver: sorts the gensort files under /data/sort-input
+# on every node (node-local splits) into range-sorted part files under
+# /data/sorted on the nodes that ran each range, with shuffle outputs in Kiln.
+# The workers find the driver through the ember-driver Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ember-driver
+  namespace: ember
+spec:
+  selector:
+    app: ember-driver
+  ports:
+    - port: 7077
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ember-sort
+  namespace: ember
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: ember-driver
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: driver
+          image: ember:dev
+          command:
+            - sort_benchmark
+            - /data/sort-input
+            - /data/sorted
+            - ember://0.0.0.0:7077
+            - "3"
+          env:
+            - name: EMBER_CONF
+              value: >-
+                ember.files.node_local=true
+                ember.sort.range_partitions=12
+                ember.shuffle.store=kiln
+                ember.shuffle.kiln.metadata=kiln-meta.ember.svc.cluster.local:7470
+          ports:
+            - containerPort: 7077
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/ember/data
+            type: DirectoryOrCreate

@@ -1,0 +1,61 @@
+# An Ember worker on every node. It uses the node's network, host name (Kiln
+# compares it to map DRAM regions on the same node) and /dev/shm, reads
+# node-local input under /var/lib/ember/data (mounted at /data) and serves
+# one driver after another.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ember-worker
+  namespace: ember
+spec:
+  selector:
+    matchLabels:
+      app: ember-worker
+  template:
+    metadata:
+      labels:
+        app: ember-worker
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: ember-worker
+          image: ember:dev
+          command:
+            - ember_worker
+            - --driver=ember-driver.ember.svc.cluster.local:7077
+            - --port=7078
+            - --host=$(NODE_IP)
+            - --node=$(NODE_NAME)
+            - --slots=4
+            - --local_dir=/var/lib/ember/shuffle
+            - --persistent
+            - --connect_timeout_s=0
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: shuffle
+              mountPath: /var/lib/ember/shuffle
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/ember/data
+            type: DirectoryOrCreate
+        - name: shuffle
+          hostPath:
+            path: /var/lib/ember/shuffle
+            type: DirectoryOrCreate
+        - name: shm
+          hostPath:
+            path: /dev/shm

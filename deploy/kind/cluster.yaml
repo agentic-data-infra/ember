@@ -1,0 +1,10 @@
+# A local cluster for Ember: one control plane and three workers, each a
+# Docker container on this machine.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: ember
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
+  - role: worker
