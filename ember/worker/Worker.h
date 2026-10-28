@@ -42,6 +42,9 @@ struct WorkerOptions {
   std::string bindHost;
   /// Host name others reach this worker by. Defaults to the host name.
   std::string advertisedHost;
+  /// The machine it runs on, for tasks that read files local to it (see
+  /// DagScheduler::kNodeLocalFiles). Defaults to the host name.
+  std::string node;
   /// 0 picks a free port.
   uint16_t port{0};
   /// Tasks run at once.

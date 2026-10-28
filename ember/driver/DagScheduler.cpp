@@ -43,6 +43,8 @@ struct DagScheduler::StageState {
   // Splits of each task before shuffle blocks are added: file ranges for
   // scans, empty lists for the other split nodes.
   std::vector<std::map<std::string, std::vector<folly::dynamic>>> splits;
+  // Per task, the node it must run on, or "" for any.
+  std::vector<std::string> nodes;
   // Attempts so far, and those that left partitions missing.
   int32_t attempts{0};
   int32_t incompleteAttempts{0};
@@ -81,10 +83,14 @@ DagScheduler::DagScheduler(
           options_.config.contains(kRangeSortPartitions)
               ? folly::to<int32_t>(options_.config.at(kRangeSortPartitions))
               : 0},
+      nodeLocalFiles_{
+          options_.config.contains(kNodeLocalFiles) &&
+          folly::to<bool>(options_.config.at(kNodeLocalFiles))},
       taskScheduler_{std::move(backend), options_.maxTaskAttempts},
       kilnMemo_{KilnMemo::fromConfig(options_.config)} {
   for (const auto& [key, value] : options_.config) {
-    if (!key.starts_with("ember.") || key == kMaxSplitBytes) {
+    if (!key.starts_with("ember.") || key == kMaxSplitBytes ||
+        key == kNodeLocalFiles) {
       keyConfig_[key] = value;
     }
   }
@@ -231,51 +237,45 @@ std::string DagScheduler::explain(const optimizer::MultiFragmentPlan& plan) {
 }
 
 std::vector<std::map<std::string, std::vector<folly::dynamic>>>
-DagScheduler::scanSplits(const Stage& stage, JobContext& job) {
-  // Splits per scan, in order.
-  std::vector<std::vector<std::shared_ptr<FileRangeSplit>>> splitsPerScan;
+DagScheduler::scanSplits(
+    const Stage& stage,
+    JobContext& job,
+    std::vector<std::string>& nodes) {
+  // A scan's files on one node; node "" for files any executor reads.
+  struct NodeFiles {
+    std::string node;
+    std::vector<rpc::FileInfo> files;
+  };
+  // Ranges per scan and node, in order.
+  struct NodeRanges {
+    std::string node;
+    std::vector<std::shared_ptr<FileRangeSplit>> ranges;
+  };
+  std::vector<std::vector<NodeRanges>> rangesPerScan;
   std::vector<int64_t> maxSplitBytesPerScan;
   for (const auto& scan : stage.scans) {
-    auto source = runner::ConnectorSplitSourceFactory().splitSourceForScan(
-        job.session, *scan, *job.evaluator, nullptr, std::nullopt);
-    std::vector<std::shared_ptr<file::FileSplit>> fileSplits;
-    std::exception_ptr error;
-    try {
-      for (;;) {
-        auto batch = folly::coro::blockingWait(source->co_getSplits(1024));
-        for (auto& split : batch.splits) {
-          auto fileSplit =
-              std::dynamic_pointer_cast<file::FileSplit>(split.connectorSplit);
-          VELOX_CHECK_NOT_NULL(fileSplit, "Expected a file split");
-          fileSplits.push_back(std::move(fileSplit));
-        }
-        if (batch.noMoreSplits) {
-          break;
-        }
+    const auto* handle =
+        scan->tableHandle()->asChecked<file::FileTableHandle>();
+    std::vector<NodeFiles> filesPerNode;
+    if (nodeLocalFiles_) {
+      for (auto& node : backend().nodes()) {
+        auto files = backend().listFiles(
+            node, handle->schemaTableName().schema, handle->filePath());
+        filesPerNode.push_back({std::move(node), std::move(files)});
       }
-    } catch (...) {
-      error = std::current_exception();
-    }
-    folly::coro::blockingWait(source->co_close());
-    if (error) {
-      std::rethrow_exception(error);
+    } else {
+      filesPerNode.push_back({"", listFiles(*scan, job)});
     }
 
     // Files split into byte ranges. A text range owns the lines that start in
-    // it, a gensort range the records, a Parquet range the row groups. A metadata table (e.g. a Parquet
-    // file's row groups) reads whole files.
-    const bool wholeFiles = !scan->tableHandle()
-                                 ->asChecked<file::FileTableHandle>()
-                                 ->suffix()
-                                 .empty();
-    std::vector<int64_t> sizes;
+    // it, a gensort range the records, a Parquet range the row groups. A
+    // metadata table (e.g. a Parquet file's row groups) reads whole files.
+    const bool wholeFiles = !handle->suffix().empty();
     int64_t totalBytes = 0;
-    for (const auto& split : fileSplits) {
-      sizes.push_back(
-          velox::filesystems::getFileSystem(split->filePath, nullptr)
-              ->openFileForRead(split->filePath)
-              ->size());
-      totalBytes += sizes.back() + kOpenCostBytes;
+    for (const auto& [node, files] : filesPerNode) {
+      for (const auto& file : files) {
+        totalBytes += file.size + kOpenCostBytes;
+      }
     }
     int64_t maxSplitBytes = std::min(
         kSplitBytesCeiling,
@@ -285,51 +285,104 @@ DagScheduler::scanSplits(const Stage& stage, JobContext& job) {
       maxSplitBytes = folly::to<int64_t>(it->second);
     }
     VELOX_USER_CHECK_GT(maxSplitBytes, 0);
-    std::vector<std::shared_ptr<FileRangeSplit>> ranges;
-    for (size_t i = 0; i < fileSplits.size(); ++i) {
-      const auto step =
-          wholeFiles ? std::max<int64_t>(1, sizes[i]) : maxSplitBytes;
-      for (int64_t start = 0; start < sizes[i]; start += step) {
-        ranges.push_back(std::make_shared<FileRangeSplit>(
-            fileSplits[i]->connectorId,
-            fileSplits[i]->filePath,
-            start,
-            std::min(step, sizes[i] - start)));
+    auto& scanRanges = rangesPerScan.emplace_back();
+    for (const auto& [node, files] : filesPerNode) {
+      auto& ranges = scanRanges.emplace_back(NodeRanges{node, {}}).ranges;
+      for (const auto& file : files) {
+        const auto step =
+            wholeFiles ? std::max<int64_t>(1, file.size) : maxSplitBytes;
+        for (int64_t start = 0; start < file.size; start += step) {
+          ranges.push_back(std::make_shared<FileRangeSplit>(
+              handle->connectorId(),
+              file.path,
+              start,
+              std::min(step, file.size - start)));
+        }
       }
     }
-    splitsPerScan.push_back(std::move(ranges));
     maxSplitBytesPerScan.push_back(maxSplitBytes);
   }
 
   // Several scans: 'parallelism' tasks share their ranges.
-  if (splitsPerScan.size() != 1) {
+  if (rangesPerScan.size() != 1) {
+    VELOX_USER_CHECK(
+        !nodeLocalFiles_,
+        "{} supports one scan per stage, not {}",
+        kNodeLocalFiles,
+        rangesPerScan.size());
     std::vector<std::map<std::string, std::vector<folly::dynamic>>> result(
         options_.parallelism);
     for (size_t i = 0; i < stage.scans.size(); ++i) {
       const auto& nodeId = stage.scans[i]->id();
-      for (size_t j = 0; j < splitsPerScan[i].size(); ++j) {
-        result[j % result.size()][nodeId].push_back(
-            splitsPerScan[i][j]->serialize());
+      const auto& ranges = rangesPerScan[i][0].ranges;
+      for (size_t j = 0; j < ranges.size(); ++j) {
+        result[j % result.size()][nodeId].push_back(ranges[j]->serialize());
       }
     }
+    nodes.assign(result.size(), "");
     return result;
   }
 
-  // One scan: ranges packed in order into tasks of about 'maxSplitBytes',
-  // each range counting kOpenCostBytes extra, so small files share a task.
+  // One scan: each node's ranges packed in order into tasks of about
+  // 'maxSplitBytes', each range counting kOpenCostBytes extra, so small files
+  // share a task.
   const auto& nodeId = stage.scans[0]->id();
-  std::vector<std::map<std::string, std::vector<folly::dynamic>>> result(1);
-  int64_t taskBytes = 0;
-  for (const auto& range : splitsPerScan[0]) {
-    const auto bytes = range->length + kOpenCostBytes;
-    if (taskBytes > 0 && taskBytes + bytes > maxSplitBytesPerScan[0]) {
-      result.emplace_back();
-      taskBytes = 0;
+  std::vector<std::map<std::string, std::vector<folly::dynamic>>> result;
+  nodes.clear();
+  for (const auto& [node, ranges] : rangesPerScan[0]) {
+    int64_t taskBytes = 0;
+    for (const auto& range : ranges) {
+      const auto bytes = range->length + kOpenCostBytes;
+      if (nodes.empty() || nodes.back() != node ||
+          (taskBytes > 0 && taskBytes + bytes > maxSplitBytesPerScan[0])) {
+        result.emplace_back();
+        nodes.push_back(node);
+        taskBytes = 0;
+      }
+      result.back()[nodeId].push_back(range->serialize());
+      taskBytes += bytes;
     }
-    result.back()[nodeId].push_back(range->serialize());
-    taskBytes += bytes;
+  }
+  if (result.empty()) {
+    // No files: one task that reads nothing.
+    result.emplace_back();
+    nodes.push_back("");
   }
   return result;
+}
+
+std::vector<rpc::FileInfo> DagScheduler::listFiles(
+    const core::TableScanNode& scan,
+    JobContext& job) {
+  auto source = runner::ConnectorSplitSourceFactory().splitSourceForScan(
+      job.session, scan, *job.evaluator, nullptr, std::nullopt);
+  std::vector<rpc::FileInfo> files;
+  std::exception_ptr error;
+  try {
+    for (;;) {
+      auto batch = folly::coro::blockingWait(source->co_getSplits(1024));
+      for (auto& split : batch.splits) {
+        auto fileSplit =
+            std::dynamic_pointer_cast<file::FileSplit>(split.connectorSplit);
+        VELOX_CHECK_NOT_NULL(fileSplit, "Expected a file split");
+        const auto size =
+            velox::filesystems::getFileSystem(fileSplit->filePath, nullptr)
+                ->openFileForRead(fileSplit->filePath)
+                ->size();
+        files.push_back(rpc::FileInfo{fileSplit->filePath, size});
+      }
+      if (batch.noMoreSplits) {
+        break;
+      }
+    }
+  } catch (...) {
+    error = std::current_exception();
+  }
+  folly::coro::blockingWait(source->co_close());
+  if (error) {
+    std::rethrow_exception(error);
+  }
+  return files;
 }
 
 std::vector<velox::RowVectorPtr> DagScheduler::runJob(
@@ -446,11 +499,12 @@ std::vector<velox::RowVectorPtr> DagScheduler::runStages(
     } else if (cachedMaps > 0 && stage.scans.empty()) {
       state.splits.resize(cachedMaps);
     } else {
-      state.splits = scanSplits(stage, job);
+      state.splits = scanSplits(stage, job, state.nodes);
       if (state.numTasks() < cachedMaps) {
         state.splits.resize(cachedMaps);
       }
     }
+    state.nodes.resize(state.numTasks());
   }
 
   // The memo key of a stage's output.
@@ -643,6 +697,7 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
       task.partition = p;
       task.fragment = stage.fragment;
       task.splits = state.splits[p];
+      task.node = state.nodes[p];
       for (const auto& input : stage.shuffleInputs) {
         // An executor may have been lost since the inputs were complete.
         if (!mapOutputTracker_.isComplete(input.shuffleId)) {

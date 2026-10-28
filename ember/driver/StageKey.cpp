@@ -9,6 +9,7 @@
 #include <folly/hash/SpookyHashV2.h>
 #include <folly/json.h>
 
+#include "ember/driver/DagScheduler.h"
 #include "velox/functions/FunctionRegistry.h"
 
 namespace ember::driver {
@@ -127,8 +128,12 @@ class StageHasher {
   StageHasher(
       Stage& stage,
       const std::map<int32_t, const Stage*>& byShuffle,
-      const std::string& environment)
-      : stage_{stage}, byShuffle_{byShuffle}, environment_{environment} {
+      const std::string& environment,
+      bool nodeLocalFiles)
+      : stage_{stage},
+        byShuffle_{byShuffle},
+        environment_{environment},
+        nodeLocalFiles_{nodeLocalFiles} {
     collectNames(stage.fragment, names_);
   }
 
@@ -287,6 +292,10 @@ class StageHasher {
   // Path, size and mtime of every file the scan reads. A directory stands for
   // its files, in sorted order.
   std::optional<std::string> fileIdentity(const folly::dynamic& handle) {
+    if (nodeLocalFiles_) {
+      reason_ = "reads node-local files";
+      return std::nullopt;
+    }
     std::vector<std::string> paths;
     if (const auto* files = handle.get_ptr("filePaths")) {
       for (const auto& path : *files) {
@@ -332,6 +341,7 @@ class StageHasher {
   const std::map<int32_t, const Stage*>& byShuffle_;
   // Code version and config.
   const std::string& environment_;
+  const bool nodeLocalFiles_;
   std::set<std::string> names_;
   std::map<std::string, std::string> renames_;
   std::map<std::string, bool> nondeterministic_;
@@ -347,9 +357,12 @@ void computeStageKeys(
   for (const auto& [key, value] : config) {
     environment += fmt::format("\n{}={}", key, value);
   }
+  auto nodeLocal = config.find(DagScheduler::kNodeLocalFiles);
+  const bool nodeLocalFiles =
+      nodeLocal != config.end() && folly::to<bool>(nodeLocal->second);
   std::map<int32_t, const Stage*> byShuffle;
   for (auto& stage : plan.stages) {
-    StageHasher hasher(stage, byShuffle, environment);
+    StageHasher hasher(stage, byShuffle, environment, nodeLocalFiles);
     stage.key = hasher.hashNode(stage.fragment);
     if (stage.key.has_value() && !stage.shuffleId.has_value()) {
       // The result's column names are the user's.

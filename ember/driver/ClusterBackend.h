@@ -9,6 +9,10 @@
 // breaks, is dropped: its running tasks fail and the TaskScheduler retries
 // them elsewhere, and the executor listener hears that its location is lost,
 // so the DagScheduler recomputes the shuffle outputs it held.
+//
+// Workers report the node (machine) they run on. A task for a node waits for
+// a free slot on one of its workers, and fails if the node has no worker for
+// 'noWorkersTimeout'.
 
 #pragma once
 
@@ -17,6 +21,7 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 #include "ember/driver/SchedulerBackend.h"
@@ -60,7 +65,18 @@ class ClusterBackend : public SchedulerBackend {
 
   int32_t totalSlots() const override;
 
-  void launchTask(std::string task, ResultCallback onResult) override;
+  void launchTask(
+      std::string task,
+      const std::string& node,
+      ResultCallback onResult) override;
+
+  std::vector<std::string> nodes() const override;
+
+  /// Asks a worker of 'node'.
+  std::vector<rpc::FileInfo> listFiles(
+      const std::string& node,
+      const std::string& schema,
+      const std::string& path) override;
 
   void setExecutorListener(ExecutorListener listener) override;
 
@@ -76,6 +92,7 @@ class ClusterBackend : public SchedulerBackend {
   struct WorkerInfo {
     std::string id;
     std::string address;
+    std::string node;
     int32_t slots{0};
     int32_t running{0};
     std::shared_ptr<rpc::WorkerClient> client;
@@ -84,7 +101,10 @@ class ClusterBackend : public SchedulerBackend {
 
   struct PendingTask {
     std::string task;
+    std::string node;
     ResultCallback onResult;
+    // Since when 'node' has had no worker.
+    std::optional<std::chrono::steady_clock::time_point> nodeMissingSince;
   };
 
   rpc::RegisterWorkerResponse registerWorker(

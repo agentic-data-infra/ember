@@ -35,6 +35,12 @@ class Worker::Handler : public rpc::WorkerHandler {
     worker_->shutdown();
   }
 
+  std::vector<rpc::FileInfo> listFiles(
+      const std::string& schema,
+      const std::string& path) override {
+    return Executor::listFiles(schema, path);
+  }
+
   folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
       rpc::BlockId block) override {
     return worker_->co_fetchBlock(shuffle::BlockId{
@@ -165,7 +171,10 @@ bool Worker::serveDriver(std::chrono::milliseconds connectTimeout) {
   rpc::RegisterWorkerResponse reply;
   try {
     rpc::RegisterWorkerRequest request{
-        .workerId = address_, .address = address_, .slots = options_.slots};
+        .workerId = address_,
+        .address = address_,
+        .slots = options_.slots,
+        .node = options_.node.empty() ? rpc::localHostName() : options_.node};
     reply = folly::coro::blockingWait(folly::coro::timeout(
         driver->co_registerWorker(std::move(request)), kCallTimeout));
     LOG(INFO) << "Registered with driver " << options_.driver.toString()

@@ -7,6 +7,9 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
+
+#include "ember/rpc/Messages.h"
 
 namespace ember::driver {
 
@@ -28,7 +31,20 @@ class SchedulerBackend {
 
   /// Runs a serialized TaskDescription and calls 'onResult' with its
   /// serialized TaskResult, on any thread. Tasks beyond the free slots wait.
-  virtual void launchTask(std::string task, ResultCallback onResult) = 0;
+  /// A task with a 'node' runs only on an executor of that node.
+  virtual void launchTask(
+      std::string task,
+      const std::string& node,
+      ResultCallback onResult) = 0;
+
+  /// The nodes (machines) executors run on, sorted.
+  virtual std::vector<std::string> nodes() const = 0;
+
+  /// The data files a scan of 'path' in file format 'schema' reads on 'node'.
+  virtual std::vector<rpc::FileInfo> listFiles(
+      const std::string& node,
+      const std::string& schema,
+      const std::string& path) = 0;
 
   /// Replaces the listener; an empty one removes it. Backends whose executors
   /// cannot be lost may ignore it.

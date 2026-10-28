@@ -54,7 +54,10 @@ class FlakyBackend : public SchedulerBackend {
     return backend_->totalSlots();
   }
 
-  void launchTask(std::string task, ResultCallback onResult) override {
+  void launchTask(
+      std::string task,
+      const std::string& node,
+      ResultCallback onResult) override {
     auto description = TaskDescription::deserialize(task);
     {
       std::lock_guard<std::mutex> l(mutex_);
@@ -68,7 +71,18 @@ class FlakyBackend : public SchedulerBackend {
       onResult(result.serialize());
       return;
     }
-    backend_->launchTask(std::move(task), std::move(onResult));
+    backend_->launchTask(std::move(task), node, std::move(onResult));
+  }
+
+  std::vector<std::string> nodes() const override {
+    return backend_->nodes();
+  }
+
+  std::vector<rpc::FileInfo> listFiles(
+      const std::string& node,
+      const std::string& schema,
+      const std::string& path) override {
+    return backend_->listFiles(node, schema, path);
   }
 
   void setExecutorListener(ExecutorListener listener) override {

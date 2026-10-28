@@ -80,6 +80,13 @@ class DagScheduler {
   /// range the row groups. With one scan in a stage, a task takes ranges
   /// until it holds about this many bytes, each range counting 4MB extra.
   static constexpr const char* kMaxSplitBytes = "ember.files.max_split_bytes";
+  /// Config key: file scans read files local to each node (default false).
+  /// Every node has its own files at the scan's path, as each machine's local
+  /// disks do; the driver asks a worker on each node for them, and their
+  /// tasks run only on that node. The driver must see the path too, to plan
+  /// the scan, and the nodes are those with workers when the job starts.
+  /// Only stages with one scan; their stages have no keys.
+  static constexpr const char* kNodeLocalFiles = "ember.files.node_local";
   /// Config key: keep keyed shuffle outputs for later jobs to reuse (default
   /// true).
   static constexpr const char* kReuseOutputs = "ember.reuse.outputs";
@@ -160,9 +167,16 @@ class DagScheduler {
     return key.value_or("cached " + id);
   }
 
-  // Serialized splits for each task of a source stage, per scan node.
+  // Serialized splits for each task of a source stage, per scan node, and the
+  // node each task must run on ("" for any).
   std::vector<std::map<std::string, std::vector<folly::dynamic>>> scanSplits(
       const Stage& stage,
+      JobContext& job,
+      std::vector<std::string>& nodes);
+
+  // The files of 'scan' and their sizes, as the driver sees them.
+  std::vector<rpc::FileInfo> listFiles(
+      const facebook::velox::core::TableScanNode& scan,
       JobContext& job);
 
   // The shuffle stored under 'key', if it can be reused by a stage with
@@ -179,6 +193,7 @@ class DagScheduler {
   const DagSchedulerOptions options_;
   const bool reuseOutputs_;
   const int32_t rangeSortPartitions_;
+  const bool nodeLocalFiles_;
   // Config that goes into stage keys: what is not Ember's own, and splits.
   std::map<std::string, std::string> keyConfig_;
   TaskScheduler taskScheduler_;

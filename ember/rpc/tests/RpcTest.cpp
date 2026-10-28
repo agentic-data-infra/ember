@@ -25,7 +25,8 @@ namespace {
 // launchTask echoes its task after the number of ms it starts with, if any;
 // "throw" throws right away and "fail" throws on the handler's pool.
 // removeShuffle does not return until the test lets it. fetchBlock returns a
-// block of 'reduceId' bytes.
+// block of 'reduceId' bytes. listFiles returns one file named after its
+// arguments.
 class TestHandler : public WorkerHandler {
  public:
   TestHandler() : pool_{std::make_unique<folly::CPUThreadPoolExecutor>(8)} {}
@@ -64,6 +65,12 @@ class TestHandler : public WorkerHandler {
   }
 
   void shutdown() override {}
+
+  std::vector<FileInfo> listFiles(
+      const std::string& schema,
+      const std::string& path) override {
+    return {FileInfo{.path = path + "/" + schema, .size = 42}};
+  }
 
   folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
       BlockId block) override {
@@ -138,6 +145,11 @@ TEST_F(RpcTest, roundTrip) {
       blocks->co_fetchBlock(BlockId{.reduceId = 16 << 20}));
   EXPECT_EQ(bytes->computeChainDataLength(), big.size());
   EXPECT_EQ(bytes->to<std::string>(), big);
+
+  auto files = folly::coro::blockingWait(client->co_listFiles("gensort", "/in"));
+  ASSERT_EQ(files.size(), 1);
+  EXPECT_EQ(files[0].path, "/in/gensort");
+  EXPECT_EQ(files[0].size, 42);
 }
 
 TEST_F(RpcTest, concurrentCallsCompleteOutOfOrder) {

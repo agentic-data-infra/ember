@@ -13,6 +13,8 @@
 // The sort runs as one merge task writing part-00000, or, with
 // EMBER_CONF=ember.sort.range_partitions=N, as N range-sorted tasks writing
 // part-00000 to part-N-1. The rows do not pass through the driver.
+// With ember.files.node_local=true, each node's workers read the input
+// files on that node's own disks.
 //
 // To sort more than fits in memory, add "spill_enabled=true
 // query_max_memory_per_node=<bytes per task, e.g. 2GB>", and keep

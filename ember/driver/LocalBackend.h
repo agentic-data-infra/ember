@@ -33,7 +33,20 @@ class LocalBackend : public SchedulerBackend {
     return options_.numSlots;
   }
 
-  void launchTask(std::string task, ResultCallback onResult) override;
+  void launchTask(
+      std::string task,
+      const std::string& node,
+      ResultCallback onResult) override;
+
+  /// The one node, "local".
+  std::vector<std::string> nodes() const override {
+    return {"local"};
+  }
+
+  std::vector<rpc::FileInfo> listFiles(
+      const std::string& node,
+      const std::string& schema,
+      const std::string& path) override;
 
   void removeShuffle(int32_t shuffleId) override;
 

@@ -19,7 +19,8 @@
 //
 // A node that calls a nondeterministic function (rand, uuid, now, ...) has no
 // key, nor does anything that reads it; nor does a scan of files that are not
-// local.
+// local, or that are node-local (DagScheduler::kNodeLocalFiles in 'config'),
+// since the driver does not see them.
 
 #pragma once
 

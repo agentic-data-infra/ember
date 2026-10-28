@@ -40,6 +40,7 @@ std::string TaskDescription::serialize() const {
     obj["outputFiles"] = folly::dynamic::object("format", outputFiles->format)(
         "directory", outputFiles->directory);
   }
+  obj["node"] = node;
   folly::dynamic configObj = folly::dynamic::object;
   for (const auto& [key, value] : config) {
     configObj[key] = value;
@@ -80,6 +81,7 @@ TaskDescription TaskDescription::deserialize(const std::string& bytes) {
         obj["outputFiles"]["format"].asString(),
         obj["outputFiles"]["directory"].asString()};
   }
+  task.node = obj["node"].asString();
   for (const auto& [key, value] : obj["config"].items()) {
     task.config[key.asString()] = value.asString();
   }

@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <folly/coro/Task.h>
 #include <folly/io/IOBuf.h>
@@ -42,6 +43,11 @@ class WorkerHandler {
 
   /// The application is over.
   virtual void shutdown() = 0;
+
+  /// The data files a scan of 'path' in file format 'schema' reads here.
+  virtual std::vector<FileInfo> listFiles(
+      const std::string& schema,
+      const std::string& path) = 0;
 
   /// The bytes of one shuffle block this worker's executor wrote.
   virtual folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
