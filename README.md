@@ -159,6 +159,18 @@ feature computed with a regex over the text. It caches the features with
 buck2 run //examples:threshold_sweep -- docs/ cache     # or nocache
 ```
 
+`examples/SortBenchmark.cpp` sorts the 100-byte records of
+[sortbenchmark.org](https://sortbenchmark.org)'s gensort by their 10-byte key
+(`read().gensort(path)`: binary `key` and `payload` columns). For now the sort
+runs in one task and the driver writes the output. `scripts/gensort.sh`
+downloads gensort and valsort, writes the input and checks the output:
+
+```
+scripts/gensort.sh generate 10000000 /data/sort-input 8     # 1 GB in 8 files
+buck2 run //examples:sort_benchmark -- /data/sort-input /data/sorted
+scripts/gensort.sh validate /data/sorted /data/sort-input
+```
+
 ## Python
 
 `python/` binds the same API for Python, with results as pyarrow tables:

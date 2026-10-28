@@ -407,6 +407,7 @@ PYBIND11_MODULE(_ember, m) {
   py::class_<DataframeReader>(m, "DataframeReader")
       .def("text", &DataframeReader::text, py::arg("path"))
       .def("parquet", &DataframeReader::parquet, py::arg("path"))
+      .def("gensort", &DataframeReader::gensort, py::arg("path"))
       .def(
           "format",
           &DataframeReader::format,

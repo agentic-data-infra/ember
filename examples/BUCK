@@ -24,3 +24,12 @@ cxx_binary(
     # Archives must precede the prebuilt Velox/Axiom libraries they use.
     link_ordering = "topological",
 )
+
+cxx_binary(
+    name = "sort_benchmark",
+    srcs = ["SortBenchmark.cpp"],
+    headers = ["EnvConfig.h"],
+    deps = ["//ember/api:api"],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+)

@@ -22,6 +22,10 @@ class DataframeReader {
 
   Dataframe parquet(const std::string& path) const;
 
+  /// The 100-byte records of the sort benchmark's gensort, in two binary
+  /// columns "key" (10 bytes) and "payload" (90 bytes).
+  Dataframe gensort(const std::string& path) const;
+
   DataframeReader& format(std::string format) {
     format_ = std::move(format);
     return *this;
