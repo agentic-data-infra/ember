@@ -206,6 +206,19 @@ std::vector<int64_t> PartitionedPageWriter::writePartitions(
   return offsets;
 }
 
+int64_t PartitionedPageWriter::outputBytes() const {
+  int64_t bytes = 0;
+  for (const auto& run : runs_) {
+    bytes += run.offsets.back();
+  }
+  for (const auto& pages : pages_) {
+    for (const auto& page : pages) {
+      bytes += kFrameHeaderBytes + page->computeChainDataLength();
+    }
+  }
+  return bytes;
+}
+
 std::string PartitionedPageWriter::tmpPath(const std::string& suffix) const {
   return fmt::format(
       "{}/shuffle_{}_{}.{}.{}.tmp",

@@ -19,7 +19,8 @@
 // ember.shuffle.spill_threshold_bytes (64MB by default) well below that
 // limit: a map task holds both its sort and its shuffle buffer. With the
 // shuffle in Kiln (ember.shuffle.store=kiln), add
-// ember.shuffle.kiln.tier=localfs when it is bigger than Kiln's DRAM.
+// ember.shuffle.kiln.tier=dram+localfs (or localfs) when it is bigger than
+// Kiln's DRAM.
 
 #include <chrono>
 #include <iostream>

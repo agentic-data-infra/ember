@@ -118,7 +118,7 @@ class KilnShuffleWriter : public PartitionedPageWriter {
   KilnShuffleWriter(
       std::shared_ptr<ShuffleBlockStore> store,
       std::string metadata,
-      kiln::Tier tier,
+      kiln::Placement placement,
       int32_t shuffleId,
       int32_t mapId,
       int32_t numPartitions,
@@ -132,14 +132,16 @@ class KilnShuffleWriter : public PartitionedPageWriter {
             std::move(attemptTag),
             spillThreshold),
         metadata_{std::move(metadata)},
-        tier_{tier} {}
+        placement_{placement} {}
 
  protected:
   MapStatus commitOutput() override {
     const auto cluster = kilnCluster(metadata_);
     const auto& client = cluster.client;
     const auto& pool = cluster.pool;
-    auto chunk = blockingWait(client->co_create({.tier = tier_}));
+    // With the whole size known, an overflow placement puts all of the
+    // output into one tier.
+    auto chunk = blockingWait(client->co_create(placement_, outputBytes()));
     std::vector<int64_t> offsets;
     try {
       auto pooled = pool->acquire();
@@ -193,7 +195,7 @@ class KilnShuffleWriter : public PartitionedPageWriter {
 
  private:
   const std::string metadata_;
-  const kiln::Tier tier_;
+  const kiln::Placement placement_;
 };
 
 } // namespace
@@ -223,14 +225,20 @@ std::unique_ptr<ShuffleWriter> createKilnWriter(
     int32_t numPartitions,
     const std::string& attemptTag,
     int64_t spillThreshold) {
-  VELOX_USER_CHECK(
-      tier == "dram" || tier == "localfs",
-      "Kiln shuffle tier must be dram or localfs, not {}",
-      tier);
+  kiln::Placement placement;
+  if (tier == "dram+localfs") {
+    placement = {.tier = kiln::Tier::kDram, .overflow = kiln::Tier::kLocalFs};
+  } else {
+    VELOX_USER_CHECK(
+        tier == "dram" || tier == "localfs",
+        "Kiln shuffle tier must be dram, localfs or dram+localfs, not {}",
+        tier);
+    placement = {.tier = kiln::parseTier(tier)};
+  }
   return std::make_unique<KilnShuffleWriter>(
       std::move(store),
       std::move(metadata),
-      kiln::parseTier(tier),
+      placement,
       shuffleId,
       mapId,
       numPartitions,

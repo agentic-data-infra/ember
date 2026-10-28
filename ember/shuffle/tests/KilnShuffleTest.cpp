@@ -12,7 +12,6 @@
 #include <cstdlib>
 #include <filesystem>
 
-#include <folly/ScopeGuard.h>
 #include <folly/coro/BlockingWait.h>
 
 #include "ember/shuffle/KilnShuffle.h"
@@ -267,37 +266,52 @@ TEST_F(KilnShuffleTest, unknownTierFails) {
       facebook::velox::VeloxUserError);
 }
 
-// A shuffle bigger than Kiln's DRAM loses its first map outputs to eviction
-// in the DRAM tier, and keeps them all in the larger local-FS tier.
-TEST(KilnTierTest, localFsHoldsMoreThanDram) {
-  // 8 MiB of DRAM, 16 MiB of local FS. Evicted blocks are reused at once,
-  // so reading an evicted output fails or finds another output's bytes.
-  kiln::local::LocalCluster cluster(kiln::local::LocalClusterOptions{
-      .dramServers = 1,
-      .localFsServers = 2,
-      .regionSize = 8 << 20,
-      .metadata = {.gracePeriod = std::chrono::milliseconds(0)}});
-  const auto metadata = cluster.metadataAddress().toString();
-  const auto dir = fs::temp_directory_path() /
-      fmt::format("ember_kiln_tier_{}", ::getpid());
-  auto store = std::make_shared<ShuffleBlockStore>("test-executor", dir.string());
-  SCOPE_EXIT {
-    fs::remove_all(dir);
-  };
+// Kiln with 8 MiB of DRAM and 16 MiB of local FS. Evicted blocks are reused
+// at once, so reading an evicted output fails or finds another output's
+// bytes.
+class KilnTierTest : public testing::Test {
+ protected:
+  KilnTierTest()
+      : cluster_{kiln::local::LocalClusterOptions{
+            .dramServers = 1,
+            .localFsServers = 2,
+            .regionSize = 8 << 20,
+            .metadata = {.gracePeriod = std::chrono::milliseconds(0)}}},
+        dir_{fs::temp_directory_path() /
+             fmt::format("ember_kiln_tier_{}", ::getpid())},
+        store_{std::make_shared<ShuffleBlockStore>(
+            "test-executor", dir_.string())} {}
 
-  // Six map outputs of two 1 MiB Kiln blocks each, 12 MiB in all, each of
-  // its own letter.
-  auto data = [](int32_t mapId) {
+  ~KilnTierTest() override {
+    fs::remove_all(dir_);
+  }
+
+  // Map output 'mapId': two 1 MiB Kiln blocks of its own letter.
+  static std::string data(int32_t mapId) {
     return std::string((2 << 20) - 4, 'a' + mapId);
-  };
-  auto readable = [&](const std::string& tier, int32_t shuffleId) {
+  }
+
+  // Writes six map outputs, 12 MiB in all, into 'tier', and returns how
+  // many read back intact. 'tiers' gets the tier of each output's chunk.
+  int32_t writeAndRead(
+      const std::string& tier,
+      int32_t shuffleId,
+      std::vector<kiln::Tier>* tiers = nullptr) {
+    const auto metadata = cluster_.metadataAddress().toString();
     std::vector<MapStatus> outputs;
     for (int32_t mapId = 0; mapId < 6; ++mapId) {
       auto mapWriter = createKilnWriter(
-          store, metadata, tier, shuffleId, mapId, 1, "attempt0",
+          store_, metadata, tier, shuffleId, mapId, 1, "attempt0",
           ShuffleBlockStore::kDefaultSpillThreshold);
       mapWriter->collect(0, folly::IOBuf::copyBuffer(data(mapId)));
       outputs.push_back(mapWriter->commit());
+      if (tiers != nullptr) {
+        const auto chunk = kiln::ChunkId::parse(
+            parseKilnLocation(outputs.back().location).second);
+        auto info =
+            folly::coro::blockingWait(kilnClient(metadata)->co_stat(chunk));
+        tiers->push_back(info.replicas.at(0).tier);
+      }
     }
     int32_t count = 0;
     for (int32_t mapId = 0; mapId < 6; ++mapId) {
@@ -313,9 +327,37 @@ TEST(KilnTierTest, localFsHoldsMoreThanDram) {
       }
     }
     return count;
-  };
-  EXPECT_LT(readable("dram", 0), 6);
-  EXPECT_EQ(readable("localfs", 1), 6);
+  }
+
+  kiln::local::LocalCluster cluster_;
+  fs::path dir_;
+  std::shared_ptr<ShuffleBlockStore> store_;
+};
+
+// A shuffle bigger than Kiln's DRAM loses its first map outputs to eviction
+// in DRAM alone.
+TEST_F(KilnTierTest, dramEvicts) {
+  EXPECT_LT(writeAndRead("dram", 0), 6);
+}
+
+TEST_F(KilnTierTest, localFsHoldsAll) {
+  EXPECT_EQ(writeAndRead("localfs", 0), 6);
+}
+
+// Outputs go to DRAM while they fit, then to local FS, without evicting.
+TEST_F(KilnTierTest, dramThenLocalFs) {
+  std::vector<kiln::Tier> tiers;
+  EXPECT_EQ(writeAndRead("dram+localfs", 0, &tiers), 6);
+  EXPECT_EQ(
+      tiers,
+      (std::vector<kiln::Tier>{
+          kiln::Tier::kDram,
+          kiln::Tier::kDram,
+          kiln::Tier::kDram,
+          kiln::Tier::kDram,
+          kiln::Tier::kLocalFs,
+          kiln::Tier::kLocalFs}));
+  EXPECT_EQ(cluster_.metadata().evictions(), 0);
 }
 
 TEST(KilnBlockUrlTest, roundTrip) {
