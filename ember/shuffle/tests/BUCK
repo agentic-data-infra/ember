@@ -20,3 +20,13 @@ cxx_test(
     ],
     link_ordering = "topological",
 )
+
+cxx_test(
+    name = "range_partition_function_test",
+    srcs = ["RangePartitionFunctionTest.cpp"],
+    deps = [
+        "//ember/shuffle:shuffle",
+        "//ember/tests:test_main",
+    ],
+    link_ordering = "topological",
+)

@@ -2,6 +2,7 @@
 
 #include <mutex>
 
+#include "ember/shuffle/RangePartitionFunction.h"
 #include "ember/shuffle/ShuffleRead.h"
 #include "ember/shuffle/ShuffleWrite.h"
 #include "velox/common/serialization/Serializable.h"
@@ -17,6 +18,8 @@ void registerShuffle() {
     auto& registry = velox::DeserializationWithContextRegistryForSharedPtr();
     registry.Register("ShuffleWriteNode", ShuffleWriteNode::create);
     registry.Register("ShuffleReadNode", ShuffleReadNode::create);
+    registry.Register(
+        "RangePartitionFunctionSpec", RangePartitionFunctionSpec::deserialize);
     velox::exec::Operator::registerOperator(
         std::make_unique<ShuffleWriteTranslator>());
     velox::exec::Operator::registerOperator(

@@ -87,6 +87,12 @@ class DagScheduler {
   /// keys up there, so that later programs reuse them (KilnMemo.h; default
   /// false). Needs the Kiln shuffle store.
   static constexpr const char* kReuseInKiln = "ember.reuse.kiln";
+  /// Config key: run a global sort without a limit as this many range-sorted
+  /// result tasks instead of one merge task (StagePlan.h; default 0, off).
+  /// The ranges are fixed splits of the first sort key's bytes, which suits
+  /// uniformly random keys.
+  static constexpr const char* kRangeSortPartitions =
+      "ember.sort.range_partitions";
 
   DagScheduler(
       std::shared_ptr<SchedulerBackend> backend,
@@ -163,6 +169,7 @@ class DagScheduler {
 
   const DagSchedulerOptions options_;
   const bool reuseOutputs_;
+  const int32_t rangeSortPartitions_;
   // Config that goes into stage keys: what is not Ember's own, and splits.
   std::map<std::string, std::string> keyConfig_;
   TaskScheduler taskScheduler_;
