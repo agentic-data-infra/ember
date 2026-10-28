@@ -15,6 +15,14 @@
 
 namespace ember {
 
+/// Files a result task writes its rows to, instead of returning them.
+struct OutputFiles {
+  /// "gensort": each row's key and payload, as a 100-byte record.
+  std::string format;
+  /// Task p writes <directory>/part-NNNNN, NNNNN = p with 5 digits.
+  std::string directory;
+};
+
 /// One task: a stage's plan fragment plus this task's splits.
 struct TaskDescription {
   std::string jobId;
@@ -35,6 +43,9 @@ struct TaskDescription {
 
   /// The final stage's task: its rows go back to the driver.
   bool resultTask{false};
+
+  /// Set on a result task whose rows go to files; it returns only counts.
+  std::optional<OutputFiles> outputFiles;
 
   /// Velox query config, plus Ember's own keys.
   std::map<std::string, std::string> config;

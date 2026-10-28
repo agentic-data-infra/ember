@@ -6,9 +6,10 @@ Ember's Dataframe API. Programs include `ember/Session.h` and
 | File | Contents |
 |------|----------|
 | `Session` | Entry point (`Session::builder().master("local[4]").getOrCreate()`), `read()`, `createDataframe`/`inlineTable`. Optimizes plans with Axiom and runs them. |
-| `Dataframe` | Immutable value over a chain of plan steps: `select`, `selectExpr`, `filter`, `withColumn`, `groupBy`, `agg`, `orderBy`, `limit`, `distinct`, `unionAll`, `join`; actions `collect`, `count`, `show`; `cache`/`persist` and `unpersist` (keep a result on the executors, read by later actions); `compile` (cached plans), `schema`, `explain`. |
+| `Dataframe` | Immutable value over a chain of plan steps: `select`, `selectExpr`, `filter`, `withColumn`, `groupBy`, `agg`, `orderBy`, `limit`, `distinct`, `unionAll`, `join`; actions `collect`, `count`, `show`, `write()`; `cache`/`persist` and `unpersist` (keep a result on the executors, read by later actions); `compile` (cached plans), `schema`, `explain`. |
 | `Column`, `functions` | Typed expression builders (`col`, `lit`, `explode`, `split`, `lower`, `count`, ...), `expr("sql")`, and generic `call("fn", ...)` for any registered Velox function. `"x"_c` is `col("x")`. |
 | `DataframeReader` | `text(path)` (one `value` column per line), `gensort(path)` (binary `key` and `payload` of 100-byte sort benchmark records) and `parquet(path)`; a directory reads all its data files. |
+| `DataframeWriter` | `write().gensort(dir)`: each result task writes its rows to `dir/part-NNNNN` as 100-byte records and returns only counts. |
 | `Udf.h` | `registerUdf<Fn, Ret, Args...>("name")` over Velox simple functions. |
 
 How a program runs today: transformations only record steps (constant time).

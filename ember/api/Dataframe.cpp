@@ -7,6 +7,7 @@
 #include "axiom/logical_plan/PlanPrinter.h"
 #include "axiom/optimizer/ToVelox.h"
 #include "ember/CachedTable.h"
+#include "ember/DataframeWriter.h"
 #include "ember/Session.h"
 #include "ember/functions.h"
 
@@ -320,6 +321,10 @@ std::vector<velox::RowVectorPtr> Dataframe::collectBatches() const {
         batch->children());
   }
   return batches;
+}
+
+DataframeWriter Dataframe::write() const {
+  return DataframeWriter(*this);
 }
 
 std::vector<Row> Dataframe::collect() const {

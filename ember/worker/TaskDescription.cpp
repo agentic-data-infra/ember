@@ -36,6 +36,10 @@ std::string TaskDescription::serialize() const {
   }
   obj["splits"] = std::move(splitsObj);
   obj["resultTask"] = resultTask;
+  if (outputFiles.has_value()) {
+    obj["outputFiles"] = folly::dynamic::object("format", outputFiles->format)(
+        "directory", outputFiles->directory);
+  }
   folly::dynamic configObj = folly::dynamic::object;
   for (const auto& [key, value] : config) {
     configObj[key] = value;
@@ -71,6 +75,11 @@ TaskDescription TaskDescription::deserialize(const std::string& bytes) {
     }
   }
   task.resultTask = obj["resultTask"].asBool();
+  if (obj.count("outputFiles")) {
+    task.outputFiles = OutputFiles{
+        obj["outputFiles"]["format"].asString(),
+        obj["outputFiles"]["directory"].asString()};
+  }
   for (const auto& [key, value] : obj["config"].items()) {
     task.config[key.asString()] = value.asString();
   }

@@ -245,6 +245,13 @@ std::vector<velox::RowVectorPtr> SessionState::execute(
   return scheduler_->runJob(*plan, resultPool_.get());
 }
 
+int64_t SessionState::write(
+    const optimizer::MultiFragmentPlanPtr& plan,
+    const OutputFiles& files) {
+  VELOX_USER_CHECK_NOT_NULL(scheduler_, "Session {} is stopped", appName_);
+  return scheduler_->write(*plan, files);
+}
+
 std::string SessionState::explainStages(
     const optimizer::MultiFragmentPlanPtr& plan) {
   VELOX_USER_CHECK_NOT_NULL(scheduler_, "Session {} is stopped", appName_);

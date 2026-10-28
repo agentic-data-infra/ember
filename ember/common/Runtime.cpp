@@ -16,6 +16,7 @@
 #include "ember/shuffle/Shuffle.h"
 #include "velox/common/file/FileSystems.h"
 #include "velox/common/memory/Memory.h"
+#include "velox/common/memory/SharedArbitrator.h"
 #include "velox/core/ITypedExpr.h"
 #include "velox/core/PlanNode.h"
 #include "velox/exec/Exchange.h"
@@ -34,8 +35,12 @@ void initializeRuntime() {
     // Ember programs need not call folly::Init; this is the part Velox needs.
     folly::SingletonVault::singleton()->registrationComplete();
     if (!velox::memory::MemoryManager::testInstance()) {
-      velox::memory::initializeMemoryManager(
-          velox::memory::MemoryManager::Options{});
+      // The shared arbitrator reclaims memory, i.e. makes operators spill,
+      // when a task's pool reaches its capacity.
+      velox::memory::SharedArbitrator::registerFactory();
+      velox::memory::MemoryManager::Options options;
+      options.arbitratorKind = "SHARED";
+      velox::memory::initializeMemoryManager(options);
     }
     velox::filesystems::registerLocalFileSystem();
     if (!velox::isRegisteredNamedVectorSerde("Presto")) {

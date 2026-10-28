@@ -8,9 +8,12 @@
 #include "ember/Runtime.h"
 #include "ember/shuffle/ShuffleConfig.h"
 #include "ember/shuffle/ShuffleWrite.h"
+#include "ember/worker/PartFileWriter.h"
 #include "ember/worker/TaskDescription.h"
+#include "velox/common/config/Config.h"
 #include "velox/common/time/Timer.h"
 #include "velox/core/QueryCtx.h"
+#include "velox/exec/PlanNodeStats.h"
 #include "velox/exec/Task.h"
 
 namespace ember {
@@ -41,6 +44,8 @@ Executor::Executor(ExecutorOptions options) : options_{std::move(options)} {
   shuffle::ShuffleBlockStore::registerStore(blockStore_);
   driverExecutor_ =
       std::make_unique<folly::CPUThreadPoolExecutor>(options_.numThreads);
+  spillExecutor_ =
+      std::make_unique<folly::CPUThreadPoolExecutor>(options_.numThreads);
   rootPool_ = velox::memory::memoryManager()->addRootPool(
       fmt::format("ember_executor_{}", options_.location));
   resultPool_ = rootPool_->addLeafChild("results");
@@ -49,6 +54,7 @@ Executor::Executor(ExecutorOptions options) : options_{std::move(options)} {
 
 Executor::~Executor() {
   driverExecutor_->join();
+  spillExecutor_->join();
   shuffle::ShuffleBlockStore::unregisterStore(options_.location);
   std::error_code ec;
   std::filesystem::remove_all(options_.shuffleDirectory, ec);
@@ -72,18 +78,64 @@ std::string Executor::runTask(const std::string& bytes) {
     auto config = std::unordered_map<std::string, std::string>(
         description.config.begin(), description.config.end());
     config[std::string(shuffle::kExecutorLocation)] = options_.location;
+    // With a memory limit, the task's pool cannot grow past it: the
+    // arbitrator makes its operators spill, if spilling is enabled, or fails
+    // the task.
+    std::shared_ptr<velox::memory::MemoryPool> taskPool;
+    if (auto it = config.find(core::QueryConfig::kQueryMaxMemoryPerNode);
+        it != config.end()) {
+      const auto capacity = velox::config::toCapacity(
+          it->second, velox::config::CapacityUnit::BYTE);
+      if (capacity > 0) {
+        taskPool = velox::memory::memoryManager()->addRootPool(
+            core::QueryCtx::generatePoolName(result.taskId), capacity);
+      }
+    }
     auto queryCtx = core::QueryCtx::create(
         driverExecutor_.get(),
         core::QueryConfig(std::move(config)),
         /*connectorConfigs=*/{},
         velox::cache::AsyncDataCache::getInstance(),
-        /*pool=*/nullptr,
-        /*spillExecutor=*/nullptr,
+        std::move(taskPool),
+        spillExecutor_.get(),
         result.taskId);
+    // Created on the first spill, removed with the task.
+    const auto spillDirectory = fmt::format(
+        "{}/spill/{}_{}.{}_{}.{}",
+        options_.shuffleDirectory,
+        description.jobId,
+        description.stageId,
+        description.stageAttempt,
+        description.partition,
+        description.attempt);
+    velox::common::SpillDiskOptions spillOptions{
+        .spillDirPath = spillDirectory,
+        .spillDirCreated = false,
+        .spillDirCreateCb = [spillDirectory]() {
+          std::filesystem::create_directories(spillDirectory);
+          return spillDirectory;
+        }};
 
     std::mutex resultMutex;
     exec::ConsumerSupplier consumer;
-    if (description.resultTask) {
+    std::unique_ptr<PartFileWriter> writer;
+    if (description.outputFiles.has_value()) {
+      VELOX_CHECK(description.resultTask);
+      writer = std::make_unique<PartFileWriter>(
+          *description.outputFiles, description.partition, result.taskId);
+      consumer = [&]() -> exec::Consumer {
+        return [&](velox::RowVectorPtr rows,
+                   bool /*drained*/,
+                   velox::ContinueFuture* /*future*/) {
+          if (rows != nullptr && rows->size() > 0) {
+            std::lock_guard<std::mutex> l(resultMutex);
+            writer->append(rows);
+            result.outputRows += rows->size();
+          }
+          return exec::BlockingReason::kNotBlocked;
+        };
+      };
+    } else if (description.resultTask) {
       consumer = [&]() -> exec::Consumer {
         return [&](velox::RowVectorPtr rows,
                    bool /*drained*/,
@@ -105,7 +157,9 @@ std::string Executor::runTask(const std::string& bytes) {
         description.partition,
         std::move(queryCtx),
         exec::Task::ExecutionMode::kParallel,
-        std::move(consumer));
+        std::move(consumer),
+        /*memoryArbitrationPriority=*/0,
+        std::move(spillOptions));
     task->start(/*maxDrivers=*/1);
 
     std::vector<core::PlanNodeId> splitNodes;
@@ -145,11 +199,24 @@ std::string Executor::runTask(const std::string& bytes) {
       if (result.fetchFailure.has_value()) {
         result.userError = false;
       }
-    } else if (
-        auto write =
-            std::dynamic_pointer_cast<const shuffle::ShuffleWriteNode>(plan)) {
-      result.mapStatus =
-          blockStore_->mapStatus(write->shuffleId(), description.partition);
+    } else {
+      if (writer != nullptr) {
+        writer->commit();
+      }
+      if (auto write =
+              std::dynamic_pointer_cast<const shuffle::ShuffleWriteNode>(
+                  plan)) {
+        result.mapStatus =
+            blockStore_->mapStatus(write->shuffleId(), description.partition);
+      }
+      int64_t spilledBytes = 0;
+      for (const auto& [id, stats] : exec::toPlanStats(task->taskStats())) {
+        spilledBytes += stats.spilledBytes;
+      }
+      if (spilledBytes > 0) {
+        LOG(INFO) << "Task " << result.taskId << " spilled " << spilledBytes
+                  << " bytes";
+      }
     }
   } catch (const velox::VeloxUserError& e) {
     result.state = TaskState::kFailed;

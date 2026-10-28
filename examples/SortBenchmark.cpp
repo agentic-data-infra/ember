@@ -1,5 +1,5 @@
 // SortBenchmark: sorts the 100-byte records of gensort files by their 10-byte
-// key (sortbenchmark.org) and writes them to one output file that valsort can
+// key (sortbenchmark.org) and writes them as part files that valsort can
 // check.
 //
 //   scripts/gensort.sh generate 1000000 /data/sort-input 4
@@ -10,28 +10,29 @@
 // driver and waits for 'workers' (default 1) ember-worker processes started
 // with --driver=host:port.
 //
-// The sort runs as one merge task, or, with
-// EMBER_CONF=ember.sort.range_partitions=N, as N range-sorted tasks. The
-// driver writes the output.
+// The sort runs as one merge task writing part-00000, or, with
+// EMBER_CONF=ember.sort.range_partitions=N, as N range-sorted tasks writing
+// part-00000 to part-N-1. The rows do not pass through the driver.
+//
+// To sort more than fits in memory, add "spill_enabled=true
+// query_max_memory_per_node=<bytes per task, e.g. 2GB>", and keep
+// ember.shuffle.spill_threshold_bytes (64MB by default) well below that
+// limit: a map task holds both its sort and its shuffle buffer.
 
 #include <chrono>
-#include <fstream>
 #include <iostream>
 
 #include "EnvConfig.h"
 #include "ember/Session.h"
 #include "ember/functions.h"
-#include "velox/vector/FlatVector.h"
 
 using namespace ember;
 using namespace ember::functions;
 
-namespace velox = facebook::velox;
-
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::cerr << "Usage: sort_benchmark <input file or directory> <output file> "
-                 "[master] [workers]"
+    std::cerr << "Usage: sort_benchmark <input file or directory> "
+                 "<output directory> [master] [workers]"
               << std::endl;
     return 1;
   }
@@ -43,37 +44,18 @@ int main(int argc, char** argv) {
   auto ember = examples::withEnvConfig(builder).getOrCreate();
 
   const auto start = std::chrono::steady_clock::now();
-  Dataframe sorted = ember.read().gensort(argv[1]).orderBy(col("key"));
-  auto batches = sorted.collectBatches();
-  const auto sortedAt = std::chrono::steady_clock::now();
-
-  std::ofstream out(argv[2], std::ios::binary | std::ios::trunc);
-  int64_t records = 0;
-  for (const auto& batch : batches) {
-    auto* keys = batch->childAt(0)->asFlatVector<velox::StringView>();
-    auto* payloads = batch->childAt(1)->asFlatVector<velox::StringView>();
-    for (velox::vector_size_t i = 0; i < batch->size(); ++i) {
-      const auto key = keys->valueAt(i);
-      const auto payload = payloads->valueAt(i);
-      out.write(key.data(), key.size());
-      out.write(payload.data(), payload.size());
-    }
-    records += batch->size();
-  }
-  out.close();
-  if (!out) {
-    std::cerr << "Failed to write " << argv[2] << std::endl;
-    return 1;
-  }
+  const auto records = ember.read()
+                           .gensort(argv[1])
+                           .orderBy(col("key"))
+                           .write()
+                           .gensort(argv[2]);
   const auto end = std::chrono::steady_clock::now();
 
-  const auto ms = [](auto from, auto to) {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(to - from)
-        .count();
-  };
   std::cout << "Sorted " << records << " records (" << records * 100
-            << " bytes) in " << ms(start, end) << " ms (sort "
-            << ms(start, sortedAt) << " ms, write " << ms(sortedAt, end)
-            << " ms)" << std::endl;
+            << " bytes) in "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(
+                   end - start)
+                   .count()
+            << " ms" << std::endl;
   ember.stop();
 }

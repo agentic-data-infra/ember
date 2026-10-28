@@ -49,8 +49,9 @@ struct DagScheduler::StageState {
   // Partitions done, for a stage without shuffle output; a map stage's are
   // in the tracker.
   std::vector<bool> finished;
-  // A result stage's pages, per partition.
+  // A result stage's pages and rows, per partition.
   std::vector<std::vector<std::string>> resultPages;
+  std::vector<int64_t> resultRows;
 
   int32_t numTasks() const {
     return static_cast<int32_t>(splits.size());
@@ -63,6 +64,8 @@ struct DagScheduler::JobContext {
   std::shared_ptr<velox::memory::MemoryPool> pool;
   std::unique_ptr<velox::exec::SimpleExpressionEvaluator> evaluator;
   runner::RunnerSessionPtr session;
+  // Where the result tasks write their rows, if not back to the driver.
+  const OutputFiles* outputFiles{nullptr};
   // Stages by the shuffle they write.
   std::map<int32_t, StageState*> producers;
 };
@@ -336,6 +339,15 @@ std::vector<velox::RowVectorPtr> DagScheduler::runJob(
   return runStages(stages, std::nullopt, pool);
 }
 
+int64_t DagScheduler::write(
+    const optimizer::MultiFragmentPlan& plan,
+    const OutputFiles& files) {
+  auto stages = stagePlan(plan);
+  int64_t rows = 0;
+  runStages(stages, std::nullopt, nullptr, nullptr, &files, &rows);
+  return rows;
+}
+
 int32_t DagScheduler::materialize(const std::string& id) {
   auto stages = cachedStagePlan(id);
   int32_t shuffleId = 0;
@@ -372,9 +384,12 @@ std::vector<velox::RowVectorPtr> DagScheduler::runStages(
     StagePlan& stages,
     const std::optional<std::string>& outputKey,
     velox::memory::MemoryPool* pool,
-    int32_t* outputShuffle) {
+    int32_t* outputShuffle,
+    const OutputFiles* outputFiles,
+    int64_t* writtenRows) {
   JobContext job;
   job.jobId = fmt::format("{}_{}", options_.appName, ++jobCounter_);
+  job.outputFiles = outputFiles;
   job.queryCtx = core::QueryCtx::create(
       /*executor=*/nullptr,
       core::QueryConfig(
@@ -537,6 +552,7 @@ std::vector<velox::RowVectorPtr> DagScheduler::runStages(
     }
     if (state.isResult) {
       state.resultPages.resize(numTasks);
+      state.resultRows.resize(numTasks);
     }
   }
 
@@ -548,8 +564,15 @@ std::vector<velox::RowVectorPtr> DagScheduler::runStages(
     *outputShuffle = *states.back().stage->shuffleId;
     return {};
   }
-  std::vector<velox::RowVectorPtr> rows;
   const auto& result = states.back();
+  if (outputFiles != nullptr) {
+    *writtenRows = 0;
+    for (auto rows : result.resultRows) {
+      *writtenRows += rows;
+    }
+    return {};
+  }
+  std::vector<velox::RowVectorPtr> rows;
   const auto type = result.stage->plan->outputType();
   for (const auto& pages : result.resultPages) {
     for (const auto& page : pages) {
@@ -645,6 +668,9 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
         }
       }
       task.resultTask = state.isResult;
+      if (state.isResult && job.outputFiles != nullptr) {
+        task.outputFiles = *job.outputFiles;
+      }
       task.config = options_.config;
     }
 
@@ -675,6 +701,7 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
         }
         if (state.isResult) {
           state.resultPages[p] = std::move(result->resultPages);
+          state.resultRows[p] = result->outputRows;
         }
       }
       for (const auto& failure : taskSet.fetchFailures) {
