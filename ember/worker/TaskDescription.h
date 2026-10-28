@@ -47,6 +47,10 @@ struct TaskDescription {
   /// Set on a result task whose rows go to files; it returns only counts.
   std::optional<OutputFiles> outputFiles;
 
+  /// The machine whose executors may run the task, because it reads files
+  /// local to it; empty for any.
+  std::string node;
+
   /// Velox query config, plus Ember's own keys.
   std::map<std::string, std::string> config;
 

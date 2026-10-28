@@ -25,11 +25,12 @@ workers.
 
 | Service | Method | From → to | Request → reply |
 |---------|--------|-----------|-----------------|
-| `DriverService` | `registerWorker` | worker → driver | worker id, address, slots → app name, heartbeat interval |
+| `DriverService` | `registerWorker` | worker → driver | worker id, address, slots, node → app name, heartbeat interval |
 | | `heartbeat` | worker → driver | worker id → whether the driver still knows it |
 | `WorkerService` | `launchTask` | driver → worker | `TaskDescription` bytes → `TaskResult` bytes |
 | | `removeShuffle` | driver → worker | shuffle id |
 | | `shutdown` | driver → worker | |
+| | `listFiles` | driver → worker | file format, path → the data files there, with sizes |
 | `ShuffleBlockService` | `fetchBlock` | worker → worker | shuffle, map, reduce id → the block's bytes, as an IOBuf |
 
 `WorkerService` extends `ShuffleBlockService`, so a worker serves both on one

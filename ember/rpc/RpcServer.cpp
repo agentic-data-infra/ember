@@ -32,7 +32,8 @@ class DriverService
     auto result = handler_->registerWorker(RegisterWorkerRequest{
         .workerId = std::move(*request->workerId()),
         .address = std::move(*request->address()),
-        .slots = *request->slots()});
+        .slots = *request->slots(),
+        .node = std::move(*request->node())});
     response.appName() = std::move(result.appName);
     response.heartbeatIntervalMs() = result.heartbeatIntervalMs;
   }
@@ -65,6 +66,17 @@ class WorkerService
 
   void sync_shutdown() override {
     handler_->shutdown();
+  }
+
+  void sync_listFiles(
+      std::vector<thrift::FileInfo>& response,
+      std::unique_ptr<std::string> schema,
+      std::unique_ptr<std::string> path) override {
+    for (auto& file : handler_->listFiles(*schema, *path)) {
+      auto& info = response.emplace_back();
+      info.path() = std::move(file.path);
+      info.size() = file.size;
+    }
   }
 
   folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(

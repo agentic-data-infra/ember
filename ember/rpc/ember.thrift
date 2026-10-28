@@ -23,6 +23,8 @@ struct RegisterWorkerRequest {
   /// executor's location in shuffle block URLs.
   2: string address;
   3: i32 slots = 1;
+  /// The machine the worker runs on, for tasks that read files local to it.
+  4: string node;
 }
 
 struct RegisterWorkerResponse {
@@ -48,6 +50,12 @@ struct BlockId {
   3: i32 reduceId;
 }
 
+/// A data file on a worker's machine.
+struct FileInfo {
+  1: string path;
+  2: i64 size;
+}
+
 /// Served by the driver, at its master URL ember://host:port.
 service DriverService {
   RegisterWorkerResponse registerWorker(1: RegisterWorkerRequest request);
@@ -67,4 +75,7 @@ service WorkerService extends ShuffleBlockService {
   void removeShuffle(1: i32 shuffleId);
   /// The application is over.
   void shutdown();
+  /// The data files a scan of 'path' in file format 'schema' reads on the
+  /// worker's machine.
+  list<FileInfo> listFiles(1: string schema, 2: string path);
 }

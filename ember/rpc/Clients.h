@@ -13,6 +13,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <folly/coro/Task.h>
 #include <folly/io/IOBuf.h>
@@ -89,6 +90,10 @@ class WorkerClient : public Client {
   folly::coro::Task<void> co_removeShuffle(int32_t shuffleId);
 
   folly::coro::Task<void> co_shutdown();
+
+  folly::coro::Task<std::vector<FileInfo>> co_listFiles(
+      std::string schema,
+      std::string path);
 
  private:
   struct Stub;

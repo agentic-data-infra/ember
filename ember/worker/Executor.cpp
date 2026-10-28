@@ -4,6 +4,7 @@
 
 #include <folly/executors/CPUThreadPoolExecutor.h>
 
+#include "axiom/connectors/file/FileHandler.h"
 #include "ember/RowPages.h"
 #include "ember/Runtime.h"
 #include "ember/shuffle/ShuffleConfig.h"
@@ -11,6 +12,7 @@
 #include "ember/worker/PartFileWriter.h"
 #include "ember/worker/TaskDescription.h"
 #include "velox/common/config/Config.h"
+#include "velox/common/file/FileSystems.h"
 #include "velox/common/time/Timer.h"
 #include "velox/core/QueryCtx.h"
 #include "velox/exec/PlanNodeStats.h"
@@ -62,6 +64,21 @@ Executor::~Executor() {
 
 void Executor::removeShuffle(int32_t shuffleId) {
   blockStore_->removeShuffle(shuffleId);
+}
+
+std::vector<rpc::FileInfo> Executor::listFiles(
+    const std::string& schema,
+    const std::string& path) {
+  initializeRuntime();
+  std::vector<rpc::FileInfo> files;
+  for (auto& file :
+       facebook::axiom::connector::file::handler(schema).listFiles(path)) {
+    const auto size = velox::filesystems::getFileSystem(file, nullptr)
+                          ->openFileForRead(file)
+                          ->size();
+    files.push_back(rpc::FileInfo{.path = std::move(file), .size = size});
+  }
+  return files;
 }
 
 std::string Executor::runTask(const std::string& bytes) {

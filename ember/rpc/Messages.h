@@ -17,12 +17,20 @@ struct RegisterWorkerRequest {
   /// executor's location in shuffle block URLs.
   std::string address;
   int32_t slots{1};
+  /// The machine the worker runs on, for tasks that read files local to it.
+  std::string node;
 };
 
 struct RegisterWorkerResponse {
   std::string appName;
   /// How often the worker sends heartbeats.
   int64_t heartbeatIntervalMs{2000};
+};
+
+/// A data file on a worker's machine.
+struct FileInfo {
+  std::string path;
+  int64_t size{0};
 };
 
 /// One reduce partition of one map output.

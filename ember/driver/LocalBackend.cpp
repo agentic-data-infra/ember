@@ -30,11 +30,21 @@ LocalBackend::~LocalBackend() {
   stop();
 }
 
-void LocalBackend::launchTask(std::string task, ResultCallback onResult) {
+void LocalBackend::launchTask(
+    std::string task,
+    const std::string& /*node*/,
+    ResultCallback onResult) {
   VELOX_CHECK_NOT_NULL(slots_, "Local backend is stopped");
   slots_->add([this, task = std::move(task), onResult = std::move(onResult)]() {
     onResult(executor_->runTask(task));
   });
+}
+
+std::vector<rpc::FileInfo> LocalBackend::listFiles(
+    const std::string& /*node*/,
+    const std::string& schema,
+    const std::string& path) {
+  return Executor::listFiles(schema, path);
 }
 
 void LocalBackend::removeShuffle(int32_t shuffleId) {

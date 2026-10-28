@@ -268,6 +268,40 @@ class StageLog {
   std::vector<driver::StageAttemptInfo> attempts_;
 };
 
+// With node-local files, the driver lists the input on each node and runs
+// each node's scan tasks only on its workers. The two simulated nodes share
+// this machine's disk, so each finds the same files and every word counts
+// twice.
+TEST_F(ClusterTest, nodeLocalFilesRunOnTheirNode) {
+  test::writeCorpus(dir_ / "input", 4, 1000);
+  auto expected = test::shellWordCount(dir_ / "input");
+  for (auto& [word, count] : expected) {
+    count *= 2;
+  }
+  startWorkers(/*count=*/2, /*slots=*/2, {"--node=node-a"});
+  startWorkers(/*count=*/1, /*slots=*/2, {"--node=node-b"});
+  StageLog log;
+  auto& session = startDriver(
+      3, log.listener(), {{driver::DagScheduler::kNodeLocalFiles, "true"}});
+  EXPECT_EQ(
+      test::toMap(test::wordCount(session, (dir_ / "input").string()).collect()),
+      expected);
+
+  // The scan stage runs first: node-a's tasks, then as many of node-b's.
+  const auto& scan = log.attempts().front();
+  ASSERT_FALSE(scan.stageKey.has_value());
+  const auto numTasks = static_cast<int32_t>(scan.outputLocations.size());
+  ASSERT_GE(numTasks, 2);
+  ASSERT_EQ(numTasks % 2, 0);
+  for (const auto& [mapId, location] : scan.outputLocations) {
+    if (mapId < numTasks / 2) {
+      EXPECT_NE(location, workerAddresses_[2]) << mapId;
+    } else {
+      EXPECT_EQ(location, workerAddresses_[2]) << mapId;
+    }
+  }
+}
+
 // A worker dies after the map stage, holding some of its output. The driver
 // sees it go, and the lost map tasks run again on the others before the
 // reduce stage reads them.

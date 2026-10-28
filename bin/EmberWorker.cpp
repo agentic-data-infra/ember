@@ -1,7 +1,7 @@
 // ember-worker: runs an Ember driver's tasks.
 //
 //   ember-worker --driver=host:port [--slots=N] [--port=P] [--host=name]
-//                [--local_dir=dir] [--persistent] [--fetch_timeout_ms=T]
+//                [--node=name] [--local_dir=dir] [--persistent] [--fetch_timeout_ms=T]
 //
 // Start one per machine (or several on one machine), pointed at the address
 // in the driver's master URL ember://host:port. The worker registers with the
@@ -26,6 +26,10 @@ DEFINE_int32(threads, 0, "Threads for Velox drivers; 0 for 2 * slots.");
 DEFINE_int32(port, 0, "Port to serve tasks and shuffle blocks on; 0 for any.");
 DEFINE_string(bind_host, "", "Interface to serve on; empty for all.");
 DEFINE_string(host, "", "Host name others reach this worker by.");
+DEFINE_string(
+    node,
+    "",
+    "The machine this worker runs on, for node-local files; default the host name.");
 DEFINE_string(local_dir, "", "Directory for shuffle files; default <tmp>/ember.");
 DEFINE_bool(persistent, false, "Wait for the next driver when one is done.");
 DEFINE_bool(
@@ -64,6 +68,7 @@ int main(int argc, char** argv) {
   options.driver = ember::rpc::HostAndPort::parse(FLAGS_driver);
   options.bindHost = FLAGS_bind_host;
   options.advertisedHost = FLAGS_host;
+  options.node = FLAGS_node;
   options.port = static_cast<uint16_t>(FLAGS_port);
   options.slots = FLAGS_slots > 0
       ? FLAGS_slots

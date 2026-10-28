@@ -18,6 +18,20 @@ Source stages run one task per split; other stages run as many tasks as the
 shuffle they read has partitions; the result stage runs one task, unless a
 sort is range-partitioned (below). Stages run one after another.
 
+## Node-local files
+
+With `ember.files.node_local=true`, each node (machine) has its own files at
+a scan's path, as on local disks: the sort benchmark's input, generated on
+each node. The driver asks one worker per node for the files there
+(`listFiles`), cuts them into ranges as usual, and packs each node's ranges
+into tasks of their own that the `ClusterBackend` sends only to that node's
+workers. A node that loses all its workers fails its waiting tasks after a
+minute. The driver still plans the scan from its own view of the
+path, so it must exist there too (e.g. the driver runs on one of the nodes),
+and the nodes are those with workers when the job starts. Stages that read
+node-local files have no key, since the driver does not know the files.
+Only stages with one scan are supported.
+
 ## Range-partitioned sort
 
 A global sort without a limit runs as one merge task: the stage before it

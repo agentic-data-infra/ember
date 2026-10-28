@@ -14,6 +14,7 @@
 #include <memory>
 #include <string>
 
+#include "ember/rpc/Messages.h"
 #include "ember/shuffle/FileShuffle.h"
 
 namespace folly {
@@ -56,6 +57,13 @@ class Executor {
 
   /// Deletes the shuffle files of 'shuffleId'.
   void removeShuffle(int32_t shuffleId);
+
+  /// The data files a scan of 'path' in file format 'schema' reads on this
+  /// machine, with their sizes: 'path' itself, or the files of a directory
+  /// path ending in '/'.
+  static std::vector<rpc::FileInfo> listFiles(
+      const std::string& schema,
+      const std::string& path);
 
  private:
   const ExecutorOptions options_;

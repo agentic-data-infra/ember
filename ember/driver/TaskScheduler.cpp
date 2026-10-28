@@ -39,6 +39,7 @@ TaskSetResult TaskScheduler::runTaskSet(std::vector<TaskDescription> tasks) {
   std::function<void(size_t)> launch = [this, set, &launch](size_t index) {
     backend_->launchTask(
         set->tasks[index].serialize(),
+        set->tasks[index].node,
         [this, set, index, &launch](std::string bytes) {
           auto result = TaskResult::deserialize(bytes);
           bool relaunch = false;

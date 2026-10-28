@@ -1,5 +1,8 @@
 #include "ember/driver/ClusterBackend.h"
 
+#include <algorithm>
+#include <set>
+
 #include <folly/coro/BlockingWait.h>
 #include <folly/coro/Collect.h>
 #include <folly/coro/Timeout.h>
@@ -14,6 +17,7 @@ namespace ember::driver {
 namespace {
 constexpr auto kShutdownTimeout = std::chrono::seconds(5);
 constexpr auto kRemoveShuffleTimeout = std::chrono::seconds(30);
+constexpr auto kListFilesTimeout = std::chrono::seconds(60);
 constexpr auto kMonitorInterval = std::chrono::milliseconds(500);
 } // namespace
 
@@ -59,6 +63,7 @@ rpc::RegisterWorkerResponse ClusterBackend::registerWorker(
   auto worker = std::make_shared<WorkerInfo>();
   worker->id = request.workerId;
   worker->address = request.address;
+  worker->node = request.node;
   worker->slots = request.slots;
   worker->client = std::move(client);
   worker->lastHeartbeat = std::chrono::steady_clock::now();
@@ -76,8 +81,8 @@ rpc::RegisterWorkerResponse ClusterBackend::registerWorker(
       listener_.onExecutorAdded(worker->address);
     }
   }
-  LOG(INFO) << "Worker " << worker->address << " registered with "
-            << worker->slots << " slots";
+  LOG(INFO) << "Worker " << worker->address << " on node " << worker->node
+            << " registered with " << worker->slots << " slots";
   changed_.notify_all();
   dispatch();
   return rpc::RegisterWorkerResponse{
@@ -130,8 +135,42 @@ int32_t ClusterBackend::totalSlots() const {
   return slots;
 }
 
-void ClusterBackend::launchTask(std::string task, ResultCallback onResult) {
-  PendingTask pending{std::move(task), std::move(onResult)};
+std::vector<std::string> ClusterBackend::nodes() const {
+  std::set<std::string> nodes;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    for (const auto& [id, worker] : workers_) {
+      nodes.insert(worker->node);
+    }
+  }
+  return {nodes.begin(), nodes.end()};
+}
+
+std::vector<rpc::FileInfo> ClusterBackend::listFiles(
+    const std::string& node,
+    const std::string& schema,
+    const std::string& path) {
+  std::shared_ptr<rpc::WorkerClient> client;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    for (const auto& [id, worker] : workers_) {
+      if (worker->node == node) {
+        client = worker->client;
+        break;
+      }
+    }
+  }
+  VELOX_USER_CHECK_NOT_NULL(client, "No worker on node {}", node);
+  return folly::coro::blockingWait(folly::coro::timeout(
+      client->co_listFiles(schema, path), kListFilesTimeout));
+}
+
+void ClusterBackend::launchTask(
+    std::string task,
+    const std::string& node,
+    ResultCallback onResult) {
+  PendingTask pending{
+      .task = std::move(task), .node = node, .onResult = std::move(onResult)};
   {
     std::lock_guard<std::mutex> l(mutex_);
     if (!stopped_) {
@@ -150,21 +189,24 @@ void ClusterBackend::dispatch() {
   std::vector<std::pair<std::shared_ptr<WorkerInfo>, PendingTask>> launches;
   {
     std::lock_guard<std::mutex> l(mutex_);
-    while (!pending_.empty()) {
+    for (auto it = pending_.begin(); it != pending_.end();) {
       // The worker with the most free slots, to spread tasks out.
       std::shared_ptr<WorkerInfo> best;
       for (const auto& [id, worker] : workers_) {
         const auto free = worker->slots - worker->running;
-        if (free > 0 && (best == nullptr || free > best->slots - best->running)) {
+        if (free > 0 && (it->node.empty() || it->node == worker->node) &&
+            (best == nullptr || free > best->slots - best->running)) {
           best = worker;
         }
       }
       if (best == nullptr) {
-        break;
+        // Tasks for other nodes may still find a slot.
+        ++it;
+        continue;
       }
       ++best->running;
-      launches.emplace_back(best, std::move(pending_.front()));
-      pending_.pop_front();
+      launches.emplace_back(best, std::move(*it));
+      it = pending_.erase(it);
     }
   }
   for (auto& [worker, task] : launches) {
@@ -246,6 +288,37 @@ void ClusterBackend::monitor() {
     }
     for (const auto& [worker, reason] : lost) {
       removeWorkerLocked(worker, reason);
+    }
+    // Tasks for a node that has had no worker for too long.
+    std::vector<PendingTask> orphans;
+    for (auto it = pending_.begin(); it != pending_.end();) {
+      const bool nodeMissing = !it->node.empty() &&
+          std::none_of(workers_.begin(), workers_.end(), [&](const auto& w) {
+            return w.second->node == it->node;
+          });
+      if (!nodeMissing) {
+        it->nodeMissingSince.reset();
+      } else if (!it->nodeMissingSince.has_value()) {
+        it->nodeMissingSince = now;
+      } else if (now - *it->nodeMissingSince > options_.noWorkersTimeout) {
+        orphans.push_back(std::move(*it));
+        it = pending_.erase(it);
+        continue;
+      }
+      ++it;
+    }
+    if (!orphans.empty()) {
+      l.unlock();
+      for (auto& task : orphans) {
+        const auto node = task.node;
+        fail(
+            std::move(task),
+            fmt::format(
+                "No worker on node {} for {} ms",
+                node,
+                options_.noWorkersTimeout.count()));
+      }
+      l.lock();
     }
     if (workers_.empty() && !pending_.empty() &&
         now - noWorkersSince_ > options_.noWorkersTimeout) {

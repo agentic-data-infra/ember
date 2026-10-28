@@ -63,6 +63,7 @@ folly::coro::Task<RegisterWorkerResponse> DriverClient::co_registerWorker(
   message.workerId() = std::move(request.workerId);
   message.address() = std::move(request.address);
   message.slots() = request.slots;
+  message.node() = std::move(request.node);
   auto response = co_await detail::call(
       *connection_, stub_->client->co_registerWorker(message));
   co_return RegisterWorkerResponse{
@@ -108,6 +109,19 @@ folly::coro::Task<void> WorkerClient::co_removeShuffle(int32_t shuffleId) {
 
 folly::coro::Task<void> WorkerClient::co_shutdown() {
   co_await detail::call(*connection_, stub_->client->co_shutdown());
+}
+
+folly::coro::Task<std::vector<FileInfo>> WorkerClient::co_listFiles(
+    std::string schema,
+    std::string path) {
+  auto files = co_await detail::call(
+      *connection_, stub_->client->co_listFiles(schema, path));
+  std::vector<FileInfo> result;
+  for (auto& file : files) {
+    result.push_back(
+        FileInfo{.path = std::move(*file.path()), .size = *file.size()});
+  }
+  co_return result;
 }
 
 struct ShuffleBlockClient::Stub
