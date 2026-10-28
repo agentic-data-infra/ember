@@ -1,7 +1,7 @@
 // Ember's scheduler and shuffle end to end: stage plans, task messages,
 // retries, recomputing lost shuffle outputs, byte-range splits of text and
-// Parquet files, packing small files, spills, and agreement with Axiom's
-// in-process LocalRunner.
+// Parquet files, packing small files, spills, range-partitioned sorts, and
+// agreement with Axiom's in-process LocalRunner.
 
 #include <gtest/gtest.h>
 
@@ -1060,6 +1060,86 @@ TEST_F(SchedulerTest, kilnReuseNeedsTheKilnStore) {
   auto [second, secondBackend] = scheduler(config);
   second->runJob(*plan, pool_.get());
   EXPECT_EQ(secondBackend->totalLaunches(), firstBackend->totalLaunches());
+}
+
+TEST_F(SchedulerTest, rangeSortStages) {
+  auto path = writeCorpus(3, 100);
+  auto lines = ember_->read().text(path);
+  auto [dag, backend] =
+      scheduler({{DagScheduler::kRangeSortPartitions, "4"}});
+
+  // The sorting stage writes 4 ranges of its first key, and the result stage
+  // merges each range in its own task.
+  auto stages = dag->stagePlan(
+      *lines.orderBy(col("value").desc())
+           .select(length(col("value")).as("n"))
+           .physicalPlan());
+  ASSERT_EQ(stages.stages.size(), 2) << stages.toString();
+  auto write = std::dynamic_pointer_cast<const shuffle::ShuffleWriteNode>(
+      stages.stages[0].plan);
+  ASSERT_NE(write, nullptr);
+  EXPECT_EQ(write->numPartitions(), 4);
+  EXPECT_EQ(
+      write->partitionFunctionSpec()->toString(), "RANGE(0 DESC NULLS LAST)");
+  EXPECT_EQ(stages.resultStage().numTasks, 4);
+  for (const auto& stage : stages.stages) {
+    auto copy = velox::ISerializable::deserialize<core::PlanNode>(
+        folly::parseJson(folly::toJson(stage.fragment)), pool_.get());
+    EXPECT_EQ(copy->toString(true, true), stage.plan->toString(true, true));
+  }
+
+  // A limit, or a first key that is not a string, keeps the one merge task.
+  for (const auto& df :
+       {lines.orderBy(col("value")).limit(5), wordCount(path)}) {
+    auto plan = dag->stagePlan(*df.physicalPlan());
+    EXPECT_EQ(plan.resultStage().numTasks, 1) << plan.toString();
+  }
+}
+
+TEST_F(SchedulerTest, rangeSortMatchesMergeSort) {
+  // Lines of random printable characters, so that several ranges get rows.
+  std::mt19937 rng(11);
+  {
+    std::ofstream out(dir_ / "input" / "lines.txt");
+    for (int i = 0; i < 5000; ++i) {
+      std::string line(1 + rng() % 12, ' ');
+      for (auto& c : line) {
+        c = static_cast<char>(0x21 + rng() % 0x5e);
+      }
+      out << line << "\n";
+    }
+  }
+  auto lines = ember_->read().text((dir_ / "input").string() + "/");
+  // About half the keys are null.
+  auto withNulls = lines.select(
+      expr("CASE WHEN value >= 'P' THEN value END").as("key"), col("value"));
+  std::vector<std::pair<std::string, Dataframe>> queries = {
+      {"ascending", lines.orderBy(col("value"))},
+      {"descending", lines.orderBy(col("value").desc())},
+      {"projected",
+       lines.orderBy(col("value"))
+           .select(col("value"), length(col("value")).as("n"))
+           .filter(col("n") > 3)},
+      {"nullsFirst", withNulls.orderBy(col("key"), col("value"))},
+      {"nullsLast", withNulls.orderBy(col("key").desc(), col("value"))},
+  };
+  auto [merge, mergeBackend] = scheduler();
+  auto [ranges, rangesBackend] =
+      scheduler({{DagScheduler::kRangeSortPartitions, "4"}});
+  for (const auto& [query, df] : queries) {
+    SCOPED_TRACE(query);
+    auto plan = df.physicalPlan();
+    auto expected = toStrings(merge->runJob(*plan, pool_.get()));
+    ASSERT_FALSE(expected.empty());
+    if (query.starts_with("nulls")) {
+      EXPECT_EQ(expected.front().starts_with("{null"), query == "nullsFirst");
+      EXPECT_EQ(expected.back().starts_with("{null"), query == "nullsLast");
+    }
+    const auto resultStage = ranges->stagePlan(*plan).resultStage().stageId;
+    const auto launches = rangesBackend->launches(resultStage);
+    EXPECT_EQ(toStrings(ranges->runJob(*plan, pool_.get())), expected);
+    EXPECT_EQ(rangesBackend->launches(resultStage) - launches, 4);
+  }
 }
 
 } // namespace

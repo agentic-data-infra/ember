@@ -7,6 +7,7 @@
 #include "ember/CachedTable.h"
 #include "ember/FileSerde.h"
 #include "ember/driver/StageKey.h"
+#include "ember/shuffle/RangePartitionFunction.h"
 #include "ember/shuffle/ShuffleRead.h"
 #include "ember/shuffle/ShuffleWrite.h"
 
@@ -157,6 +158,68 @@ void materializeOutput(StagePlan& plan, velox::memory::MemoryPool* pool) {
       velox::ISerializable::deserialize<core::PlanNode>(last.fragment, pool);
 }
 
+// Range-partitions a global sort (see StagePlan.h). It applies when the
+// result stage merges one gathered shuffle under row-wise nodes only (no
+// limit), and the first sort key is a string column.
+void rangeSort(
+    StagePlan& plan,
+    int32_t numPartitions,
+    velox::memory::MemoryPool* pool) {
+  auto& result = plan.stages.back();
+  if (result.shuffleInputs.size() != 1 ||
+      result.shuffleInputs[0].broadcast ||
+      result.shuffleInputs[0].cacheId.has_value()) {
+    return;
+  }
+  auto node = result.plan;
+  while (node->is<core::ProjectNode>() || node->is<core::FilterNode>()) {
+    node = node->sources()[0];
+  }
+  const auto* merge = node->as<shuffle::ShuffleReadNode>();
+  if (merge == nullptr || !merge->isMerge()) {
+    return;
+  }
+  auto parent = std::find_if(
+      plan.stages.begin(), plan.stages.end(), [&](const Stage& stage) {
+        return stage.shuffleId == merge->shuffleId();
+      });
+  VELOX_CHECK(parent != plan.stages.end());
+  const auto* write = parent->plan->as<shuffle::ShuffleWriteNode>();
+  VELOX_CHECK_NOT_NULL(write);
+  if (write->kind() != shuffle::ShuffleWriteNode::Kind::kPartitioned ||
+      write->numPartitions() != 1) {
+    return;
+  }
+
+  const auto* exchange = merge->exchange()->as<core::MergeExchangeNode>();
+  VELOX_CHECK_NOT_NULL(exchange);
+  const auto& key = exchange->sortingKeys()[0];
+  const auto& order = exchange->sortingOrders()[0];
+  if (key->type()->kind() != velox::TypeKind::VARCHAR &&
+      key->type()->kind() != velox::TypeKind::VARBINARY) {
+    return;
+  }
+  const auto channel = write->outputType()->getChildIdx(key->name());
+
+  auto ranges = std::make_shared<shuffle::ShuffleWriteNode>(
+      write->id(),
+      write->shuffleId(),
+      shuffle::ShuffleWriteNode::Kind::kPartitioned,
+      std::vector<core::TypedExprPtr>{key},
+      numPartitions,
+      std::make_shared<shuffle::RangePartitionFunctionSpec>(
+          channel, order.isAscending(), order.isNullsFirst()),
+      write->outputType(),
+      write->serdeKind(),
+      write->sources()[0]);
+  auto fragment = ranges->serialize();
+  fragment["sources"][0] = std::move(parent->fragment["sources"][0]);
+  parent->fragment = std::move(fragment);
+  parent->plan =
+      velox::ISerializable::deserialize<core::PlanNode>(parent->fragment, pool);
+  result.numTasks = numPartitions;
+}
+
 } // namespace
 
 StagePlan planStages(
@@ -164,7 +227,8 @@ StagePlan planStages(
     velox::memory::MemoryPool* pool,
     const std::map<std::string, std::string>& keyConfig,
     const CachedOutputResolver& cachedOutput,
-    bool materialize) {
+    bool materialize,
+    int32_t rangeSortPartitions) {
   const auto& fragments = plan.fragments();
   VELOX_CHECK(!fragments.empty());
 
@@ -261,6 +325,9 @@ StagePlan planStages(
       result.resultStage().numTasks.value_or(0),
       1,
       "The result stage must run one task");
+  if (rangeSortPartitions > 0) {
+    rangeSort(result, rangeSortPartitions, pool);
+  }
   if (materialize) {
     materializeOutput(result, pool);
   }

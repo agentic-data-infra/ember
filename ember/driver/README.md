@@ -15,8 +15,22 @@ Turns an optimized plan into stages and runs them.
 | `ClusterBackend` | `ember://host:port`: serves `DriverService` on the port; workers register there with their address and slots, and the backend sends each task to the worker with the most free slots as a `launchTask` call, whose reply is the task result. A worker whose connection breaks or that misses heartbeats (`ember.cluster.heartbeat_timeout_ms`) is dropped: its running tasks fail and are retried elsewhere, and the listener reports its location lost. |
 
 Source stages run one task per split; other stages run as many tasks as the
-shuffle they read has partitions; the result stage runs one task. Stages run
-one after another.
+shuffle they read has partitions; the result stage runs one task, unless a
+sort is range-partitioned (below). Stages run one after another.
+
+## Range-partitioned sort
+
+A global sort without a limit runs as one merge task: the stage before it
+sorts each of its partitions and gathers them, and the result task merges
+them. With `ember.sort.range_partitions=N`, `StagePlan` makes that stage
+write N ranges of the first sort key instead (`RangePartitionFunction` in
+`ember/shuffle`), and the result stage runs N merge tasks, one per range. The
+driver concatenates their rows in partition order, which is sorted order. Row-
+wise nodes (project, filter) may sit above the merge; a limit keeps the single
+merge task. The ranges are fixed slices of the key's first 8 bytes, with no
+sampling, so they balance only uniformly random keys such as gensort's. Only
+VARCHAR and VARBINARY first keys are range-partitioned; other sorts keep the
+merge task.
 
 ## Lost shuffle outputs
 
