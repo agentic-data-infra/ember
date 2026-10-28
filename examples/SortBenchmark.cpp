@@ -17,7 +17,9 @@
 // To sort more than fits in memory, add "spill_enabled=true
 // query_max_memory_per_node=<bytes per task, e.g. 2GB>", and keep
 // ember.shuffle.spill_threshold_bytes (64MB by default) well below that
-// limit: a map task holds both its sort and its shuffle buffer.
+// limit: a map task holds both its sort and its shuffle buffer. With the
+// shuffle in Kiln (ember.shuffle.store=kiln), add
+// ember.shuffle.kiln.tier=localfs when it is bigger than Kiln's DRAM.
 
 #include <chrono>
 #include <iostream>

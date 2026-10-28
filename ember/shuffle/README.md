@@ -26,6 +26,11 @@ With `ember.shuffle.store=kiln` and `ember.shuffle.kiln.metadata` set to the
 Kiln metadata server (`host:port`, or Kiln's URL list
 `tcp://host:port,rdma://host:port`), a map task's output goes to the Kiln
 cluster instead: one chunk in Kiln's DRAM tier, laid out like the data file.
+With `ember.shuffle.kiln.tier=localfs` the chunks go to Kiln's local-disk
+tier instead, for shuffles bigger than Kiln's DRAM: a DRAM tier that is full
+of chunks still being written fails the map tasks, and one full of committed
+chunks evicts them, which makes reduce tasks recompute them. Kiln serves
+local-disk blocks over TCP only, not shared memory or RDMA.
 The map task's `MapStatus` names the chunk, `kiln://<metadata>/<chunk>`,
 rather than the executor, and the driver turns the partition lengths into
 block URLs with byte ranges,

@@ -118,6 +118,7 @@ class KilnShuffleWriter : public PartitionedPageWriter {
   KilnShuffleWriter(
       std::shared_ptr<ShuffleBlockStore> store,
       std::string metadata,
+      kiln::Tier tier,
       int32_t shuffleId,
       int32_t mapId,
       int32_t numPartitions,
@@ -130,14 +131,15 @@ class KilnShuffleWriter : public PartitionedPageWriter {
             numPartitions,
             std::move(attemptTag),
             spillThreshold),
-        metadata_{std::move(metadata)} {}
+        metadata_{std::move(metadata)},
+        tier_{tier} {}
 
  protected:
   MapStatus commitOutput() override {
     const auto cluster = kilnCluster(metadata_);
     const auto& client = cluster.client;
     const auto& pool = cluster.pool;
-    auto chunk = blockingWait(client->co_create());
+    auto chunk = blockingWait(client->co_create({.tier = tier_}));
     std::vector<int64_t> offsets;
     try {
       auto pooled = pool->acquire();
@@ -191,6 +193,7 @@ class KilnShuffleWriter : public PartitionedPageWriter {
 
  private:
   const std::string metadata_;
+  const kiln::Tier tier_;
 };
 
 } // namespace
@@ -214,14 +217,20 @@ std::pair<std::string, std::string> parseKilnLocation(
 std::unique_ptr<ShuffleWriter> createKilnWriter(
     std::shared_ptr<ShuffleBlockStore> store,
     std::string metadata,
+    const std::string& tier,
     int32_t shuffleId,
     int32_t mapId,
     int32_t numPartitions,
     const std::string& attemptTag,
     int64_t spillThreshold) {
+  VELOX_USER_CHECK(
+      tier == "dram" || tier == "localfs",
+      "Kiln shuffle tier must be dram or localfs, not {}",
+      tier);
   return std::make_unique<KilnShuffleWriter>(
       std::move(store),
       std::move(metadata),
+      kiln::parseTier(tier),
       shuffleId,
       mapId,
       numPartitions,

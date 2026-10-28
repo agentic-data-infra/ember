@@ -1,6 +1,6 @@
 // The Kiln shuffle store against an in-process Kiln cluster: one chunk per
 // map output, block reads by byte range, spills, empty outputs, first commit
-// wins, and removed chunks.
+// wins, removed chunks, and the local-FS tier.
 //
 // With $EMBER_TEST_KILN_METADATA set (Kiln's URL list), the tests use that
 // cluster instead; with $EMBER_TEST_KILN_RDMA=1 too, rdmaTransfersWithoutCopies
@@ -12,11 +12,13 @@
 #include <cstdlib>
 #include <filesystem>
 
+#include <folly/ScopeGuard.h>
 #include <folly/coro/BlockingWait.h>
 
 #include "ember/shuffle/KilnShuffle.h"
 #include "kiln/client/Client.h"
 #include "kiln/local/LocalCluster.h"
+#include "velox/common/base/Exceptions.h"
 
 namespace ember::shuffle {
 namespace {
@@ -28,7 +30,7 @@ class KilnShuffleTest : public testing::Test {
   static void SetUpTestSuite() {
     if (std::getenv("EMBER_TEST_KILN_METADATA") == nullptr) {
       cluster_ = new kiln::local::LocalCluster(kiln::local::LocalClusterOptions{
-          .dramServers = 1, .localFsServers = 0});
+          .dramServers = 1, .localFsServers = 1});
     }
   }
 
@@ -60,10 +62,12 @@ class KilnShuffleTest : public testing::Test {
       int32_t mapId,
       int32_t numPartitions,
       const std::string& attemptTag = "attempt0",
-      int64_t spillThreshold = ShuffleBlockStore::kDefaultSpillThreshold) {
+      int64_t spillThreshold = ShuffleBlockStore::kDefaultSpillThreshold,
+      const std::string& tier = "dram") {
     return createKilnWriter(
         store_,
         metadata(),
+        tier,
         shuffleId,
         mapId,
         numPartitions,
@@ -238,6 +242,80 @@ TEST_F(KilnShuffleTest, removedChunkFailsTheFetch) {
       kiln::ChunkId::parse(parseKilnLocation(status.location).second);
   ASSERT_TRUE(folly::coro::blockingWait(kilnClient(metadata())->co_remove(chunk)));
   EXPECT_THROW(readBlock(status, 0), std::exception);
+}
+
+TEST_F(KilnShuffleTest, localFsTier) {
+  auto mapWriter = writer(8, 0, 2, "attempt0",
+      ShuffleBlockStore::kDefaultSpillThreshold, "localfs");
+  mapWriter->collect(0, folly::IOBuf::copyBuffer("on disk"));
+  mapWriter->collect(1, folly::IOBuf::copyBuffer("also on disk"));
+  auto status = mapWriter->commit();
+  EXPECT_EQ(readBlock(status, 0), (std::vector<std::string>{"on disk"}));
+  EXPECT_EQ(readBlock(status, 1), (std::vector<std::string>{"also on disk"}));
+
+  const auto chunk =
+      kiln::ChunkId::parse(parseKilnLocation(status.location).second);
+  auto info = folly::coro::blockingWait(kilnClient(metadata())->co_stat(chunk));
+  ASSERT_EQ(info.replicas.size(), 1);
+  EXPECT_EQ(info.replicas[0].tier, kiln::Tier::kLocalFs);
+}
+
+TEST_F(KilnShuffleTest, unknownTierFails) {
+  EXPECT_THROW(
+      writer(9, 0, 1, "attempt0", ShuffleBlockStore::kDefaultSpillThreshold,
+          "objectstore"),
+      facebook::velox::VeloxUserError);
+}
+
+// A shuffle bigger than Kiln's DRAM loses its first map outputs to eviction
+// in the DRAM tier, and keeps them all in the larger local-FS tier.
+TEST(KilnTierTest, localFsHoldsMoreThanDram) {
+  // 8 MiB of DRAM, 16 MiB of local FS. Evicted blocks are reused at once,
+  // so reading an evicted output fails or finds another output's bytes.
+  kiln::local::LocalCluster cluster(kiln::local::LocalClusterOptions{
+      .dramServers = 1,
+      .localFsServers = 2,
+      .regionSize = 8 << 20,
+      .metadata = {.gracePeriod = std::chrono::milliseconds(0)}});
+  const auto metadata = cluster.metadataAddress().toString();
+  const auto dir = fs::temp_directory_path() /
+      fmt::format("ember_kiln_tier_{}", ::getpid());
+  auto store = std::make_shared<ShuffleBlockStore>("test-executor", dir.string());
+  SCOPE_EXIT {
+    fs::remove_all(dir);
+  };
+
+  // Six map outputs of two 1 MiB Kiln blocks each, 12 MiB in all, each of
+  // its own letter.
+  auto data = [](int32_t mapId) {
+    return std::string((2 << 20) - 4, 'a' + mapId);
+  };
+  auto readable = [&](const std::string& tier, int32_t shuffleId) {
+    std::vector<MapStatus> outputs;
+    for (int32_t mapId = 0; mapId < 6; ++mapId) {
+      auto mapWriter = createKilnWriter(
+          store, metadata, tier, shuffleId, mapId, 1, "attempt0",
+          ShuffleBlockStore::kDefaultSpillThreshold);
+      mapWriter->collect(0, folly::IOBuf::copyBuffer(data(mapId)));
+      outputs.push_back(mapWriter->commit());
+    }
+    int32_t count = 0;
+    for (int32_t mapId = 0; mapId < 6; ++mapId) {
+      const auto& status = outputs[mapId];
+      try {
+        auto block = folly::coro::blockingWait(co_fetchKilnBlock(blockUrl(
+            status.location, {shuffleId, mapId, 0}, 0,
+            status.partitionLengths[0])));
+        auto pages = splitFrames(std::move(block));
+        count += pages.size() == 1 &&
+            pages[0]->moveToFbString().toStdString() == data(mapId);
+      } catch (const std::exception&) {
+      }
+    }
+    return count;
+  };
+  EXPECT_LT(readable("dram", 0), 6);
+  EXPECT_EQ(readable("localfs", 1), 6);
 }
 
 TEST(KilnBlockUrlTest, roundTrip) {
