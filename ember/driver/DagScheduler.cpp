@@ -250,7 +250,7 @@ DagScheduler::scanSplits(const Stage& stage, JobContext& job) {
     }
 
     // Files split into byte ranges. A text range owns the lines that start in
-    // it, a Parquet range the row groups. A metadata table (e.g. a Parquet
+    // it, a gensort range the records, a Parquet range the row groups. A metadata table (e.g. a Parquet
     // file's row groups) reads whole files.
     const bool wholeFiles = !scan->tableHandle()
                                  ->asChecked<file::FileTableHandle>()

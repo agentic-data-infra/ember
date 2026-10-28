@@ -3,8 +3,8 @@
 //
 // Axiom's file connector handles do not serialize themselves. These subclasses
 // carry the same fields and add serialize()/create(); the connector reads them
-// as its own types. FileRangeSplit adds a byte range, which the text reader
-// uses to split one file across tasks.
+// as its own types. FileRangeSplit adds a byte range, which the text, gensort
+// and Parquet readers use to split one file across tasks.
 
 #pragma once
 
@@ -41,7 +41,8 @@ class SerializableFileColumnHandle
 };
 
 /// Bytes [start, start + length) of a file. A length of -1 means to the end.
-/// Text files are read line by line: a range owns the lines that start in it.
+/// Text files are read line by line: a range owns the lines that start in it
+/// (gensort files: the records).
 struct FileRangeSplit : public facebook::axiom::connector::file::FileSplit {
   FileRangeSplit(
       const std::string& connectorId,

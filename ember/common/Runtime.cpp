@@ -10,6 +10,7 @@
 #include "ember/CachedTable.h"
 #include "ember/FileSerde.h"
 #include "ember/FunctionRegistry.h"
+#include "ember/GensortFileHandler.h"
 #include "ember/ParquetFileHandler.h"
 #include "ember/TextFileHandler.h"
 #include "ember/shuffle/Shuffle.h"
@@ -53,6 +54,7 @@ void initializeRuntime() {
 
     registerParquetFileHandler();
     registerTextFileHandler();
+    registerGensortFileHandler();
     registerCachedTableHandler();
     auto connector =
         std::make_shared<axiom_connector::file::FileConnector>(kFileConnectorId);

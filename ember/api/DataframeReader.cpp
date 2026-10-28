@@ -3,6 +3,7 @@
 #include <filesystem>
 
 #include "ember/Dataframe.h"
+#include "ember/GensortFileHandler.h"
 #include "ember/Session.h"
 #include "ember/TextFileHandler.h"
 
@@ -49,6 +50,10 @@ Dataframe DataframeReader::text(const std::string& path) const {
 
 Dataframe DataframeReader::parquet(const std::string& path) const {
   return scan(session_, "parquet", path);
+}
+
+Dataframe DataframeReader::gensort(const std::string& path) const {
+  return scan(session_, kGensortSchema, path);
 }
 
 Dataframe DataframeReader::load(const std::string& path) const {

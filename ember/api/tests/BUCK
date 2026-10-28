@@ -42,3 +42,14 @@ cxx_test(
     # Archives must precede the prebuilt Velox/Axiom libraries they use.
     link_ordering = "topological",
 )
+
+cxx_test(
+    name = "gensort_test",
+    srcs = ["GensortTest.cpp"],
+    deps = [
+        "//ember/api:api",
+        "//ember/tests:test_main",
+    ],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+)
