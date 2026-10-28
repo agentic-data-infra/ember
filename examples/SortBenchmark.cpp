@@ -10,7 +10,9 @@
 // driver and waits for 'workers' (default 1) ember-worker processes started
 // with --driver=host:port.
 //
-// For now the sort runs in a single task and the driver writes the output.
+// The sort runs as one merge task, or, with
+// EMBER_CONF=ember.sort.range_partitions=N, as N range-sorted tasks. The
+// driver writes the output.
 
 #include <chrono>
 #include <fstream>
