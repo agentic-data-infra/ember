@@ -171,6 +171,9 @@ buck2 run //examples:sort_benchmark -- /data/sort-input /data/sorted
 scripts/gensort.sh validate /data/sorted /data/sort-input
 ```
 
+To run it on Kubernetes (a local kind cluster for now), see
+[deploy/README.md](deploy/README.md).
+
 ## Python
 
 `python/` binds the same API for Python, with results as pyarrow tables:

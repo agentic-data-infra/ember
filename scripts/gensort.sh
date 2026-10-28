@@ -6,10 +6,10 @@
 #   scripts/gensort.sh install
 #       Downloads gensort and valsort into $GENSORT_DIR
 #       (default ~/.cache/ember/gensort).
-#   scripts/gensort.sh generate <records> <dir> [files]
+#   scripts/gensort.sh generate <records> <dir> [files] [first]
 #       Writes <records> binary records into <dir>/part-00000 ... as
 #       <files> (default 1) files, together the same records as one gensort
-#       run would write.
+#       run would write, starting at record [first] (default 0).
 #   scripts/gensort.sh validate <output> [input]
 #       Checks that <output> (a file, or a directory whose files are read in
 #       name order) holds sorted records. With [input], also checks that it
@@ -80,9 +80,8 @@ case $cmd in
   generate)
     [[ $# -ge 2 ]] || usage
     install
-    records=$1 out=$2 files=${3:-1}
+    records=$1 out=$2 files=${3:-1} start=${4:-0}
     mkdir -p "$out"
-    start=0
     for ((f = 0; f < files; f++)); do
       # The first records % files files get one record more.
       n=$((records / files + (f < records % files ? 1 : 0)))
