@@ -134,9 +134,11 @@ EMBER_CONF="ember.shuffle.store=kiln ember.shuffle.kiln.metadata=tcp://meta:7470
 Clients use shared memory for storage servers on their own host and RDMA for
 the others; without an RDMA device, or in a default build, everything goes
 over TCP. See Kiln's README for Soft-RoCE (no RDMA NIC) and the transport
-rules. With `$EMBER_TEST_KILN_METADATA` (and `$EMBER_TEST_KILN_RDMA=1`),
-`kiln_shuffle_test` and `scheduler_test` run against an external cluster,
-and the former checks that reads and writes go over RDMA without copies.
+rules. In an RDMA build on a host with an RDMA device, `kiln_shuffle_test`
+checks that reads and writes go over RDMA without copies, against a cluster
+of its own with shared memory off (`shuffle::setKilnUseShm(false)`). With
+`$EMBER_TEST_KILN_METADATA`, `kiln_shuffle_test` and `scheduler_test` run
+their other tests against an external cluster.
 
 ## More examples
 
