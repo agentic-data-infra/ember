@@ -173,6 +173,7 @@ class ShuffleWrite : public exec::Operator {
           std::move(store),
           std::move(*metadata),
           config.get<std::string>(std::string(kKilnTier), "dram"),
+          config.get<uint64_t>(std::string(kKilnBucket), 0),
           node_->shuffleId(),
           task->destination(),
           node_->numPartitions(),

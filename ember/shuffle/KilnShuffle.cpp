@@ -118,6 +118,7 @@ class KilnShuffleWriter : public PartitionedPageWriter {
   KilnShuffleWriter(
       std::shared_ptr<ShuffleBlockStore> store,
       std::string metadata,
+      kiln::BucketId bucket,
       kiln::Placement placement,
       int32_t shuffleId,
       int32_t mapId,
@@ -132,6 +133,7 @@ class KilnShuffleWriter : public PartitionedPageWriter {
             std::move(attemptTag),
             spillThreshold),
         metadata_{std::move(metadata)},
+        bucket_{bucket},
         placement_{placement} {}
 
  protected:
@@ -141,7 +143,7 @@ class KilnShuffleWriter : public PartitionedPageWriter {
     const auto& pool = cluster.pool;
     // With the whole size known, an overflow placement puts all of the
     // output into one tier.
-    auto chunk = blockingWait(client->co_create(placement_, outputBytes()));
+    auto chunk = blockingWait(client->co_create(bucket_, placement_, outputBytes()));
     std::vector<int64_t> offsets;
     try {
       auto pooled = pool->acquire();
@@ -195,6 +197,7 @@ class KilnShuffleWriter : public PartitionedPageWriter {
 
  private:
   const std::string metadata_;
+  const kiln::BucketId bucket_;
   const kiln::Placement placement_;
 };
 
@@ -220,6 +223,7 @@ std::unique_ptr<ShuffleWriter> createKilnWriter(
     std::shared_ptr<ShuffleBlockStore> store,
     std::string metadata,
     const std::string& tier,
+    uint64_t bucket,
     int32_t shuffleId,
     int32_t mapId,
     int32_t numPartitions,
@@ -238,6 +242,7 @@ std::unique_ptr<ShuffleWriter> createKilnWriter(
   return std::make_unique<KilnShuffleWriter>(
       std::move(store),
       std::move(metadata),
+      bucket,
       placement,
       shuffleId,
       mapId,

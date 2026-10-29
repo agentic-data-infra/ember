@@ -14,6 +14,11 @@
 // ember.reuse.kiln, kept outputs in Kiln also go into Kiln's catalog, where
 // later programs find them (KilnMemo.h).
 //
+// With ember.shuffle.store=kiln, each shuffle the session writes goes into
+// a Kiln bucket of its own, which is deleted with the shuffle: after its job,
+// or for kept outputs, when they are replaced, uncached, or the session ends.
+// Outputs stored in Kiln's catalog keep their chunks until Kiln evicts them.
+//
 // Cached Dataframes: a stage that reads a cached table (CachedTable.h) first
 // materializes it, as a job of its own over the cached plan whose last stage
 // writes one shuffle partition per task. That output stays in the memo, under
@@ -34,6 +39,10 @@
 #include "ember/driver/MapOutputTracker.h"
 #include "ember/driver/StagePlan.h"
 #include "ember/driver/TaskScheduler.h"
+
+namespace kiln::client {
+class Client;
+}
 
 namespace ember::driver {
 
@@ -190,6 +199,12 @@ class DagScheduler {
   // Kiln's catalog, with ember.reuse.kiln.
   void storeInKiln(const std::string& key, int32_t shuffleId);
 
+  // Drops a shuffle's output: at the executors, in the tracker, and its Kiln
+  // bucket if it has one.
+  void removeShuffle(int32_t shuffleId);
+
+  void deleteKilnBucket(uint64_t bucket);
+
   const DagSchedulerOptions options_;
   const bool reuseOutputs_;
   const int32_t rangeSortPartitions_;
@@ -209,6 +224,13 @@ class DagScheduler {
   std::map<std::string, int32_t> memo_;
   // Kiln's catalog, with ember.reuse.kiln.
   const std::unique_ptr<KilnMemo> kilnMemo_;
+
+  // With ember.shuffle.store=kiln: the Kiln client, and the bucket of each
+  // shuffle the session wrote that has not been removed or stored in Kiln's
+  // catalog.
+  std::shared_ptr<kiln::client::Client> kiln_;
+  std::mutex bucketsMutex_;
+  std::map<int32_t, uint64_t> kilnBuckets_;
 };
 
 } // namespace ember::driver

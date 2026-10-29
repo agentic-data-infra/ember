@@ -11,7 +11,10 @@
 #include "ember/CachedTable.h"
 #include "ember/FileSerde.h"
 #include "ember/RowPages.h"
+#include "ember/shuffle/KilnShuffle.h"
+#include "ember/shuffle/ShuffleConfig.h"
 #include "ember/shuffle/ShuffleWrite.h"
+#include "kiln/client/Client.h"
 #include "velox/common/file/FileSystems.h"
 #include "velox/core/QueryCtx.h"
 #include "velox/exec/Exchange.h"
@@ -88,6 +91,17 @@ DagScheduler::DagScheduler(
           folly::to<bool>(options_.config.at(kNodeLocalFiles))},
       taskScheduler_{std::move(backend), options_.maxTaskAttempts},
       kilnMemo_{KilnMemo::fromConfig(options_.config)} {
+  if (auto store = options_.config.find(std::string(shuffle::kShuffleStore));
+      store != options_.config.end() && store->second == "kiln") {
+    auto metadata =
+        options_.config.find(std::string(shuffle::kKilnMetadata));
+    VELOX_USER_CHECK(
+        metadata != options_.config.end(),
+        "{}=kiln needs config {}",
+        shuffle::kShuffleStore,
+        shuffle::kKilnMetadata);
+    kiln_ = shuffle::kilnClient(metadata->second);
+  }
   for (const auto& [key, value] : options_.config) {
     if (!key.starts_with("ember.") || key == kMaxSplitBytes ||
         key == kNodeLocalFiles) {
@@ -114,6 +128,35 @@ DagScheduler::DagScheduler(
 
 DagScheduler::~DagScheduler() {
   backend().setExecutorListener({});
+  // Kept outputs go with the session.
+  for (const auto& [shuffleId, bucket] : kilnBuckets_) {
+    deleteKilnBucket(bucket);
+  }
+}
+
+void DagScheduler::removeShuffle(int32_t shuffleId) {
+  backend().removeShuffle(shuffleId);
+  mapOutputTracker_.unregisterShuffle(shuffleId);
+  std::optional<uint64_t> bucket;
+  {
+    std::lock_guard<std::mutex> l(bucketsMutex_);
+    if (auto it = kilnBuckets_.find(shuffleId); it != kilnBuckets_.end()) {
+      bucket = it->second;
+      kilnBuckets_.erase(it);
+    }
+  }
+  if (bucket.has_value()) {
+    deleteKilnBucket(*bucket);
+  }
+}
+
+void DagScheduler::deleteKilnBucket(uint64_t bucket) {
+  try {
+    folly::coro::blockingWait(kiln_->co_deleteBucket(bucket));
+  } catch (const std::exception& e) {
+    // Kiln evicts the chunks in time.
+    LOG(WARNING) << "Cannot delete Kiln bucket " << bucket << ": " << e.what();
+  }
 }
 
 StagePlan DagScheduler::stagePlan(const optimizer::MultiFragmentPlan& plan) {
@@ -193,7 +236,11 @@ void DagScheduler::storeInKiln(const std::string& key, int32_t shuffleId) {
     return;
   }
   try {
-    kilnMemo_->put(key, *maps);
+    if (kilnMemo_->put(key, *maps)) {
+      // Later programs read the chunks: they stay until Kiln evicts them.
+      std::lock_guard<std::mutex> l(bucketsMutex_);
+      kilnBuckets_.erase(shuffleId);
+    }
   } catch (const std::exception& e) {
     LOG(WARNING) << "Cannot store stage " << key << " in Kiln: " << e.what();
   }
@@ -428,8 +475,7 @@ bool DagScheduler::uncache(const std::string& id) {
     shuffleId = it->second;
     memo_.erase(it);
   }
-  backend().removeShuffle(*shuffleId);
-  mapOutputTracker_.unregisterShuffle(*shuffleId);
+  removeShuffle(*shuffleId);
   return true;
 }
 
@@ -546,15 +592,13 @@ std::vector<velox::RowVectorPtr> DagScheduler::runStages(
         }
         if (!reused.contains(it->second) && !written.contains(it->second)) {
           // The stored output did not fit this job; keep the new one.
-          backend().removeShuffle(it->second);
-          mapOutputTracker_.unregisterShuffle(it->second);
+          removeShuffle(it->second);
           it->second = shuffleId;
           storeInKiln(*key, shuffleId);
           continue;
         }
       }
-      backend().removeShuffle(shuffleId);
-      mapOutputTracker_.unregisterShuffle(shuffleId);
+      removeShuffle(shuffleId);
     }
   };
 
@@ -597,6 +641,12 @@ std::vector<velox::RowVectorPtr> DagScheduler::runStages(
       } else {
         written[*stage.shuffleId] = &state;
         mapOutputTracker_.registerShuffle(*stage.shuffleId, numTasks);
+        if (kiln_ != nullptr) {
+          const auto bucket =
+              folly::coro::blockingWait(kiln_->co_createBucket());
+          std::lock_guard<std::mutex> l(bucketsMutex_);
+          kilnBuckets_[*stage.shuffleId] = bucket;
+        }
       }
       shufflePartitions[*stage.shuffleId] =
           stage.plan->as<shuffle::ShuffleWriteNode>()->numPartitions();
@@ -727,6 +777,14 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
         task.outputFiles = *job.outputFiles;
       }
       task.config = options_.config;
+      if (stage.shuffleId.has_value()) {
+        std::lock_guard<std::mutex> l(bucketsMutex_);
+        if (auto it = kilnBuckets_.find(*stage.shuffleId);
+            it != kilnBuckets_.end()) {
+          task.config[std::string(shuffle::kKilnBucket)] =
+              std::to_string(it->second);
+        }
+      }
     }
 
     StageAttemptInfo info{
