@@ -1,6 +1,8 @@
 // Map outputs in Kiln (third-party/kiln), the "kiln" shuffle store.
 //
-// A map task's output is one Kiln chunk, laid out like a file shuffle data
+// A map task's output is one Kiln chunk, in Kiln's DRAM tier, its local-disk
+// tier, or DRAM while it has room and then local disk
+// (ember.shuffle.kiln.tier), laid out like a file shuffle data
 // file: the frames of reduce partition 0, then partition 1, and so on. Its
 // MapStatus names the chunk instead of the executor (kilnLocation()), and its
 // partition lengths give each block's byte range, which the driver puts into
@@ -33,12 +35,14 @@ std::pair<std::string, std::string> parseKilnLocation(
     const std::string& location);
 
 /// A writer for map task 'mapId' of shuffle 'shuffleId' that commits the
-/// output to the Kiln cluster of metadata server 'metadata' (as kilnClient()).
-/// It spills to 'store''s directory like a file shuffle writer and records
+/// output to the Kiln cluster of metadata server 'metadata' (as kilnClient()),
+/// in Kiln tier 'tier': "dram", "localfs", or "dram+localfs", DRAM if the
+/// whole output fits into Kiln's free DRAM, else local FS. It spills to 'store''s directory like a file shuffle writer and records
 /// the committed output in 'store', so that the executor reports it.
 std::unique_ptr<ShuffleWriter> createKilnWriter(
     std::shared_ptr<ShuffleBlockStore> store,
     std::string metadata,
+    const std::string& tier,
     int32_t shuffleId,
     int32_t mapId,
     int32_t numPartitions,

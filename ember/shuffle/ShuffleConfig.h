@@ -22,4 +22,10 @@ inline constexpr std::string_view kShuffleStore = "ember.shuffle.store";
 /// "tcp://host:port,rdma://host:port", or just "host:port".
 inline constexpr std::string_view kKilnMetadata = "ember.shuffle.kiln.metadata";
 
+/// The Kiln tier the "kiln" store writes map outputs to: "dram" (the
+/// default); "localfs", the storage servers' local disks; or "dram+localfs",
+/// each map output into DRAM if it fits into Kiln's free DRAM, else local
+/// disk, so that shuffles bigger than Kiln's DRAM neither fail nor evict.
+inline constexpr std::string_view kKilnTier = "ember.shuffle.kiln.tier";
+
 } // namespace ember::shuffle

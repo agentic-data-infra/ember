@@ -138,6 +138,9 @@ class PartitionedPageWriter : public ShuffleWriter {
   /// numPartitions + 1 offsets of the partitions.
   std::vector<int64_t> writePartitions(const Write& write);
 
+  /// The bytes writePartitions() writes.
+  int64_t outputBytes() const;
+
   /// A file name in the store's directory, unique to this attempt.
   std::string tmpPath(const std::string& suffix) const;
 
