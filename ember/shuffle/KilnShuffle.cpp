@@ -1,5 +1,7 @@
 #include "ember/shuffle/KilnShuffle.h"
 
+#include <atomic>
+
 #include <folly/ScopeGuard.h>
 #include <folly/Uri.h>
 #include <folly/coro/BlockingWait.h>
@@ -97,17 +99,22 @@ struct KilnCluster {
   std::shared_ptr<BufferPool> pool;
 };
 
+// See setKilnUseShm().
+std::atomic<bool> useShm{true};
+
 // One client per cluster: clients cache where chunks are and keep their
-// connections.
+// connections. They are never destroyed: at exit, folly's singletons may be
+// gone already, and closing an RDMA metadata client needs its timekeeper.
 KilnCluster kilnCluster(const std::string& metadata) {
   static std::mutex mutex;
-  static std::map<std::string, KilnCluster> clusters;
+  static auto* clusters = new std::map<std::string, KilnCluster>();
   std::lock_guard<std::mutex> l(mutex);
-  auto& cluster = clusters[metadata];
+  auto& cluster = (*clusters)[metadata];
   if (cluster.client == nullptr) {
     cluster.client =
         std::make_shared<kiln::client::Client>(kiln::client::ClientOptions{
-            .metadata = kiln::MetadataAddress::parse(metadata)});
+            .metadata = kiln::MetadataAddress::parse(metadata),
+            .useShm = useShm.load()});
     cluster.pool = std::make_shared<BufferPool>(cluster.client);
   }
   return cluster;
@@ -202,6 +209,10 @@ class KilnShuffleWriter : public PartitionedPageWriter {
 };
 
 } // namespace
+
+void setKilnUseShm(bool use) {
+  useShm = use;
+}
 
 std::shared_ptr<kiln::client::Client> kilnClient(const std::string& metadata) {
   return kilnCluster(metadata).client;

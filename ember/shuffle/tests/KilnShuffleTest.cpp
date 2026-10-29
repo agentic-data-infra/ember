@@ -3,15 +3,17 @@
 // wins, removed chunks, and the local-FS tier.
 //
 // With $EMBER_TEST_KILN_METADATA set (Kiln's URL list), the tests use that
-// cluster instead; with $EMBER_TEST_KILN_RDMA=1 too, rdmaTransfersWithoutCopies
-// checks that the client moves data over RDMA without copies, e.g. against a
-// `start_local_cluster.sh -R` cluster that runs as another host.
+// cluster instead. rdmaTransfersWithoutCopies checks that the client moves
+// data over RDMA without copies, against a cluster of its own; it needs a
+// -c kiln.rdma=true build and an RDMA device (e.g. Soft-RoCE's rxe0, from
+// rlib's scripts/setup-rxe.sh), else it skips.
 
 #include <gtest/gtest.h>
 
 #include <cstdlib>
 #include <filesystem>
 
+#include <folly/ScopeGuard.h>
 #include <folly/coro/BlockingWait.h>
 
 #include "ember/shuffle/KilnShuffle.h"
@@ -211,15 +213,32 @@ TEST_F(KilnShuffleTest, manyBlocksHeldAtOnce) {
   }
 }
 
+// Against its own cluster, whose metadata and DRAM servers serve RDMA, with
+// shared memory off so that RDMA is used on this one host.
 TEST_F(KilnShuffleTest, rdmaTransfersWithoutCopies) {
-  const char* rdma = std::getenv("EMBER_TEST_KILN_RDMA");
-  if (rdma == nullptr || std::string(rdma) != "1") {
-    GTEST_SKIP() << "Needs EMBER_TEST_KILN_RDMA=1 and an RDMA cluster";
+  kiln::local::LocalCluster cluster{kiln::local::LocalClusterOptions{
+      .dramServers = 1, .localFsServers = 0, .rdma = true}};
+  if (!cluster.metadataAddress().rdma.has_value()) {
+    GTEST_SKIP() << "Needs a -c kiln.rdma=true build and an RDMA device";
   }
-  auto client = kilnClient(metadata());
+  setKilnUseShm(false);
+  SCOPE_EXIT {
+    setKilnUseShm(true);
+  };
+  const auto metadata = cluster.metadataAddress().toString();
+  auto client = kilnClient(metadata);
   const auto before = client->stats();
   const std::string data(1 << 20, 'r');
-  auto mapWriter = writer(7, 0, 2);
+  auto mapWriter = createKilnWriter(
+      store_,
+      metadata,
+      "dram",
+      kiln::kDefaultBucket,
+      7,
+      0,
+      2,
+      "attempt0",
+      ShuffleBlockStore::kDefaultSpillThreshold);
   for (int i = 0; i < 6; ++i) {
     // Partition 1 is larger than a pooled buffer.
     mapWriter->collect(i == 0 ? 0 : 1, folly::IOBuf::copyBuffer(data));

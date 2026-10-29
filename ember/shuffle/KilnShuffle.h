@@ -30,6 +30,12 @@ namespace ember::shuffle {
 /// transports: RDMA where the URLs, the build and the device allow.
 std::shared_ptr<kiln::client::Client> kilnClient(const std::string& metadata);
 
+/// Whether the Kiln clients this process creates from now on reach storage
+/// servers on this host through shared memory (Kiln's ClientOptions::useShm,
+/// on by default). Off, they use RDMA (or TCP) there too, e.g. to run RDMA
+/// on one host. Clients created before keep their setting.
+void setKilnUseShm(bool useShm);
+
 /// The metadata server and chunk (hex) of a kilnLocation().
 std::pair<std::string, std::string> parseKilnLocation(
     const std::string& location);
