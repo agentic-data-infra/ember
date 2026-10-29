@@ -502,7 +502,7 @@ std::unique_ptr<folly::IOBuf> ShuffleBlockStore::readBlock(
 
 void ShuffleBlockStore::removeShuffle(int32_t shuffleId) {
   {
-    // The chunks stay in Kiln until it evicts them.
+    // The driver deletes the chunks with the shuffle's Kiln bucket.
     std::lock_guard<std::mutex> l(commitMutex_);
     std::erase_if(kilnOutputs_, [&](const auto& entry) {
       return entry.first.first == shuffleId;

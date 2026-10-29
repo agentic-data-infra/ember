@@ -62,11 +62,13 @@ class KilnShuffleTest : public testing::Test {
       int32_t numPartitions,
       const std::string& attemptTag = "attempt0",
       int64_t spillThreshold = ShuffleBlockStore::kDefaultSpillThreshold,
-      const std::string& tier = "dram") {
+      const std::string& tier = "dram",
+      uint64_t bucket = kiln::kNoBucket) {
     return createKilnWriter(
         store_,
         metadata(),
         tier,
+        bucket,
         shuffleId,
         mapId,
         numPartitions,
@@ -301,7 +303,8 @@ class KilnTierTest : public testing::Test {
     std::vector<MapStatus> outputs;
     for (int32_t mapId = 0; mapId < 6; ++mapId) {
       auto mapWriter = createKilnWriter(
-          store_, metadata, tier, shuffleId, mapId, 1, "attempt0",
+          store_, metadata, tier, kiln::kNoBucket, shuffleId, mapId, 1,
+          "attempt0",
           ShuffleBlockStore::kDefaultSpillThreshold);
       mapWriter->collect(0, folly::IOBuf::copyBuffer(data(mapId)));
       outputs.push_back(mapWriter->commit());

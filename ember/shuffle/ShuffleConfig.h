@@ -28,4 +28,9 @@ inline constexpr std::string_view kKilnMetadata = "ember.shuffle.kiln.metadata";
 /// disk, so that shuffles bigger than Kiln's DRAM neither fail nor evict.
 inline constexpr std::string_view kKilnTier = "ember.shuffle.kiln.tier";
 
+/// The Kiln bucket the "kiln" store commits a map task's output to. The
+/// driver creates one per shuffle, sets it in the task's config, and deletes
+/// it with the shuffle, which removes the shuffle's chunks from Kiln.
+inline constexpr std::string_view kKilnBucket = "ember.shuffle.kiln.bucket";
+
 } // namespace ember::shuffle

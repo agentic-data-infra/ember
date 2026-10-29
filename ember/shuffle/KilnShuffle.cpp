@@ -220,6 +220,7 @@ std::unique_ptr<ShuffleWriter> createKilnWriter(
     std::shared_ptr<ShuffleBlockStore> store,
     std::string metadata,
     const std::string& tier,
+    uint64_t bucket,
     int32_t shuffleId,
     int32_t mapId,
     int32_t numPartitions,
@@ -235,6 +236,7 @@ std::unique_ptr<ShuffleWriter> createKilnWriter(
         tier);
     placement = {.tier = kiln::parseTier(tier)};
   }
+  placement.bucket = bucket;
   return std::make_unique<KilnShuffleWriter>(
       std::move(store),
       std::move(metadata),

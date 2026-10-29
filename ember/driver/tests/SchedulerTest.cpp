@@ -931,6 +931,32 @@ TEST_F(SchedulerTest, kilnStoreSpills) {
       toStrings(df.collectBatches()));
 }
 
+// Each shuffle's chunks are in a Kiln bucket of its own, which goes with
+// the shuffle: after its job, or, for kept outputs, with the session.
+TEST_F(SchedulerTest, kilnStoreDeletesShuffles) {
+  if (kiln_ == nullptr) {
+    GTEST_SKIP() << "Counts chunks of the test's own Kiln cluster";
+  }
+  auto path = writeCorpus(2, 500);
+  auto df = wordCount(path);
+  const auto& metadata = kiln_->metadata();
+  const auto before = metadata.chunkCount();
+
+  auto config = kilnConfig();
+  config[DagScheduler::kReuseOutputs] = "false";
+  auto [dag, backend] = scheduler(config);
+  EXPECT_EQ(
+      toStrings(dag->runJob(*df.physicalPlan(), pool_.get())),
+      toStrings(df.collectBatches()));
+  EXPECT_EQ(metadata.chunkCount(), before);
+
+  auto [keeping, keepingBackend] = scheduler(kilnConfig());
+  keeping->runJob(*df.physicalPlan(), pool_.get());
+  EXPECT_GT(metadata.chunkCount(), before);
+  keeping.reset();
+  EXPECT_EQ(metadata.chunkCount(), before);
+}
+
 // Kiln evicted a map output's chunk before the reduce stage read it: the
 // reads fail to fetch, and the map tasks run again. Each map output has a
 // location of its own, and a reduce task reports the first block it could

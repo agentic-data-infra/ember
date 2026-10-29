@@ -44,8 +44,12 @@ Reduce tasks read their range from Kiln directly; no worker serves these
 blocks. So the outputs outlive the executor that wrote them: losing it loses
 none of them. A chunk Kiln has evicted fails the read with a `FetchFailure`,
 and the driver recomputes that map output as it would a lost one. Writers
-spill to the executor's directory either way. The chunks stay in Kiln until
-it evicts them. A Kiln shuffle store is a session setting, so it covers
+spill to the executor's directory either way. Each shuffle's chunks go into
+a Kiln bucket of its own (`ember.shuffle.kiln.bucket`, set by the driver),
+which the driver deletes with the shuffle: after its job, or for kept
+outputs, when they are replaced or uncached or the session ends. Outputs
+stored in Kiln's catalog (`ember.reuse.kiln`) stay until Kiln evicts them, as
+do those of a driver that died. A Kiln shuffle store is a session setting, so it covers
 `cache()` and stored stage outputs too.
 
 Kiln chooses how data moves: shared memory with storage servers on the same
