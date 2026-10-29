@@ -38,7 +38,7 @@ std::pair<std::string, std::string> parseKilnLocation(
 /// output to the Kiln cluster of metadata server 'metadata' (as kilnClient()),
 /// in Kiln tier 'tier': "dram", "localfs", or "dram+localfs", DRAM if the
 /// whole output fits into Kiln's free DRAM, else local FS; and in Kiln bucket
-/// 'bucket' (0 for none). It spills to 'store''s directory like a file
+/// 'bucket' (0 for Kiln's default bucket). It spills to 'store''s directory like a file
 /// shuffle writer and records the committed output in 'store', so that the
 /// executor reports it.
 std::unique_ptr<ShuffleWriter> createKilnWriter(
