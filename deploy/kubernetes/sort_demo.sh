@@ -3,13 +3,58 @@
 # ember-worker.yaml: writes gensort input on every worker node, runs the
 # sort-job.yaml driver and checks the part files on all nodes with valsort.
 #
-#   deploy/kubernetes/sort_demo.sh [records per node]     # default 1000000
+# With --kiln, the input, the shuffle and the output are all in Kiln: the
+# input is put into Kiln as dataset sort-input, the driver sorts it into a
+# new dataset, sorted, and the check reads that back from Kiln.
+#
+#   deploy/kubernetes/sort_demo.sh [--kiln] [records per node]  # default 1000000
 set -euo pipefail
 
+kiln=false
+if [[ ${1:-} == --kiln ]]; then
+  kiln=true
+  shift
+fi
 records=${1:-1000000}
 dir=$(cd "$(dirname "$0")" && pwd)
 k() { kubectl -n ember "$@"; }
 pods=$(k get pods -l app=ember-worker -o name | sort)
+nodes=$(wc -l <<<"$pods")
+first=${pods%%$'\n'*}
+
+# Runs the driver Job (sort-job.yaml, through sed $1); fails if it fails.
+run_driver() {
+  k delete job ember-sort --ignore-not-found --wait
+  sed "$1" "$dir/sort-job.yaml" | k apply -f -
+  until [[ -n $(k get job ember-sort -o jsonpath='{.status.succeeded}{.status.failed}') ]]; do
+    sleep 2
+  done
+  k logs job/ember-sort | grep "^Sorted"
+  [[ $(k get job ember-sort -o jsonpath='{.status.succeeded}') == 1 ]] ||
+    { echo "FAIL: the driver failed" >&2; exit 1; }
+}
+
+if $kiln; then
+  # One node writes the whole gensort run, 4 files per node, and puts it
+  # into Kiln; the check later reads the output back next to it.
+  kiln_cli="kiln --metadata=kiln-meta.ember.svc.cluster.local:7470"
+  k exec "$first" -- sh -c "rm -rf /data/kiln-sort &&
+    gensort.sh generate $((nodes * records)) /data/kiln-sort/input $((nodes * 4)) &&
+    { $kiln_cli data rm sort-input; $kiln_cli data rm sorted; } >/dev/null 2>&1;
+    $kiln_cli data put /data/kiln-sort/input sort-input"
+  echo "Put $((nodes * records)) records into Kiln dataset sort-input"
+
+  # Any worker reads any input file from Kiln: no node-local splits.
+  run_driver 's|value: /data/sort-input|value: kiln:///data/sort-input/|
+    s|value: /data/sorted|value: kiln:///data/sorted|
+    /ember.files.node_local=true/d'
+
+  k exec "$first" -- sh -c "$kiln_cli data ls sorted | head -n 3 && echo ... &&
+    $kiln_cli data get sorted /data/kiln-sort/sorted >/dev/null &&
+    gensort.sh validate /data/kiln-sort/sorted /data/kiln-sort/input &&
+    rm -rf /data/kiln-sort"
+  exit
+fi
 
 # Every node gets its own slice of one gensort run, as 4 files.
 i=0
@@ -20,14 +65,7 @@ for pod in $pods; do
 done
 echo "Wrote $((i * records)) records on $i nodes"
 
-k delete job ember-sort --ignore-not-found --wait
-k apply -f "$dir/sort-job.yaml"
-until [[ -n $(k get job ember-sort -o jsonpath='{.status.succeeded}{.status.failed}') ]]; do
-  sleep 2
-done
-k logs job/ember-sort | grep "^Sorted"
-[[ $(k get job ember-sort -o jsonpath='{.status.succeeded}') == 1 ]] ||
-  { echo "FAIL: the driver failed" >&2; exit 1; }
+run_driver ""
 
 # valsort summaries (-o) of every file, gathered here. The output's part
 # files are in sort order by name across nodes; the input's order does not
@@ -51,7 +89,7 @@ done
 # records are sorted.
 summary() {
   local report status=0
-  report=$(cat "$1"/* | k exec -i "${pods%%$'\n'*}" -- sh -c \
+  report=$(cat "$1"/* | k exec -i "$first" -- sh -c \
     'cat > /tmp/all.sum && valsort -s /tmp/all.sum' 2>&1) || status=$?
   echo "$(awk '/^Records:/ {print $2}' <<<"$report") $(awk '/^Checksum:/ {print $2}' <<<"$report")"
   [[ $status -eq 0 ]] || { echo "$report" >&2; return 1; }

@@ -12,7 +12,7 @@ mkdir -p "$stage/bin" "$stage/lib" "$stage/gensort"
 
 cd "$root"
 buck2 build //bin:ember_worker //examples:sort_benchmark \
-  kiln//bin:kiln_meta kiln//bin:kiln_server --show-full-output |
+  kiln//bin:kiln_meta kiln//bin:kiln_server kiln//bin:kiln --show-full-output |
   while read -r _ path; do cp "$path" "$stage/bin/"; done
 cp scripts/gensort.sh "$stage/bin/"
 

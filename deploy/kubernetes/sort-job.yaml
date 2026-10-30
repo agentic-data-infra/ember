@@ -2,6 +2,8 @@
 # on every node (node-local splits) into range-sorted part files under
 # /data/sorted on the nodes that ran each range, with shuffle outputs in Kiln.
 # The workers find the driver through the ember-driver Service.
+# sort_demo.sh --kiln replaces INPUT, OUTPUT and EMBER_CONF to read and write
+# Kiln datasets instead.
 apiVersion: v1
 kind: Service
 metadata:
@@ -31,11 +33,15 @@ spec:
           image: ember:dev
           command:
             - sort_benchmark
-            - /data/sort-input
-            - /data/sorted
+            - $(INPUT)
+            - $(OUTPUT)
             - ember://0.0.0.0:7077
             - "3"
           env:
+            - name: INPUT
+              value: /data/sort-input
+            - name: OUTPUT
+              value: /data/sorted
             - name: EMBER_CONF
               value: >-
                 ember.files.node_local=true
