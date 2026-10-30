@@ -13,6 +13,7 @@ queries, so Ember aims for these properties (✅ implemented today, ⬜ planned)
 - ✅ Memoization with `cache()`/`persist()`/`unpersist()`.
 - ✅ Fault tolerance through task retry and lineage recompute.
 - ✅ RDMA-based shuffle: map outputs in Kiln outlive their workers and move over one-sided RDMA (`ember.shuffle.store=kiln`, see [Kiln over RDMA](#kiln-over-rdma)).
+- ✅ Input and output datasets in Kiln: `kiln://<metadata>/data/<dataset>/` paths (see [Datasets in Kiln](#datasets-in-kiln)).
 - ⬜ Cost-based materialization: decide what to keep from predicted reuse.
 - ✅ Reuse across programs of the same build, through Kiln's catalog (`ember.reuse.kiln`).
 - ⬜ Reuse across sessions and agents, through a persistent driver and catalog.
@@ -104,6 +105,29 @@ See [ember/shuffle/README.md](ember/shuffle/README.md). Adding
 `ember.reuse.kiln=true` also keeps stage outputs in Kiln's catalog, so a
 second run of the same program reuses what the first one computed (see
 [ember/driver/README.md](ember/driver/README.md)).
+
+### Datasets in Kiln
+
+Programs can also read their input from Kiln datasets (Kiln's catalog: a
+name pointing at a manifest of named files) and write their output as new
+ones, with paths `kiln://<metadata>/data/<dataset>/`; with no `<metadata>`
+(`kiln:///data/<dataset>/`) they use the cluster of `ember.kiln.metadata`, or
+else of `ember.shuffle.kiln.metadata`:
+
+```bash
+third-party/kiln/scripts/start_local_cluster.sh -d 1 -l 1 -r 4   # prints localhost:7470
+buck2 run kiln//bin:kiln -- --metadata=localhost:7470 data put ~/data/sort-input sort-input
+EMBER_CONF="ember.kiln.metadata=localhost:7470" \
+  buck2 run //examples:sort_benchmark -- kiln:///data/sort-input/ kiln:///data/sorted
+buck2 run kiln//bin:kiln -- --metadata=localhost:7470 data ls sorted
+```
+
+`write()` to a dataset that exists already fails. Each result task writes its
+part as one chunk, in Kiln's DRAM tier by default (`ember.kiln.files.tier=localfs`
+for local disks, `ember.kiln.files.write_through=localfs` to keep a copy
+there), into a bucket of the job's; the driver publishes the dataset when the
+job succeeds, with all its parts, and deletes the bucket when it fails. See
+[ember/common/KilnFiles.h](ember/common/KilnFiles.h).
 
 ### Kiln over RDMA
 

@@ -11,6 +11,7 @@
 #include "ember/FileSerde.h"
 #include "ember/FunctionRegistry.h"
 #include "ember/GensortFileHandler.h"
+#include "ember/KilnFiles.h"
 #include "ember/ParquetFileHandler.h"
 #include "ember/TextFileHandler.h"
 #include "ember/shuffle/Shuffle.h"
@@ -43,6 +44,7 @@ void initializeRuntime() {
       velox::memory::initializeMemoryManager(options);
     }
     velox::filesystems::registerLocalFileSystem();
+    registerKilnFileSystem();
     if (!velox::isRegisteredNamedVectorSerde("Presto")) {
       velox::serializer::presto::PrestoVectorSerde::registerNamedVectorSerde();
     }

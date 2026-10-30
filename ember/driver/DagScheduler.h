@@ -121,7 +121,9 @@ class DagScheduler {
       facebook::velox::memory::MemoryPool* pool);
 
   /// Runs 'plan' with each result task writing its rows to a part file of
-  /// 'files' (TaskDescription.h). Returns the number of rows written.
+  /// 'files' (TaskDescription.h). Returns the number of rows written. A
+  /// kiln:// directory names a dataset that must not exist yet; it appears
+  /// when the job succeeds, with all its parts (KilnFiles.h).
   int64_t write(
       const facebook::axiom::optimizer::MultiFragmentPlan& plan,
       const OutputFiles& files);
@@ -148,17 +150,30 @@ class DagScheduler {
   struct JobContext;
   struct StageState;
 
+  // What a result task wrote to its part.
+  struct WrittenPart {
+    int64_t rows{0};
+    // For a kiln:// directory: the chunk (hex), empty for no rows.
+    std::string chunk;
+    int64_t bytes{0};
+  };
+
   // Runs 'stages' as one job. The last stage is the result stage, whose rows
-  // are returned, or written to 'outputFiles' (then 'writtenRows' is set to
-  // their number), or, with 'outputKey', a map stage whose output is kept in
-  // the memo under that key; then 'outputShuffle' is set to its shuffle.
+  // are returned, or written to 'outputFiles' (then 'writtenParts' is set to
+  // the parts, by partition), or, with 'outputKey', a map stage whose output
+  // is kept in the memo under that key; then 'outputShuffle' is set to its
+  // shuffle.
   std::vector<facebook::velox::RowVectorPtr> runStages(
       StagePlan& stages,
       const std::optional<std::string>& outputKey,
       facebook::velox::memory::MemoryPool* pool,
       int32_t* outputShuffle = nullptr,
       const OutputFiles* outputFiles = nullptr,
-      int64_t* writtenRows = nullptr);
+      std::vector<WrittenPart>* writtenParts = nullptr);
+
+  // write() to a kiln:// directory: the parts go into a new bucket, and are
+  // published as a new dataset once they are all written.
+  int64_t writeKilnDataset(StagePlan& stages, const OutputFiles& files);
 
   // Runs 'stage' until all its partitions are done, first rerunning lost
   // outputs of the stages it reads.

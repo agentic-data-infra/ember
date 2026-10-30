@@ -139,7 +139,10 @@ std::string Executor::runTask(const std::string& bytes) {
     if (description.outputFiles.has_value()) {
       VELOX_CHECK(description.resultTask);
       writer = std::make_unique<PartFileWriter>(
-          *description.outputFiles, description.partition, result.taskId);
+          *description.outputFiles,
+          description.partition,
+          result.taskId,
+          description.config);
       consumer = [&]() -> exec::Consumer {
         return [&](velox::RowVectorPtr rows,
                    bool /*drained*/,
@@ -218,7 +221,8 @@ std::string Executor::runTask(const std::string& bytes) {
       }
     } else {
       if (writer != nullptr) {
-        writer->commit();
+        result.outputBytes = writer->commit();
+        result.outputChunk = writer->chunk();
       }
       if (auto write =
               std::dynamic_pointer_cast<const shuffle::ShuffleWriteNode>(
