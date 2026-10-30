@@ -9,6 +9,8 @@ cxx_library(
     exported_deps = [
         "//ember/shuffle:shuffle",
         "//third-party:velox_axiom",
+        "kiln//kiln/client:client",
     ],
+    deps = ["kiln//kiln/catalog:catalog"],
     visibility = ["PUBLIC"],
 )

@@ -10,10 +10,13 @@
 #include "axiom/runner/LocalRunner.h"
 #include "ember/CachedTable.h"
 #include "ember/FileSerde.h"
+#include "ember/KilnFiles.h"
 #include "ember/RowPages.h"
 #include "ember/shuffle/KilnShuffle.h"
 #include "ember/shuffle/ShuffleConfig.h"
 #include "ember/shuffle/ShuffleWrite.h"
+#include "ember/worker/PartFileWriter.h"
+#include "kiln/catalog/Catalog.h"
 #include "kiln/client/Client.h"
 #include "velox/common/file/FileSystems.h"
 #include "velox/core/QueryCtx.h"
@@ -57,6 +60,9 @@ struct DagScheduler::StageState {
   // A result stage's pages and rows, per partition.
   std::vector<std::vector<std::string>> resultPages;
   std::vector<int64_t> resultRows;
+  // A result stage's chunks and bytes written to Kiln, per partition.
+  std::vector<std::string> resultChunks;
+  std::vector<int64_t> resultBytes;
 
   int32_t numTasks() const {
     return static_cast<int32_t>(splits.size());
@@ -443,9 +449,75 @@ int64_t DagScheduler::write(
     const optimizer::MultiFragmentPlan& plan,
     const OutputFiles& files) {
   auto stages = stagePlan(plan);
+  if (isKilnPath(files.directory)) {
+    return writeKilnDataset(stages, files);
+  }
+  std::vector<WrittenPart> parts;
+  runStages(stages, std::nullopt, nullptr, nullptr, &files, &parts);
   int64_t rows = 0;
-  runStages(stages, std::nullopt, nullptr, nullptr, &files, &rows);
+  for (const auto& part : parts) {
+    rows += part.rows;
+  }
   return rows;
+}
+
+int64_t DagScheduler::writeKilnDataset(
+    StagePlan& stages,
+    const OutputFiles& files) {
+  const auto path = parseKilnPath(files.directory);
+  auto client = shuffle::kilnClient(path.metadata);
+  kiln::catalog::Catalog catalog(
+      *client,
+      kiln::catalog::CatalogOptions{
+          .placement = kilnFilesPlacement(options_.config)});
+  VELOX_USER_CHECK(
+      !folly::coro::blockingWait(catalog.co_getDataset(path.dataset))
+           .has_value(),
+      "Kiln dataset {} exists already",
+      files.directory);
+
+  auto kilnFiles = files;
+  kilnFiles.kilnBucket = folly::coro::blockingWait(client->co_createBucket());
+  auto deleteBucket = [&]() {
+    try {
+      folly::coro::blockingWait(client->co_deleteBucket(kilnFiles.kilnBucket));
+    } catch (const std::exception& e) {
+      LOG(WARNING) << "Cannot delete Kiln bucket " << kilnFiles.kilnBucket
+                   << ": " << e.what();
+    }
+  };
+  std::optional<uint64_t> version;
+  kiln::catalog::Manifest manifest;
+  try {
+    std::vector<WrittenPart> parts;
+    runStages(stages, std::nullopt, nullptr, nullptr, &kilnFiles, &parts);
+    manifest.schema = files.format;
+    manifest.bucket = kilnFiles.kilnBucket;
+    for (size_t p = 0; p < parts.size(); ++p) {
+      const auto& part = parts[p];
+      manifest.rows += part.rows;
+      manifest.bytes += part.bytes;
+      if (part.chunk.empty()) {
+        continue;
+      }
+      manifest.chunks.push_back(kiln::catalog::ChunkRange{
+          .id = kiln::ChunkId::parse(part.chunk),
+          .length = static_cast<uint64_t>(part.bytes),
+          .name = PartFileWriter::partName(static_cast<int32_t>(p)),
+          .rows = static_cast<uint64_t>(part.rows)});
+    }
+    version = folly::coro::blockingWait(
+        catalog.co_publishDataset(path.dataset, manifest));
+  } catch (...) {
+    deleteBucket();
+    throw;
+  }
+  if (!version.has_value()) {
+    deleteBucket();
+    VELOX_USER_FAIL(
+        "Kiln dataset {} was published while the job ran", files.directory);
+  }
+  return static_cast<int64_t>(manifest.rows);
 }
 
 int32_t DagScheduler::materialize(const std::string& id) {
@@ -485,7 +557,7 @@ std::vector<velox::RowVectorPtr> DagScheduler::runStages(
     velox::memory::MemoryPool* pool,
     int32_t* outputShuffle,
     const OutputFiles* outputFiles,
-    int64_t* writtenRows) {
+    std::vector<WrittenPart>* writtenParts) {
   JobContext job;
   job.jobId = fmt::format("{}_{}", options_.appName, ++jobCounter_);
   job.outputFiles = outputFiles;
@@ -657,6 +729,8 @@ std::vector<velox::RowVectorPtr> DagScheduler::runStages(
     if (state.isResult) {
       state.resultPages.resize(numTasks);
       state.resultRows.resize(numTasks);
+      state.resultChunks.resize(numTasks);
+      state.resultBytes.resize(numTasks);
     }
   }
 
@@ -670,9 +744,12 @@ std::vector<velox::RowVectorPtr> DagScheduler::runStages(
   }
   const auto& result = states.back();
   if (outputFiles != nullptr) {
-    *writtenRows = 0;
-    for (auto rows : result.resultRows) {
-      *writtenRows += rows;
+    writtenParts->clear();
+    for (size_t p = 0; p < result.resultRows.size(); ++p) {
+      writtenParts->push_back(WrittenPart{
+          .rows = result.resultRows[p],
+          .chunk = result.resultChunks[p],
+          .bytes = result.resultBytes[p]});
     }
     return {};
   }
@@ -815,6 +892,8 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
         if (state.isResult) {
           state.resultPages[p] = std::move(result->resultPages);
           state.resultRows[p] = result->outputRows;
+          state.resultChunks[p] = std::move(result->outputChunk);
+          state.resultBytes[p] = result->outputBytes;
         }
       }
       for (const auto& failure : taskSet.fetchFailures) {

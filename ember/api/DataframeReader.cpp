@@ -4,6 +4,7 @@
 
 #include "ember/Dataframe.h"
 #include "ember/GensortFileHandler.h"
+#include "ember/KilnFiles.h"
 #include "ember/Session.h"
 #include "ember/TextFileHandler.h"
 
@@ -13,9 +14,16 @@ namespace lp = facebook::axiom::logical_plan;
 
 namespace {
 
-// Local paths become absolute; the file connector reads a directory when its
-// path ends in '/'.
-std::string tablePath(const std::string& path) {
+// Local paths become absolute and kiln:// paths get the configured cluster;
+// the file connector reads a directory when its path ends in '/'.
+std::string tablePath(
+    const std::string& path,
+    const std::map<std::string, std::string>& config) {
+  if (isKilnPath(path)) {
+    // A dataset is a directory.
+    const auto parsed = parseKilnPath(resolveKilnPath(path, config));
+    return kilnPath(parsed.metadata, parsed.dataset, parsed.file);
+  }
   if (path.find("://") != std::string::npos || path.starts_with("file:")) {
     return path;
   }
@@ -35,7 +43,7 @@ Dataframe scan(
       session,
       std::make_shared<const PlanStep>(
           nullptr,
-          [format, table = tablePath(path)](
+          [format, table = tablePath(path, session->config())](
               lp::PlanBuilder& builder, const auto& /*context*/) {
             builder.tableScan(
                 SessionState::fileConnectorId(), format, table);

@@ -3,6 +3,7 @@
 #include <filesystem>
 
 #include "ember/GensortFileHandler.h"
+#include "ember/KilnFiles.h"
 #include "ember/Session.h"
 #include "ember/worker/TaskDescription.h"
 
@@ -12,7 +13,18 @@ namespace fs = std::filesystem;
 
 namespace {
 
-std::string outputDirectory(const std::string& directory) {
+std::string outputDirectory(
+    const std::string& directory,
+    const std::map<std::string, std::string>& config) {
+  if (isKilnPath(directory)) {
+    // The driver checks that the dataset does not exist yet.
+    const auto parsed = parseKilnPath(resolveKilnPath(directory, config));
+    VELOX_USER_CHECK(
+        !parsed.dataset.empty() && parsed.file.empty(),
+        "Output to Kiln needs a dataset path, kiln://<metadata>/data/<dataset>: {}",
+        directory);
+    return kilnPath(parsed.metadata, parsed.dataset);
+  }
   if (directory.find("://") != std::string::npos ||
       directory.starts_with("file:")) {
     return directory;
@@ -36,7 +48,9 @@ std::string outputDirectory(const std::string& directory) {
 int64_t DataframeWriter::gensort(const std::string& directory) const {
   return df_.session()->write(
       df_.compile()->physicalPlan,
-      OutputFiles{kGensortSchema, outputDirectory(directory)});
+      OutputFiles{
+          kGensortSchema,
+          outputDirectory(directory, df_.session()->config())});
 }
 
 } // namespace ember

@@ -38,7 +38,8 @@ std::string TaskDescription::serialize() const {
   obj["resultTask"] = resultTask;
   if (outputFiles.has_value()) {
     obj["outputFiles"] = folly::dynamic::object("format", outputFiles->format)(
-        "directory", outputFiles->directory);
+        "directory", outputFiles->directory)(
+        "kilnBucket", static_cast<int64_t>(outputFiles->kilnBucket));
   }
   obj["node"] = node;
   folly::dynamic configObj = folly::dynamic::object;
@@ -79,7 +80,8 @@ TaskDescription TaskDescription::deserialize(const std::string& bytes) {
   if (obj.count("outputFiles")) {
     task.outputFiles = OutputFiles{
         obj["outputFiles"]["format"].asString(),
-        obj["outputFiles"]["directory"].asString()};
+        obj["outputFiles"]["directory"].asString(),
+        static_cast<uint64_t>(obj["outputFiles"]["kilnBucket"].asInt())};
   }
   task.node = obj["node"].asString();
   for (const auto& [key, value] : obj["config"].items()) {
@@ -110,6 +112,8 @@ std::string TaskResult::serialize() const {
   }
   obj["numPages"] = resultPages.size();
   obj["outputRows"] = outputRows;
+  obj["outputChunk"] = outputChunk;
+  obj["outputBytes"] = outputBytes;
   obj["wallMicros"] = wallMicros;
   auto header = folly::toJson(obj);
 
@@ -157,6 +161,8 @@ TaskResult TaskResult::deserialize(const std::string& bytes) {
         cursor.readFixedString(cursor.readLE<uint32_t>()));
   }
   result.outputRows = obj["outputRows"].asInt();
+  result.outputChunk = obj["outputChunk"].asString();
+  result.outputBytes = obj["outputBytes"].asInt();
   result.wallMicros = obj["wallMicros"].asInt();
   return result;
 }
