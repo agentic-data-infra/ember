@@ -3,8 +3,11 @@
 
 load("//ember:options.bzl", "EMBER_STOKE", "OPTION_FLAGS")
 
-# The stoke functions only with -c ember.stoke=true.
-STOKE_SRCS = ["StokeFunctions.cpp"]
+# The stoke functions and connector only with -c ember.stoke=true.
+STOKE_SRCS = [
+    "StokeConnector.cpp",
+    "StokeFunctions.cpp",
+]
 
 cxx_library(
     name = "common",
@@ -18,7 +21,10 @@ cxx_library(
         "kiln//kiln/client:client",
     ],
     deps = ["kiln//kiln/catalog:catalog"] + (
-        ["stoke//stoke/format:format"] if EMBER_STOKE else []
+        [
+            "stoke//stoke/client:producer",
+            "stoke//stoke/format:format",
+        ] if EMBER_STOKE else []
     ),
     visibility = ["PUBLIC"],
 )
