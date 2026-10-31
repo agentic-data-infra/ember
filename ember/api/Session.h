@@ -28,6 +28,7 @@
 #include "ember/Dataframe.h"
 #include "ember/DataframeReader.h"
 #include "ember/DataframeWriter.h"
+#include "axiom/connectors/ConnectorSession.h"
 
 namespace ember::driver {
 class DagScheduler;
@@ -115,6 +116,13 @@ class SessionState {
   int64_t write(
       const facebook::axiom::optimizer::MultiFragmentPlanPtr& plan,
       const OutputFiles& files);
+
+  /// Optimizes and runs 'plan', which ends in a table write, then commits
+  /// the write (or aborts it if the job fails). 'properties' are the
+  /// connectors' session properties. Returns the number of rows written.
+  int64_t writeTable(
+      const facebook::axiom::logical_plan::LogicalPlanNodePtr& plan,
+      facebook::axiom::connector::ConnectorProperties properties);
 
   /// The stages 'plan' runs as, with their shuffle reads and writes.
   std::string explainStages(

@@ -270,6 +270,7 @@ class Dataframe {
   }
 
  private:
+  friend class DataframeWriter;
   friend class GroupedData;
 
   Dataframe then(PlanStep::Apply apply) const;

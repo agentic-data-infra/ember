@@ -7,6 +7,9 @@
 
 namespace ember {
 
+/// Whether this build has stoke (-c ember.stoke=true).
+bool hasStoke();
+
 /// Registers stoke_tokenize and stoke_pack, in a build with stoke. Called by
 /// registerFunctions().
 void registerStokeFunctions();

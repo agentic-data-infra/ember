@@ -13,6 +13,7 @@
 
 #include <unordered_map>
 
+#include "ember/DataframeWriter.h"
 #include "ember/Session.h"
 #include "ember/functions.h"
 #include "velox/common/memory/Memory.h"
@@ -400,7 +401,21 @@ PYBIND11_MODULE(_ember, m) {
       .def_property_readonly("dtypes", &dtypes)
       .def("schemaString", [](const Dataframe& df) {
         return df.schema()->toString();
-      });
+      })
+      .def_property_readonly("write", &Dataframe::write);
+
+  py::class_<DataframeWriter>(m, "DataframeWriter")
+      .def(
+          "gensort",
+          &DataframeWriter::gensort,
+          py::arg("directory"),
+          py::call_guard<py::gil_scoped_release>())
+      .def(
+          "stream",
+          &DataframeWriter::stream,
+          py::arg("name"),
+          py::arg("seal") = false,
+          py::call_guard<py::gil_scoped_release>());
 
   // Session.
 
