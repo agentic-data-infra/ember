@@ -1,3 +1,5 @@
+load("//ember:options.bzl", "EMBER_STOKE")
+
 cxx_test(
     name = "dataframe_test",
     srcs = ["DataframeTest.cpp"],
@@ -77,3 +79,16 @@ cxx_test(
     # Archives must precede the prebuilt Velox/Axiom libraries they use.
     link_ordering = "topological",
 )
+
+# In builds with stoke (-c ember.stoke=true).
+[cxx_test(
+    name = "stoke_functions_test",
+    srcs = ["StokeFunctionsTest.cpp"],
+    deps = [
+        "//ember/api:api",
+        "//ember/tests:test_main",
+        "stoke//stoke/format:format",
+    ],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+) for _ in ([1] if EMBER_STOKE else [])]
