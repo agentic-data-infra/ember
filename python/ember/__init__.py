@@ -14,7 +14,14 @@ Column and functions, with results returned as pyarrow tables.
 
 import atexit
 
-from ember._ember import Column, Dataframe, DataframeReader, GroupedData, Session
+from ember._ember import (
+    Column,
+    Dataframe,
+    DataframeReader,
+    DataframeWriter,
+    GroupedData,
+    Session,
+)
 
 
 def _collect(self):
@@ -51,7 +58,14 @@ Dataframe.explain = _explain
 Dataframe.printSchema = _print_schema
 Dataframe.toPandas = _to_pandas
 
-__all__ = ["Column", "Dataframe", "DataframeReader", "GroupedData", "Session"]
+__all__ = [
+    "Column",
+    "Dataframe",
+    "DataframeReader",
+    "DataframeWriter",
+    "GroupedData",
+    "Session",
+]
 
 
 def _stop_active_session():

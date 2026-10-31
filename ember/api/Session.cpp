@@ -176,7 +176,8 @@ QueryEnv makeQueryEnv(
     const std::string& queryId,
     const std::string& user,
     folly::Executor* executor,
-    const std::map<std::string, std::string>& config) {
+    const std::map<std::string, std::string>& config,
+    axiom_connector::ConnectorProperties connectorProperties = {}) {
   QueryEnv env;
   env.queryCtx = velox::core::QueryCtx::create(
       executor,
@@ -191,7 +192,7 @@ QueryEnv makeQueryEnv(
   env.connectorContext = std::make_shared<axiom_connector::ConnectorContext>(
       queryId,
       user,
-      axiom_connector::ConnectorProperties{},
+      std::move(connectorProperties),
       axiom_connector::ConnectorContext::noopStatWriterProvider());
   env.statsWriter = std::make_shared<velox::NoopRuntimeStatWriter>();
   return env;
@@ -250,6 +251,24 @@ int64_t SessionState::write(
     const OutputFiles& files) {
   VELOX_USER_CHECK_NOT_NULL(scheduler_, "Session {} is stopped", appName_);
   return scheduler_->write(*plan, files);
+}
+
+int64_t SessionState::writeTable(
+    const lp::LogicalPlanNodePtr& plan,
+    axiom_connector::ConnectorProperties properties) {
+  VELOX_USER_CHECK_NOT_NULL(scheduler_, "Session {} is stopped", appName_);
+  auto env = makeQueryEnv(
+      nextQueryId(), appName_, nullptr, config_, std::move(properties));
+  auto optimized = optimizePlan(plan, env, parallelism_, optimizerPool_);
+  VELOX_CHECK(optimized.finishWrite, "Not a table write");
+  std::vector<velox::RowVectorPtr> results;
+  try {
+    results = scheduler_->runJob(*optimized.plan, resultPool_.get());
+  } catch (...) {
+    std::move(optimized.finishWrite).abort().wait();
+    throw;
+  }
+  return std::move(optimized.finishWrite).commit(results).get().value_or(0);
 }
 
 std::string SessionState::explainStages(

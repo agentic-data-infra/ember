@@ -82,6 +82,10 @@ struct StokePack {
 
 } // namespace
 
+bool hasStoke() {
+  return true;
+}
+
 void registerStokeFunctions() {
   velox::registerFunction<
       StokeTokenize,

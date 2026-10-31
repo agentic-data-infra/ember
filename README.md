@@ -182,7 +182,24 @@ git submodule update --init --recursive
 buck2 test -c ember.stoke=true //...
 ```
 
-See [ember/common/StokeFunctions.cpp](ember/common/StokeFunctions.cpp).
+The build also writes a Dataframe of such batches into a stoke stream:
+
+```python
+batches = df.selectExpr("stoke_pack(stoke_tokenize(text), 8, 256) AS batch")
+batches.write.stream("train", seal=True)
+```
+
+`write.stream(name, seal=False)` takes one VARBINARY column, one batch per
+row, and returns the number of batches written. Each scan task frames its
+batches into chunks of `ember.stoke.chunk_bytes` (16 MiB by default) in the
+stream's Kiln bucket and puts every chunk into the stream as soon as it is
+written, so trainers start while the job still runs. The stream must exist
+(`stoke create`); with `seal=True` the stream is sealed once the job
+finishes. The Kiln cluster is the one of `ember.kiln.metadata`, else
+of the Kiln shuffle (`ember.shuffle.kiln.metadata`).
+
+See [ember/common/StokeFunctions.cpp](ember/common/StokeFunctions.cpp) and
+[ember/common/StokeConnector.h](ember/common/StokeConnector.h).
 
 ## More examples
 
