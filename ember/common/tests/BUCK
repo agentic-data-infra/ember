@@ -1,0 +1,16 @@
+load("//ember:options.bzl", "EMBER_STOKE")
+
+# In builds with stoke (-c ember.stoke=true).
+[cxx_test(
+    name = "stoke_connector_test",
+    srcs = ["StokeConnectorTest.cpp"],
+    deps = [
+        "//ember/common:common",
+        "//ember/tests:test_main",
+        "kiln//kiln/local:local",
+        "stoke//stoke/loader:loader",
+        "stoke//stoke/shard:shard",
+    ],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+) for _ in ([1] if EMBER_STOKE else [])]

@@ -13,6 +13,7 @@
 #include "ember/GensortFileHandler.h"
 #include "ember/KilnFiles.h"
 #include "ember/ParquetFileHandler.h"
+#include "ember/Stoke.h"
 #include "ember/TextFileHandler.h"
 #include "ember/shuffle/Shuffle.h"
 #include "velox/common/file/FileSystems.h"
@@ -70,6 +71,7 @@ void initializeRuntime() {
         connector->connectorId(),
         std::make_shared<axiom_connector::file::FileConnectorMetadata>(
             connector.get()));
+    registerStokeConnector();
   });
 }
 
