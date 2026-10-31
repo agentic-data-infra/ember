@@ -164,6 +164,26 @@ of its own with shared memory off (`shuffle::setKilnUseShm(false)`). With
 `$EMBER_TEST_KILN_METADATA`, `kiln_shuffle_test` and `scheduler_test` run
 their other tests against an external cluster.
 
+### stoke
+
+[stoke](https://github.com/agentic-data-infra/stoke) is a distributed
+PyTorch dataloader for data preprocessed by Ember. Ember's side of it is a
+build option, off by default: `-c ember.stoke=true` builds against the
+`third-party/stoke` submodule (the Buck cell `stoke//`) and adds two
+functions that turn text into training batches in stoke's format:
+
+- `stoke_tokenize(text)`: byte-level tokens, each UTF-8 byte (0 to 255) and
+  then the end-of-text token 256.
+- `stoke_pack(tokens, B, T)`: one int32 batch of `[b, T + 1]`, with `b` at
+  most `B` whole windows of the tokens; NULL if there is no whole window.
+
+```
+git submodule update --init --recursive
+buck2 test -c ember.stoke=true //...
+```
+
+See [ember/common/StokeFunctions.cpp](ember/common/StokeFunctions.cpp).
+
 ## More examples
 
 `examples/DomainReport.cpp` reads FineWeb-Edu style parquet (`url`, `score`,

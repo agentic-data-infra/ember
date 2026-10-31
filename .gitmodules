@@ -1,3 +1,6 @@
 [submodule "third-party/kiln"]
 	path = third-party/kiln
 	url = https://github.com/agentic-data-infra/kiln.git
+[submodule "third-party/stoke"]
+	path = third-party/stoke
+	url = https://github.com/agentic-data-infra/stoke.git

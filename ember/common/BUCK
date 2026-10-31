@@ -1,16 +1,24 @@
 # Setup shared by the driver and executors: functions, the file connector and
 # its text format, plan serialization. Headers are exported under "ember/".
 
+load("//ember:options.bzl", "EMBER_STOKE", "OPTION_FLAGS")
+
+# The stoke functions only with -c ember.stoke=true.
+STOKE_SRCS = ["StokeFunctions.cpp"]
+
 cxx_library(
     name = "common",
-    srcs = glob(["*.cpp"]),
+    srcs = glob(["*.cpp"], exclude = [] if EMBER_STOKE else STOKE_SRCS),
     header_namespace = "ember",
     exported_headers = glob(["*.h"]),
+    preprocessor_flags = OPTION_FLAGS,
     exported_deps = [
         "//ember/shuffle:shuffle",
         "//third-party:velox_axiom",
         "kiln//kiln/client:client",
     ],
-    deps = ["kiln//kiln/catalog:catalog"],
+    deps = ["kiln//kiln/catalog:catalog"] + (
+        ["stoke//stoke/format:format"] if EMBER_STOKE else []
+    ),
     visibility = ["PUBLIC"],
 )
