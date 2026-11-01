@@ -5,9 +5,11 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <set>
+#include <thread>
 
 #include <folly/coro/BlockingWait.h>
 
@@ -56,16 +58,15 @@ class StreamWriteTest : public testing::Test {
     fs::create_directories(dir_);
     registry_ =
         std::make_shared<stoke::Registry>(shuffle::kilnClient(metadata()));
-    std::vector<std::string> endpoints;
     for (int i = 0; i < 2; ++i) {
       auto shard = std::make_shared<stoke::Shard>(
           registry_,
           stoke::ShardOptions{.refreshInterval = std::chrono::milliseconds(20)});
       servers_.push_back(stoke::rpc::serveShard(shard, "127.0.0.1", 0));
-      endpoints.push_back(
+      endpoints_.push_back(
           "127.0.0.1:" + std::to_string(servers_.back()->port()));
     }
-    blockingWait(registry_->co_create(std::string(kStream), endpoints, 1.0));
+    blockingWait(registry_->co_create(std::string(kStream), endpoints_, 1.0));
   }
 
   void TearDown() override {
@@ -165,6 +166,7 @@ class StreamWriteTest : public testing::Test {
   static kiln::local::LocalCluster* cluster_;
   std::shared_ptr<stoke::Registry> registry_;
   std::vector<std::unique_ptr<stoke::rpc::RpcServer>> servers_;
+  std::vector<std::string> endpoints_;
   std::optional<Session> ember_;
   fs::path dir_;
 };
@@ -203,6 +205,33 @@ TEST_F(StreamWriteTest, leavesTheStreamOpenUnlessSealed) {
       stoke::StreamState::kSealed);
   // The second job wrote the same chunks, which the stream dropped.
   EXPECT_EQ(consume(), values(df));
+}
+
+// With a task budget of 1, each scan task puts one chunk and then waits
+// until a trainer consumed it: the job waits for its consumer, and the
+// stream never holds more than a chunk per task unconsumed.
+TEST_F(StreamWriteTest, waitsForTheConsumerAtTheTaskBudget) {
+  blockingWait(registry_->co_remove(std::string(kStream)));
+  blockingWait(registry_->co_create(
+      std::string(kStream), endpoints_, 1.0, /*taskBudget=*/1));
+  // 2 files, a task each; 2 chunks a task, as in cutsChunksAtTheConfiguredSize.
+  session({{std::string(kStokeChunkBytesConfig), "300"}});
+  auto df = batches(writeText(2, 5));
+  const auto expected = values(df);
+
+  std::atomic<int64_t> written{-1};
+  std::thread job([&] {
+    written = df.write().stream(std::string(kStream), /*seal=*/true);
+  });
+  // Nobody consumes yet: each task put its first chunk and waits.
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+  EXPECT_EQ(written, -1);
+  EXPECT_EQ(chunksPut(), 2);
+
+  EXPECT_EQ(consume(), expected);
+  job.join();
+  EXPECT_EQ(written, 10);
+  EXPECT_EQ(chunksPut(), 4);
 }
 
 TEST_F(StreamWriteTest, rejectsOtherColumnsAndMissingStreams) {

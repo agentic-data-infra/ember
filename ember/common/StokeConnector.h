@@ -11,6 +11,11 @@
 // write results per task goes on to the final task, and
 // StokeConnectorMetadata::finishWrite adds up the rows written.
 //
+// With a stream task budget (stoke create --task_budget N), each sink has
+// at most N chunks put and not yet consumed: once it has, its next chunk
+// waits in appendData until a trainer consumed the oldest (stoke::Producer).
+// Ember just sees a slow write; the job runs at its trainers' pace.
+//
 // A retried task writes the same bytes, hence the same chunks, which the
 // stream drops; a task that fails leaves the chunks it put. The stream must
 // exist (stoke create, or stoke's create_stream); a write seals it when
