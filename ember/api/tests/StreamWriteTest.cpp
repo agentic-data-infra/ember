@@ -234,6 +234,70 @@ TEST_F(StreamWriteTest, waitsForTheConsumerAtTheTaskBudget) {
   EXPECT_EQ(chunksPut(), 4);
 }
 
+// End to end with more tasks than slots and a slow trainer: 8 tasks on 4
+// slots (local[4]), 3 chunks each, a budget of 2 chunks per task, and a
+// loader with a small buffer that takes 20 ms per batch. While the job
+// runs the stream never holds more than slots x budget chunks not yet
+// consumed, and every batch arrives once.
+TEST_F(StreamWriteTest, boundsUnconsumedChunksWhileATrainerReads) {
+  constexpr uint64_t kSlots = 4;
+  constexpr uint32_t kBudget = 2;
+  blockingWait(registry_->co_remove(std::string(kStream)));
+  blockingWait(registry_->co_create(
+      std::string(kStream), endpoints_, 1.0, kBudget));
+  // 9 batches a file, 3 to a chunk of 300 bytes.
+  session({{std::string(kStokeChunkBytesConfig), "300"}});
+  auto df = batches(writeText(8, 9));
+  const auto expected = values(df);
+
+  auto stream = blockingWait(
+      stoke::StreamClient::co_open(registry_, std::string(kStream)));
+  std::atomic<bool> done{false};
+  std::atomic<uint64_t> peak{0};
+  std::thread sampler([&] {
+    while (!done) {
+      uint64_t unconsumed = 0;
+      for (const auto& shard : blockingWait(stream->co_stats())) {
+        unconsumed += shard.put - shard.acked;
+      }
+      peak = std::max<uint64_t>(peak, unconsumed);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  });
+  std::atomic<int64_t> written{-1};
+  std::thread job([&] {
+    written = df.write().stream(std::string(kStream), /*seal=*/true);
+  });
+
+  stoke::Loader loader(
+      blockingWait(
+          stoke::StreamClient::co_open(registry_, std::string(kStream))),
+      shuffle::kilnClient(metadata()),
+      stoke::LoaderOptions{
+          .epoch = {"rank0", 0},
+          .minBufferedBatches = 2,
+          .maxBufferedBatches = 4,
+          .wait = std::chrono::milliseconds(20)});
+  std::multiset<std::string> consumed;
+  while (auto batch = loader.next()) {
+    consumed.insert(
+        stoke::format::encodeBatch(batch->view.header, batch->view.payload));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  job.join();
+  done = true;
+  sampler.join();
+
+  EXPECT_EQ(written, 72);
+  EXPECT_EQ(consumed, expected);
+  EXPECT_EQ(chunksPut(), 24);
+  // The bound held, and the trainer was slow enough to reach it.
+  EXPECT_LE(peak, kSlots * kBudget);
+  EXPECT_GE(peak, kBudget);
+  // The loader's buffer: its maximum, passed by at most part of a chunk.
+  EXPECT_LT(loader.stats().peakBuffered, 4 + 3);
+}
+
 TEST_F(StreamWriteTest, rejectsOtherColumnsAndMissingStreams) {
   auto input = writeText(1, 2);
   EXPECT_ANY_THROW(session().read().text(input).write().stream(
