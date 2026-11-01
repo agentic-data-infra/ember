@@ -193,7 +193,9 @@ batches.write.stream("train", seal=True)
 row, and returns the number of batches written. Each scan task frames its
 batches into chunks of `ember.stoke.chunk_bytes` (16 MiB by default) in the
 stream's Kiln bucket and puts every chunk into the stream as soon as it is
-written, so trainers start while the job still runs. The stream must exist
+written, so trainers start while the job still runs. A stream created
+with `stoke create --task_budget N` bounds each task to N chunks not yet
+consumed: past that, the task waits for the trainers. The stream must exist
 (`stoke create`); with `seal=True` the stream is sealed once the job
 finishes. The Kiln cluster is the one of `ember.kiln.metadata`, else
 of the Kiln shuffle (`ember.shuffle.kiln.metadata`).
