@@ -54,8 +54,11 @@ class StokeDataSink : public velox::connector::DataSink {
     }
   }
 
+  // Waits until the stream consumed this task's chunks, so that the next
+  // task in its slot starts within the budget (stoke::Producer).
   bool finish() override {
     put();
+    blockingWait(producer_.co_drain());
     return true;
   }
 
