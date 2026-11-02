@@ -21,18 +21,18 @@ constexpr auto kCallTimeout = std::chrono::seconds(30);
 
 class Worker::Handler : public rpc::WorkerHandler {
  public:
-  explicit Handler(Worker* worker) : worker_{worker} {}
+  explicit Handler(Worker& worker) : worker_{worker} {}
 
   folly::coro::Task<std::string> co_launchTask(std::string task) override {
-    return worker_->co_launchTask(std::move(task));
+    return worker_.co_launchTask(std::move(task));
   }
 
   void removeShuffle(int32_t shuffleId) override {
-    worker_->removeShuffle(shuffleId);
+    worker_.removeShuffle(shuffleId);
   }
 
   void shutdown() override {
-    worker_->shutdown();
+    worker_.shutdown();
   }
 
   std::vector<rpc::FileInfo> listFiles(
@@ -43,12 +43,12 @@ class Worker::Handler : public rpc::WorkerHandler {
 
   folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
       rpc::BlockId block) override {
-    return worker_->co_fetchBlock(shuffle::BlockId{
+    return worker_.co_fetchBlock(shuffle::BlockId{
         block.shuffleId, block.mapId, block.reduceId});
   }
 
  private:
-  Worker* const worker_;
+  Worker& worker_;
 };
 
 Worker::Worker(WorkerOptions options)
@@ -81,7 +81,7 @@ std::string Worker::start() {
   blockReaders_ = std::make_unique<folly::CPUThreadPoolExecutor>(4);
 
   server_.start(
-      std::make_shared<Handler>(this),
+      std::make_shared<Handler>(*this),
       options_.bindHost,
       options_.port);
   const auto host = options_.advertisedHost.empty() ? rpc::localHostName()

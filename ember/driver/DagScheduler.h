@@ -158,18 +158,25 @@ class DagScheduler {
     int64_t bytes{0};
   };
 
+  // What runStages() returns, by the kind of job.
+  struct JobResult {
+    // The result stage's rows, without an output key or output files.
+    std::vector<facebook::velox::RowVectorPtr> rows;
+    // With an output key: the shuffle that keeps the output.
+    int32_t outputShuffle{0};
+    // With output files: the parts written, by partition.
+    std::vector<WrittenPart> writtenParts;
+  };
+
   // Runs 'stages' as one job. The last stage is the result stage, whose rows
-  // are returned, or written to 'outputFiles' (then 'writtenParts' is set to
-  // the parts, by partition), or, with 'outputKey', a map stage whose output
-  // is kept in the memo under that key; then 'outputShuffle' is set to its
-  // shuffle.
-  std::vector<facebook::velox::RowVectorPtr> runStages(
+  // are returned (allocated from 'pool'), or written to 'outputFiles', or,
+  // with 'outputKey', a map stage whose output is kept in the memo under
+  // that key.
+  JobResult runStages(
       StagePlan& stages,
       const std::optional<std::string>& outputKey,
       facebook::velox::memory::MemoryPool* pool,
-      int32_t* outputShuffle = nullptr,
-      const OutputFiles* outputFiles = nullptr,
-      std::vector<WrittenPart>* writtenParts = nullptr);
+      const std::optional<OutputFiles>& outputFiles = std::nullopt);
 
   // write() to a kiln:// directory: the parts go into a new bucket, and are
   // published as a new dataset once they are all written.

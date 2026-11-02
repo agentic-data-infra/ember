@@ -76,7 +76,7 @@ struct DagScheduler::JobContext {
   std::unique_ptr<velox::exec::SimpleExpressionEvaluator> evaluator;
   runner::RunnerSessionPtr session;
   // Where the result tasks write their rows, if not back to the driver.
-  const OutputFiles* outputFiles{nullptr};
+  std::optional<OutputFiles> outputFiles;
   // Stages by the shuffle they write.
   std::map<int32_t, StageState*> producers;
 };
@@ -442,7 +442,7 @@ std::vector<velox::RowVectorPtr> DagScheduler::runJob(
     const optimizer::MultiFragmentPlan& plan,
     velox::memory::MemoryPool* pool) {
   auto stages = stagePlan(plan);
-  return runStages(stages, std::nullopt, pool);
+  return runStages(stages, std::nullopt, pool).rows;
 }
 
 int64_t DagScheduler::write(
@@ -452,8 +452,8 @@ int64_t DagScheduler::write(
   if (isKilnPath(files.directory)) {
     return writeKilnDataset(stages, files);
   }
-  std::vector<WrittenPart> parts;
-  runStages(stages, std::nullopt, nullptr, nullptr, &files, &parts);
+  const auto parts =
+      runStages(stages, std::nullopt, nullptr, files).writtenParts;
   int64_t rows = 0;
   for (const auto& part : parts) {
     rows += part.rows;
@@ -490,8 +490,8 @@ int64_t DagScheduler::writeKilnDataset(
   std::optional<uint64_t> version;
   kiln::catalog::Manifest manifest;
   try {
-    std::vector<WrittenPart> parts;
-    runStages(stages, std::nullopt, nullptr, nullptr, &kilnFiles, &parts);
+    const auto parts =
+        runStages(stages, std::nullopt, nullptr, kilnFiles).writtenParts;
     manifest.schema = files.format;
     manifest.bucket = kilnFiles.kilnBucket;
     for (size_t p = 0; p < parts.size(); ++p) {
@@ -523,13 +523,8 @@ int64_t DagScheduler::writeKilnDataset(
 
 int32_t DagScheduler::materialize(const std::string& id) {
   auto stages = cachedStagePlan(id);
-  int32_t shuffleId = 0;
-  runStages(
-      stages,
-      cacheMemoKey(id, stages.stages.back().key),
-      nullptr,
-      &shuffleId);
-  return shuffleId;
+  const auto key = cacheMemoKey(id, stages.stages.back().key);
+  return runStages(stages, key, nullptr).outputShuffle;
 }
 
 bool DagScheduler::uncache(const std::string& id) {
@@ -552,13 +547,11 @@ bool DagScheduler::uncache(const std::string& id) {
   return true;
 }
 
-std::vector<velox::RowVectorPtr> DagScheduler::runStages(
+DagScheduler::JobResult DagScheduler::runStages(
     StagePlan& stages,
     const std::optional<std::string>& outputKey,
     velox::memory::MemoryPool* pool,
-    int32_t* outputShuffle,
-    const OutputFiles* outputFiles,
-    std::vector<WrittenPart>* writtenParts) {
+    const std::optional<OutputFiles>& outputFiles) {
   JobContext job;
   job.jobId = fmt::format("{}_{}", options_.appName, ++jobCounter_);
   job.outputFiles = outputFiles;
@@ -739,29 +732,28 @@ std::vector<velox::RowVectorPtr> DagScheduler::runStages(
   // stored outputs are complete already, unless some were lost.
   runStage(states.back(), job);
 
+  JobResult jobResult;
   if (outputKey.has_value()) {
-    *outputShuffle = *states.back().stage->shuffleId;
-    return {};
+    jobResult.outputShuffle = *states.back().stage->shuffleId;
+    return jobResult;
   }
   const auto& result = states.back();
-  if (outputFiles != nullptr) {
-    writtenParts->clear();
+  if (outputFiles.has_value()) {
     for (size_t p = 0; p < result.resultRows.size(); ++p) {
-      writtenParts->push_back(WrittenPart{
+      jobResult.writtenParts.push_back(WrittenPart{
           .rows = result.resultRows[p],
           .chunk = result.resultChunks[p],
           .bytes = result.resultBytes[p]});
     }
-    return {};
+    return jobResult;
   }
-  std::vector<velox::RowVectorPtr> rows;
   const auto type = result.stage->plan->outputType();
   for (const auto& pages : result.resultPages) {
     for (const auto& page : pages) {
-      rows.push_back(deserializeRows(page, type, pool));
+      jobResult.rows.push_back(deserializeRows(page, type, pool));
     }
   }
-  return rows;
+  return jobResult;
 }
 
 void DagScheduler::runStage(StageState& state, JobContext& job) {
@@ -851,8 +843,8 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
         }
       }
       task.resultTask = state.isResult;
-      if (state.isResult && job.outputFiles != nullptr) {
-        task.outputFiles = *job.outputFiles;
+      if (state.isResult) {
+        task.outputFiles = job.outputFiles;
       }
       task.config = options_.config;
       if (stage.shuffleId.has_value()) {
