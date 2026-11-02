@@ -24,9 +24,13 @@
 
 #pragma once
 
+#include <folly/Function.h>
+
 #include "ember/shuffle/FileShuffle.h"
+#include "kiln/common/ChunkId.h"
 
 namespace kiln::client {
+class BufferPool;
 class Client;
 }
 
@@ -43,6 +47,32 @@ std::shared_ptr<kiln::client::Client> kilnClient(const std::string& metadata);
 /// on by default). Off, they use RDMA (or TCP) there too, e.g. to run RDMA
 /// on one host. Clients created before keep their setting.
 void setKilnUseShm(bool useShm);
+
+/// The size of the buffers Kiln data moves through: Kiln's buffer pools
+/// (see kilnReadPool()) hold buffers of this size, and reads and appends
+/// are cut into pieces of it.
+inline constexpr size_t kKilnBufferBytes = 4 << 20;
+
+/// Default buffers of each pool, 256 MiB each.
+inline constexpr size_t kDefaultKilnReadBuffers = 64;
+inline constexpr size_t kDefaultKilnWriteBuffers = 64;
+
+/// The number of buffers in the read and write pools of each Kiln cluster
+/// this process uses from now on (pools created before keep theirs).
+void setKilnBufferPools(size_t readBuffers, size_t writeBuffers);
+
+/// The process's pools of buffers for moving data from and to the Kiln
+/// cluster of metadata server 'metadata', allocated (with RDMA, registered
+/// with the NIC) at the first use, so that no read or append allocates or
+/// registers memory. Callers wait while a pool has no buffers free. Reads
+/// hold their buffers only while reading (see co_readKiln()); appends while
+/// filling and appending, and an output file writer for its lifetime. With
+/// one pool, writers could hold all buffers while the reads that would let
+/// them finish wait.
+std::shared_ptr<kiln::client::BufferPool> kilnReadPool(
+    const std::string& metadata);
+std::shared_ptr<kiln::client::BufferPool> kilnWritePool(
+    const std::string& metadata);
 
 /// The metadata server and chunk (hex) of a kilnLocation().
 std::pair<std::string, std::string> parseKilnLocation(
@@ -68,8 +98,20 @@ std::unique_ptr<ShuffleWriter> createKilnWriter(
     int64_t spillThreshold,
     bool spill = true);
 
+/// Reads byte ranges ('offset', 'length') of chunk 'id' of the Kiln cluster
+/// of metadata server 'metadata' and passes their bytes, in order, to
+/// 'sink'. Reads in pieces of kKilnBufferBytes into buffers of the read
+/// pool, as many in parallel as the pool has buffers; each batch goes to
+/// 'sink' and back to the pool before the next, so that no read holds
+/// buffers while waiting for others.
+folly::coro::Task<void> co_readKiln(
+    const std::string& metadata,
+    kiln::ChunkId id,
+    std::vector<std::pair<int64_t, int64_t>> ranges,
+    folly::Function<void(const uint8_t*, size_t)> sink);
+
 /// The bytes of the Kiln block at block URL 'url' (see blockUrl()): its
-/// ranges, read in parallel and chained in order.
+/// ranges, read with co_readKiln() into one IOBuf.
 folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchKilnBlock(
     std::string url);
 

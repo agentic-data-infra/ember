@@ -17,6 +17,7 @@
 #include <folly/coro/BlockingWait.h>
 
 #include "ember/shuffle/KilnShuffle.h"
+#include "kiln/client/BufferPool.h"
 #include "kiln/client/Client.h"
 #include "kiln/local/LocalCluster.h"
 #include "velox/common/base/Exceptions.h"
@@ -294,8 +295,7 @@ TEST_F(KilnShuffleTest, firstCommitWins) {
 }
 
 TEST_F(KilnShuffleTest, manyBlocksHeldAtOnce) {
-  // More blocks than pooled buffers, all held at once as Velox may: the
-  // later ones take unpooled memory. Then again, reusing the pool.
+  // Many blocks, all held at once as Velox may. Then again.
   std::vector<int32_t> counts(40, 0);
   for (size_t p = 0; p < counts.size(); ++p) {
     counts[p] = p + 1;
@@ -314,6 +314,60 @@ TEST_F(KilnShuffleTest, manyBlocksHeldAtOnce) {
           pages.back()->moveToFbString().toStdString(),
           fmt::format("{}-{}", p, counts[p] - 1));
     }
+  }
+}
+
+// Against its own cluster, with pools of two buffers: reads and writes take
+// theirs from the pools and give them back, blocks larger than the read pool
+// are read in batches, and blocks read hold no buffers.
+TEST(KilnBufferPoolTest, blocksHoldNoBuffers) {
+  kiln::local::LocalCluster cluster{kiln::local::LocalClusterOptions{
+      .dramServers = 1, .localFsServers = 0}};
+  const auto metadata = cluster.metadataAddress().toString();
+  setKilnBufferPools(2, 2);
+  SCOPE_EXIT {
+    setKilnBufferPools(kDefaultKilnReadBuffers, kDefaultKilnWriteBuffers);
+  };
+  auto reads = kilnReadPool(metadata);
+  auto writes = kilnWritePool(metadata);
+  ASSERT_EQ(reads->count(), 2);
+  ASSERT_EQ(writes->count(), 2);
+
+  const auto dir = fs::temp_directory_path() /
+      fmt::format("ember_kiln_pool_{}", ::getpid());
+  auto store = std::make_shared<ShuffleBlockStore>("test-executor", dir.string());
+  SCOPE_EXIT {
+    fs::remove_all(dir);
+  };
+  // Partition 0 is three pages of 3 MiB, more than the read pool's 8 MiB;
+  // spill=false appends each page as a segment, from the write pool too.
+  const std::string data(3 << 20, 'p');
+  for (const bool spill : {true, false}) {
+    SCOPED_TRACE(spill);
+    auto mapWriter = createKilnWriter(
+        store, metadata, "dram", kiln::kDefaultBucket, spill ? 0 : 1, 0, 2,
+        "attempt0", /*spillThreshold=*/spill ? 1 << 30 : 1, spill);
+    for (int i = 0; i < 3; ++i) {
+      mapWriter->collect(0, folly::IOBuf::copyBuffer(data));
+    }
+    mapWriter->collect(1, folly::IOBuf::copyBuffer("small"));
+    auto status = mapWriter->commit();
+    EXPECT_EQ(writes->available(), 2);
+
+    std::vector<std::unique_ptr<folly::IOBuf>> held;
+    for (int32_t p = 0; p < 2; ++p) {
+      held.push_back(folly::coro::blockingWait(co_fetchKilnBlock(
+          blockUrl(status.location, {0, 0, p}, status.blockRanges(p)))));
+    }
+    EXPECT_EQ(reads->available(), 2);
+    auto pages = splitFrames(std::move(held[0]));
+    ASSERT_EQ(pages.size(), 3);
+    for (auto& page : pages) {
+      EXPECT_EQ(page->moveToFbString().toStdString(), data);
+    }
+    EXPECT_EQ(
+        splitFrames(std::move(held[1]))[0]->moveToFbString().toStdString(),
+        "small");
   }
 }
 

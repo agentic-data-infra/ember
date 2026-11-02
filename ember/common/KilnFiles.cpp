@@ -40,12 +40,12 @@ class KilnReadFile : public velox::ReadFile {
  public:
   KilnReadFile(
       std::string path,
-      std::shared_ptr<kiln::client::Client> client,
+      std::string metadata,
       kiln::ChunkId chunk,
       uint64_t offset,
       uint64_t size)
       : path_{std::move(path)},
-        client_{std::move(client)},
+        metadata_{std::move(metadata)},
         chunk_{chunk},
         offset_{offset},
         size_{size} {}
@@ -56,16 +56,18 @@ class KilnReadFile : public velox::ReadFile {
       void* buf,
       const velox::FileIoContext& /*context*/) const override {
     VELOX_CHECK_LE(offset + length, size_, "Read past the end of {}", path_);
+    // Through the read pool's buffers, so that no read registers Velox's
+    // memory, then copied into it.
     auto* data = static_cast<char*>(buf);
-    for (uint64_t done = 0; done < length;) {
-      auto buffer = blockingWait(client_->co_read(
-          chunk_,
-          offset_ + offset + done,
-          length - done,
-          client_->registerMemory(data + done, length - done)));
-      VELOX_CHECK_GT(buffer.size(), 0, "{} is cut short", path_);
-      done += buffer.size();
-    }
+    uint64_t done = 0;
+    blockingWait(shuffle::co_readKiln(
+        metadata_,
+        chunk_,
+        {{static_cast<int64_t>(offset_ + offset), static_cast<int64_t>(length)}},
+        [&](const uint8_t* bytes, size_t size) {
+          std::memcpy(data + done, bytes, size);
+          done += size;
+        }));
     return {data, length};
   }
 
@@ -91,7 +93,7 @@ class KilnReadFile : public velox::ReadFile {
 
  private:
   const std::string path_;
-  const std::shared_ptr<kiln::client::Client> client_;
+  const std::string metadata_;
   const kiln::ChunkId chunk_;
   const uint64_t offset_;
   const uint64_t size_;
@@ -119,7 +121,7 @@ class KilnFileSystem : public velox::filesystems::FileSystem {
         VELOX_CHECK(entry.length.has_value(), "{} has no length", path);
         return std::make_unique<KilnReadFile>(
             std::string(path),
-            shuffle::kilnClient(parsed.metadata),
+            parsed.metadata,
             entry.id,
             entry.offset,
             *entry.length);

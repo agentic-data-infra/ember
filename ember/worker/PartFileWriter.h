@@ -23,6 +23,7 @@ class FileSystem;
 namespace kiln {
 class Buffer;
 namespace client {
+class BufferPool;
 class ChunkWriter;
 class Client;
 } // namespace client
@@ -70,7 +71,8 @@ class PartFileWriter {
   std::unique_ptr<facebook::velox::WriteFile> file_;
   std::shared_ptr<kiln::client::Client> kiln_;
   std::unique_ptr<kiln::client::ChunkWriter> chunkWriter_;
-  // Bytes waiting to be appended to the chunk.
+  std::shared_ptr<kiln::client::BufferPool> pool_;
+  // Bytes waiting to be appended to the chunk, in a buffer of pool_.
   std::unique_ptr<kiln::Buffer> kilnBuffer_;
   std::string chunk_;
   std::string buffer_;
