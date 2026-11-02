@@ -23,19 +23,19 @@ constexpr auto kMonitorInterval = std::chrono::milliseconds(500);
 
 class ClusterBackend::Handler : public rpc::DriverHandler {
  public:
-  explicit Handler(ClusterBackend* backend) : backend_{backend} {}
+  explicit Handler(ClusterBackend& backend) : backend_{backend} {}
 
   rpc::RegisterWorkerResponse registerWorker(
       const rpc::RegisterWorkerRequest& request) override {
-    return backend_->registerWorker(request);
+    return backend_.registerWorker(request);
   }
 
   bool heartbeat(const std::string& workerId) override {
-    return backend_->heartbeat(workerId);
+    return backend_.heartbeat(workerId);
   }
 
  private:
-  ClusterBackend* const backend_;
+  ClusterBackend& backend_;
 };
 
 ClusterBackend::ClusterBackend(ClusterBackendOptions options)
@@ -43,7 +43,7 @@ ClusterBackend::ClusterBackend(ClusterBackendOptions options)
       callbacks_{std::make_unique<folly::CPUThreadPoolExecutor>(4)},
       noWorkersSince_{std::chrono::steady_clock::now()} {
   server_.start(
-      std::make_shared<Handler>(this), options_.bindHost, options_.port);
+      std::make_shared<Handler>(*this), options_.bindHost, options_.port);
   monitor_ = std::thread([this] { monitor(); });
   LOG(INFO) << "Driver of " << options_.appName << " listening on port "
             << server_.port();
