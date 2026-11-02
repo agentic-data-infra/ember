@@ -18,7 +18,7 @@ using folly::coro::blockingWait;
 
 // The manifest property that lists the map outputs: per map, the index of
 // its chunk in Manifest::chunks (-1 for an empty output, which has none)
-// and its partition lengths.
+// and its partition lengths per segment (MapStatus::segments).
 constexpr const char* kMapsProperty = "ember.maps";
 
 } // namespace
@@ -67,8 +67,11 @@ std::optional<std::vector<shuffle::MapStatus>> KilnMemo::get(
         .location = shuffle::kilnLocation(
             metadata_,
             chunk < 0 ? "" : manifest->chunks.at(chunk).id.toString())};
-    for (const auto& length : map["lengths"]) {
-      status.partitionLengths.push_back(length.asInt());
+    for (const auto& segment : map["segments"]) {
+      auto& lengths = status.segments.emplace_back();
+      for (const auto& length : segment) {
+        lengths.push_back(length.asInt());
+      }
     }
     maps.push_back(std::move(status));
   }
@@ -89,10 +92,12 @@ bool KilnMemo::put(
       return false;
     }
     int64_t size = 0;
-    folly::dynamic lengths = folly::dynamic::array;
-    for (const auto length : status.partitionLengths) {
-      lengths.push_back(length);
-      size += length;
+    folly::dynamic segments = folly::dynamic::array;
+    for (const auto& segment : status.segments) {
+      segments.push_back(folly::dynamic::array(segment.begin(), segment.end()));
+      for (const auto length : segment) {
+        size += length;
+      }
     }
     int64_t index = -1;
     if (!chunk.empty()) {
@@ -102,7 +107,8 @@ bool KilnMemo::put(
            .length = static_cast<uint64_t>(size)});
     }
     manifest.bytes += size;
-    list.push_back(folly::dynamic::object("chunk", index)("lengths", lengths));
+    list.push_back(
+        folly::dynamic::object("chunk", index)("segments", std::move(segments)));
   }
   manifest.properties[kMapsProperty] = folly::toJson(list);
   return blockingWait(catalog_->co_putMemo(key, std::move(manifest)));

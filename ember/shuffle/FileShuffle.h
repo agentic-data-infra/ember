@@ -141,6 +141,14 @@ class PartitionedPageWriter : public ShuffleWriter {
   /// The bytes writePartitions() writes.
   int64_t outputBytes() const;
 
+  /// Called when the buffered pages pass the spill threshold: writes them to
+  /// a run file, which writePartitions() reads back.
+  virtual void spill();
+
+  /// Writes the buffered pages, partition by partition, through 'write' and
+  /// drops them. Returns the numPartitions + 1 offsets of the partitions.
+  std::vector<int64_t> writeBuffered(const Write& write);
+
   /// A file name in the store's directory, unique to this attempt.
   std::string tmpPath(const std::string& suffix) const;
 
@@ -167,7 +175,6 @@ class PartitionedPageWriter : public ShuffleWriter {
     std::vector<int64_t> offsets;
   };
 
-  void spill();
   void removeRuns();
 
   const std::shared_ptr<ShuffleBlockStore> store_;
@@ -191,6 +198,9 @@ class LocalBlockTransport : public BlockTransport {
       std::string location,
       BlockId id) override;
 };
+
+/// The partition lengths of numPartitions + 1 partition offsets.
+std::vector<int64_t> partitionLengths(const std::vector<int64_t>& offsets);
 
 /// Splits a block into its pages.
 std::vector<std::unique_ptr<folly::IOBuf>> splitFrames(

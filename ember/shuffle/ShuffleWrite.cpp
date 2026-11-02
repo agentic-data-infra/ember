@@ -162,6 +162,7 @@ class ShuffleWrite : public exec::Operator {
         ShuffleBlockStore::kDefaultSpillThreshold);
     const auto kind =
         config.get<std::string>(std::string(kShuffleStore), "file");
+    const auto spill = config.get<bool>(std::string(kShuffleSpill), true);
     if (kind == "kiln") {
       auto metadata = config.get<std::string>(std::string(kKilnMetadata));
       VELOX_USER_CHECK(
@@ -178,9 +179,12 @@ class ShuffleWrite : public exec::Operator {
           task->destination(),
           node_->numPartitions(),
           attemptTag(task->taskId()),
-          spillThreshold);
+          spillThreshold,
+          spill);
     } else {
       VELOX_USER_CHECK_EQ(kind, "file", "Unknown {}", kShuffleStore);
+      VELOX_USER_CHECK(
+          spill, "{}=false needs {}=kiln", kShuffleSpill, kShuffleStore);
       writer_ = store->createWriter(
           node_->shuffleId(),
           task->destination(),

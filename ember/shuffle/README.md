@@ -6,9 +6,9 @@ The interfaces follow Presto C++'s `ShuffleInterface`.
 
 | File | Contents |
 |------|----------|
-| `ShuffleInterface` | `BlockId` (shuffle, map, reduce), `MapStatus` (location, bytes per partition), `ShuffleWriter` (`collect`, `commit`, `abort`) and `BlockTransport` (`fetchBlock(location, block)`). Block URLs: `ember-shuffle://<location>/<shuffle>/<map>/<reduce>`. `FetchFailure` names a block that could not be fetched; it travels in the task's error message as `[fetch-failed <block url>]`. |
+| `ShuffleInterface` | `BlockId` (shuffle, map, reduce), `MapStatus` (location, bytes per partition of each segment), `ShuffleWriter` (`collect`, `commit`, `abort`) and `BlockTransport` (`fetchBlock(location, block)`). Block URLs: `ember-shuffle://<location>/<shuffle>/<map>/<reduce>`. `FetchFailure` names a block that could not be fetched; it travels in the task's error message as `[fetch-failed <block url>]`. |
 | `FileShuffle` | `ShuffleBlockStore`, the per-executor store of shuffle files, `PartitionedPageWriter`, the buffering and spilling that all writers share, the file writer and the local `BlockTransport`. |
-| `KilnShuffle` | The Kiln writer, which commits a map output as one Kiln chunk, and `co_fetchKilnBlock`, which reads a block's byte range of it. Both use a small pool of Kiln buffers per cluster. |
+| `KilnShuffle` | The Kiln writer, which commits a map output as one Kiln chunk, and `co_fetchKilnBlock`, which reads a block's byte ranges of it. Both use a small pool of Kiln buffers per cluster. |
 | `ShuffleWrite` | `ShuffleWriteNode` and operator: partitions its input (hash, round robin, range or single), serializes it to Presto pages and hands them to a `ShuffleWriter`; commits at end of input. |
 | `ShuffleRead` | `ShuffleReadNode`: Velox's `Exchange` or `MergeExchange` fed by an `ExchangeSource` that fetches blocks through the `BlockTransport`. Splits are block URLs. A failed fetch fails the task with a `FetchFailure`. |
 | `RangePartitionFunction` | Range partitioning for a global sort: fixed slices of a VARCHAR or VARBINARY key's first 8 bytes, in the sort's direction, nulls first or last. |
@@ -40,7 +40,20 @@ block URLs with byte ranges,
 `kiln://<metadata>/<chunk>/<offset>/<length>/<shuffle>/<map>/<reduce>`.
 `<metadata>` has its `/` and `%` percent-encoded, so a URL list stays one
 part.
-Reduce tasks read their range from Kiln directly; no worker serves these
+With `ember.shuffle.spill=false` (Kiln store only; the default is `true`),
+a map task does not spill runs to the executor's directory: each time its
+buffered pages pass the spill threshold, it copies them, partition by
+partition, into one registered buffer and starts appending it to its chunk
+without waiting, so Kiln moves the bytes (over RDMA, one-sided writes of
+all the blocks at once) while the map task goes on. The next append, and the
+commit, first wait for the one in flight. The chunk is then a sequence of
+segments, each laid out partition by partition; the map's `MapStatus` lists
+the partition lengths of each segment (an output written at commit is one
+segment), and a block URL lists one byte range per segment,
+`kiln://<metadata>/<chunk>/<offset>,.../<length>,.../<shuffle>/<map>/<reduce>`,
+which the reduce task reads in parallel and chains in order. With
+`dram+localfs`, the first segment's size picks the tier.
+Reduce tasks read their ranges from Kiln directly; no worker serves these
 blocks. So the outputs outlive the executor that wrote them: losing it loses
 none of them. A chunk Kiln has evicted fails the read with a `FetchFailure`,
 and the driver recomputes that map output as it would a lost one. Writers
