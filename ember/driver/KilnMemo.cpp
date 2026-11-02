@@ -48,6 +48,7 @@ KilnMemo::KilnMemo(std::string metadata)
           // Like the shuffle chunks they list: in DRAM only.
           kiln::catalog::CatalogOptions{
               .placement = {.tier = kiln::Tier::kDram},
+              .buffers = shuffle::kilnStagingPool(metadata_),
               .refPrefix = "memo/ember/"})} {}
 
 KilnMemo::~KilnMemo() = default;

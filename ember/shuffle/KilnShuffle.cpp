@@ -37,9 +37,13 @@ std::atomic<size_t> stagingBuffers{kDefaultKilnStagingBuffers};
 // One client per cluster: clients cache where chunks are and keep their
 // connections. They are never destroyed: at exit, folly's singletons may be
 // gone already, and closing an RDMA metadata client needs its timekeeper.
-// 'pools' also allocates the cluster's buffer pools, if not done yet: a
-// driver that only manages buckets never does.
-KilnCluster kilnCluster(const std::string& metadata, bool pools = false) {
+// Which of a cluster's buffer pools a caller needs.
+enum class Pool { kNone, kReads, kStaging, kWrites };
+
+// The cluster's client, and 'pool' allocated if not done yet. Each pool is
+// allocated by its first use only: a driver that only reads manifests needs
+// just the staging pool, and one that only manages buckets none.
+KilnCluster kilnCluster(const std::string& metadata, Pool pool = Pool::kNone) {
   static std::mutex mutex;
   static auto* clusters = new std::map<std::string, KilnCluster>();
   std::lock_guard<std::mutex> l(mutex);
@@ -50,11 +54,15 @@ KilnCluster kilnCluster(const std::string& metadata, bool pools = false) {
             .metadata = kiln::MetadataAddress::parse(metadata),
             .useShm = useShm.load()});
   }
-  if (pools && cluster.reads == nullptr) {
+  if (pool == Pool::kReads && cluster.reads == nullptr) {
     cluster.reads = std::make_shared<kiln::client::BufferPool>(
         *cluster.client, kKilnReadPieceBytes, readBuffers.load());
+  }
+  if (pool == Pool::kStaging && cluster.staging == nullptr) {
     cluster.staging = std::make_shared<kiln::client::BufferPool>(
         *cluster.client, kKilnBufferBytes, stagingBuffers.load());
+  }
+  if (pool == Pool::kWrites && cluster.writes == nullptr) {
     cluster.writes = std::make_shared<kiln::client::BufferPool>(
         *cluster.client, kKilnBufferBytes, writeBuffers.load());
   }
@@ -214,7 +222,7 @@ class KilnShuffleWriter : public PartitionedPageWriter {
   // Writes the whole output, partition by partition, as one chunk of one
   // segment.
   MapStatus commitWhole() {
-    const auto cluster = kilnCluster(metadata_, /*pools=*/true);
+    const auto cluster = kilnCluster(metadata_, Pool::kWrites);
     const auto& client = cluster.client;
     // With the whole size known, an overflow placement puts all of the
     // output into one tier.
@@ -298,7 +306,7 @@ class KilnShuffleWriter : public PartitionedPageWriter {
   // first waits for the previous one, which gives its buffers back.
   void appendSegment() {
     awaitAppend();
-    const auto cluster = kilnCluster(metadata_, /*pools=*/true);
+    const auto cluster = kilnCluster(metadata_, Pool::kWrites);
     const auto bytes = outputBytes();
     if (chunk_ == nullptr) {
       // The size of the whole output is not known yet: an overflow placement
@@ -323,7 +331,9 @@ class KilnShuffleWriter : public PartitionedPageWriter {
       append_.reset();
       SCOPE_EXIT {
         // Moved from on success; as they were on failure.
-        release(*kilnCluster(metadata_, true).writes, std::move(inFlight_));
+        release(
+            *kilnCluster(metadata_, Pool::kWrites).writes,
+            std::move(inFlight_));
       };
       inFlight_ = std::move(append).get();
     }
@@ -484,7 +494,7 @@ folly::coro::Task<void> co_readKiln(
     kiln::ChunkId id,
     std::vector<std::pair<int64_t, int64_t>> ranges,
     folly::Function<void(const uint8_t*, size_t)> sink) {
-  const auto cluster = kilnCluster(metadata, /*pools=*/true);
+  const auto cluster = kilnCluster(metadata, Pool::kStaging);
   auto& pool = *cluster.staging;
   const auto all = pieces(ranges, kKilnBufferBytes);
   for (size_t first = 0; first < all.size();) {
@@ -549,7 +559,7 @@ KilnBlockReader::KilnBlockReader(const std::string& url) {
   const auto [metadata, chunk] = parseKilnLocation(parseBlockUrl(url).first);
   auto state = std::make_shared<State>();
   state->metadata = metadata;
-  state->cluster = kilnCluster(metadata, /*pools=*/true);
+  state->cluster = kilnCluster(metadata, Pool::kReads);
   state->id = kiln::ChunkId::parse(chunk);
   state->pieces = pieces(kilnBlockRanges(url), kKilnReadPieceBytes);
   state_ = std::move(state);
@@ -623,17 +633,17 @@ void setKilnBufferPools(size_t reads, size_t writes, size_t staging) {
 
 std::shared_ptr<kiln::client::BufferPool> kilnReadPool(
     const std::string& metadata) {
-  return kilnCluster(metadata, /*pools=*/true).reads;
+  return kilnCluster(metadata, Pool::kReads).reads;
 }
 
 std::shared_ptr<kiln::client::BufferPool> kilnStagingPool(
     const std::string& metadata) {
-  return kilnCluster(metadata, /*pools=*/true).staging;
+  return kilnCluster(metadata, Pool::kStaging).staging;
 }
 
 std::shared_ptr<kiln::client::BufferPool> kilnWritePool(
     const std::string& metadata) {
-  return kilnCluster(metadata, /*pools=*/true).writes;
+  return kilnCluster(metadata, Pool::kWrites).writes;
 }
 
 } // namespace ember::shuffle

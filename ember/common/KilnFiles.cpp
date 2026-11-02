@@ -24,9 +24,19 @@ constexpr std::string_view kScheme = "kiln://";
 // The first path segment of a dataset path, after the metadata server.
 constexpr std::string_view kDataSegment = "data";
 
+// The catalog of 'metadata''s cluster. Manifests are read through the
+// staging pool, so that opening a file neither allocates nor registers
+// memory.
+kiln::catalog::Catalog catalogOf(const std::string& metadata) {
+  return kiln::catalog::Catalog(
+      *shuffle::kilnClient(metadata),
+      kiln::catalog::CatalogOptions{
+          .buffers = shuffle::kilnStagingPool(metadata)});
+}
+
 // The dataset's current version; throws a user error if there is none.
 kiln::catalog::Dataset getDataset(const KilnPath& path) {
-  kiln::catalog::Catalog catalog(*shuffle::kilnClient(path.metadata));
+  auto catalog = catalogOf(path.metadata);
   auto dataset = blockingWait(catalog.co_getDataset(path.dataset));
   VELOX_USER_CHECK(
       dataset.has_value(),
@@ -150,7 +160,7 @@ class KilnFileSystem : public velox::filesystems::FileSystem {
     if (parsed.dataset.empty()) {
       return true;
     }
-    kiln::catalog::Catalog catalog(*shuffle::kilnClient(parsed.metadata));
+    auto catalog = catalogOf(parsed.metadata);
     const auto dataset = blockingWait(catalog.co_getDataset(parsed.dataset));
     if (!dataset.has_value()) {
       return false;
@@ -174,7 +184,7 @@ class KilnFileSystem : public velox::filesystems::FileSystem {
     if (parsed.dataset.empty()) {
       return true;
     }
-    kiln::catalog::Catalog catalog(*shuffle::kilnClient(parsed.metadata));
+    auto catalog = catalogOf(parsed.metadata);
     return blockingWait(catalog.co_getDataset(parsed.dataset)).has_value();
   }
 
@@ -184,7 +194,7 @@ class KilnFileSystem : public velox::filesystems::FileSystem {
     VELOX_USER_CHECK(parsed.file.empty(), "Not a directory: {}", path);
     std::vector<std::string> paths;
     if (parsed.dataset.empty()) {
-      kiln::catalog::Catalog catalog(*shuffle::kilnClient(parsed.metadata));
+      auto catalog = catalogOf(parsed.metadata);
       for (const auto& name : blockingWait(catalog.co_listDatasets())) {
         paths.push_back(kilnPath(parsed.metadata, name));
       }
