@@ -17,6 +17,7 @@
 #include <folly/coro/BlockingWait.h>
 
 #include "ember/shuffle/KilnShuffle.h"
+#include "kiln/client/BufferPool.h"
 #include "kiln/client/Client.h"
 #include "kiln/local/LocalCluster.h"
 #include "velox/common/base/Exceptions.h"
@@ -294,8 +295,8 @@ TEST_F(KilnShuffleTest, firstCommitWins) {
 }
 
 TEST_F(KilnShuffleTest, manyBlocksHeldAtOnce) {
-  // More blocks than pooled buffers, all held at once as Velox may: the
-  // later ones take unpooled memory. Then again, reusing the pool.
+  // Many blocks, all held at once as Velox may: the first in buffers of the
+  // read pool, the others copied once it has none free. Then again.
   std::vector<int32_t> counts(40, 0);
   for (size_t p = 0; p < counts.size(); ++p) {
     counts[p] = p + 1;
@@ -314,6 +315,75 @@ TEST_F(KilnShuffleTest, manyBlocksHeldAtOnce) {
           pages.back()->moveToFbString().toStdString(),
           fmt::format("{}-{}", p, counts[p] - 1));
     }
+  }
+}
+
+// Against its own cluster, with pools of two buffers: blocks read keep read
+// buffers while the read pool has them free and are read through the
+// staging pool, in batches if larger, when not, without waiting; writes
+// take theirs from the write pool and give them back.
+TEST(KilnBufferPoolTest, readsNeverWaitForHeldBuffers) {
+  kiln::local::LocalCluster cluster{kiln::local::LocalClusterOptions{
+      .dramServers = 1, .localFsServers = 0}};
+  const auto metadata = cluster.metadataAddress().toString();
+  setKilnBufferPools(2, 2, 2);
+  SCOPE_EXIT {
+    setKilnBufferPools(kDefaultKilnReadBuffers, kDefaultKilnWriteBuffers);
+  };
+  auto reads = kilnReadPool(metadata);
+  auto staging = kilnStagingPool(metadata);
+  auto writes = kilnWritePool(metadata);
+  ASSERT_EQ(reads->count(), 2);
+  ASSERT_EQ(staging->count(), 2);
+  ASSERT_EQ(writes->count(), 2);
+
+  const auto dir = fs::temp_directory_path() /
+      fmt::format("ember_kiln_pool_{}", ::getpid());
+  auto store = std::make_shared<ShuffleBlockStore>("test-executor", dir.string());
+  SCOPE_EXIT {
+    fs::remove_all(dir);
+  };
+  // Partition 0 is three pages of 3 MiB, more than either read pool's
+  // 8 MiB; spill=false appends each page as a segment, from the write pool
+  // too. Partitions 1 to 3 are one small page each.
+  const std::string data(3 << 20, 'p');
+  for (const bool spill : {true, false}) {
+    SCOPED_TRACE(spill);
+    auto mapWriter = createKilnWriter(
+        store, metadata, "dram", kiln::kDefaultBucket, spill ? 0 : 1, 0, 4,
+        "attempt0", /*spillThreshold=*/spill ? 1 << 30 : 1, spill);
+    for (int i = 0; i < 3; ++i) {
+      mapWriter->collect(0, folly::IOBuf::copyBuffer(data));
+    }
+    for (int32_t p = 1; p < 4; ++p) {
+      mapWriter->collect(p, folly::IOBuf::copyBuffer(fmt::format("page {}", p)));
+    }
+    auto status = mapWriter->commit();
+    EXPECT_EQ(writes->available(), 2);
+
+    auto fetch = [&](int32_t p) {
+      return folly::coro::blockingWait(co_fetchKilnBlock(
+          blockUrl(status.location, {0, 0, p}, status.blockRanges(p))));
+    };
+    auto text = [](std::unique_ptr<folly::IOBuf> block) {
+      return splitFrames(std::move(block))[0]->moveToFbString().toStdString();
+    };
+    // Blocks 1 and 2 keep a read buffer each, and block 3 finds none.
+    std::vector<std::unique_ptr<folly::IOBuf>> held;
+    held.push_back(fetch(1));
+    EXPECT_EQ(reads->available(), 1);
+    held.push_back(fetch(2));
+    EXPECT_EQ(reads->available(), 0);
+    EXPECT_EQ(text(fetch(3)), "page 3");
+    // Too large for the read pool, so read through staging in two batches.
+    held.clear();
+    auto pages = splitFrames(fetch(0));
+    ASSERT_EQ(pages.size(), 3);
+    for (auto& page : pages) {
+      EXPECT_EQ(page->moveToFbString().toStdString(), data);
+    }
+    EXPECT_EQ(reads->available(), 2);
+    EXPECT_EQ(staging->available(), 2);
   }
 }
 

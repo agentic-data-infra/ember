@@ -5,6 +5,7 @@
 #include "ember/GensortFileHandler.h"
 #include "ember/KilnFiles.h"
 #include "ember/shuffle/KilnShuffle.h"
+#include "kiln/client/BufferPool.h"
 #include "kiln/client/Client.h"
 #include "velox/common/file/File.h"
 #include "velox/common/file/FileSystems.h"
@@ -16,9 +17,6 @@ namespace velox = facebook::velox;
 using folly::coro::blockingWait;
 
 namespace {
-
-// Bytes buffered before they are appended to a Kiln chunk.
-constexpr size_t kKilnAppendBytes = 4 << 20;
 
 // Hidden from directory reads, which skip names starting with '.'.
 std::string tempPath(
@@ -47,12 +45,16 @@ PartFileWriter::PartFileWriter(
   VELOX_USER_CHECK_EQ(
       files_.format, kGensortSchema, "Unsupported output format");
   if (isKilnPath(files_.directory)) {
-    kiln_ = shuffle::kilnClient(parseKilnPath(files_.directory).metadata);
+    const auto metadata = parseKilnPath(files_.directory).metadata;
+    kiln_ = shuffle::kilnClient(metadata);
     const auto placement = kilnFilesPlacement(config);
     chunkWriter_ =
         blockingWait(kiln_->co_create(files_.kilnBucket, placement));
+    // One write buffer, held until the part is done: the writer never needs
+    // a second, so writers holding one never wait for each other.
+    pool_ = shuffle::kilnWritePool(metadata);
     kilnBuffer_ = std::make_unique<kiln::Buffer>(
-        kiln_->allocateBuffer(kKilnAppendBytes));
+        std::move(blockingWait(pool_->co_acquire(1))[0]));
     return;
   }
   fileSystem_ = velox::filesystems::getFileSystem(files_.directory, nullptr);
@@ -61,6 +63,9 @@ PartFileWriter::PartFileWriter(
 }
 
 PartFileWriter::~PartFileWriter() {
+  if (pool_ != nullptr) {
+    pool_->release(std::move(*kilnBuffer_));
+  }
   if (committed_) {
     return;
   }
