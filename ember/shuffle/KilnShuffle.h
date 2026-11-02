@@ -97,8 +97,8 @@ std::shared_ptr<kiln::client::BufferPool> kilnWritePool(
     const std::string& metadata);
 
 /// Creates the client and pools of the Kiln cluster of metadata server
-/// 'metadata' now, e.g. when a worker starts, so that the first task does
-/// not wait for the pools to be allocated and registered.
+/// 'metadata' now, e.g. when a local session starts, so that the first
+/// task does not wait for the pools to be allocated and registered.
 void warmUpKiln(const std::string& metadata);
 
 /// The metadata server and chunk (hex) of a kilnLocation().
