@@ -22,6 +22,8 @@
 #include <map>
 #include <mutex>
 
+#include <folly/io/IOBufQueue.h>
+
 #include "ember/shuffle/ShuffleInterface.h"
 
 namespace ember::shuffle {
@@ -205,5 +207,9 @@ std::vector<int64_t> partitionLengths(const std::vector<int64_t>& offsets);
 /// Splits a block into its pages.
 std::vector<std::unique_ptr<folly::IOBuf>> splitFrames(
     std::unique_ptr<folly::IOBuf> block);
+
+/// Takes the whole pages off the front of 'queue', a block read so far,
+/// without copying; a page cut short stays.
+std::vector<std::unique_ptr<folly::IOBuf>> takeFrames(folly::IOBufQueue& queue);
 
 } // namespace ember::shuffle
