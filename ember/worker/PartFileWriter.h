@@ -72,8 +72,9 @@ class PartFileWriter {
   std::shared_ptr<kiln::client::Client> kiln_;
   std::unique_ptr<kiln::client::ChunkWriter> chunkWriter_;
   std::shared_ptr<kiln::client::BufferPool> pool_;
-  // Bytes waiting to be appended to the chunk, in a buffer of pool_.
-  std::unique_ptr<kiln::Buffer> kilnBuffer_;
+  // Bytes waiting to be appended to the chunk, in one buffer of pool_. A
+  // vector for Kiln's gather append, which keeps it if the append fails.
+  std::vector<kiln::Buffer> kilnBuffers_;
   std::string chunk_;
   std::string buffer_;
   int64_t bytes_{0};

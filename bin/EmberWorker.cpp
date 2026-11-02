@@ -41,6 +41,11 @@ DEFINE_int32(
     fetch_timeout_ms,
     120'000,
     "Milliseconds before a shuffle block fetch from another worker fails.");
+DEFINE_string(
+    kiln_metadata,
+    "",
+    "Kiln metadata server(s) whose buffer pools to allocate at startup, as "
+    "in ember.shuffle.kiln.metadata; else the first task allocates them.");
 DEFINE_int32(
     kiln_read_buffers,
     ember::shuffle::kDefaultKilnReadBuffers,
@@ -82,6 +87,9 @@ int main(int argc, char** argv) {
       FLAGS_kiln_read_buffers,
       FLAGS_kiln_write_buffers,
       FLAGS_kiln_staging_buffers);
+  if (!FLAGS_kiln_metadata.empty()) {
+    ember::shuffle::warmUpKiln(FLAGS_kiln_metadata);
+  }
   ember::WorkerOptions options;
   options.driver = ember::rpc::HostAndPort::parse(FLAGS_driver);
   options.bindHost = FLAGS_bind_host;

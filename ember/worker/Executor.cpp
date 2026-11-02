@@ -81,6 +81,13 @@ std::vector<rpc::FileInfo> Executor::listFiles(
   return files;
 }
 
+namespace {
+
+// Default bytes a merge exchange buffers across its sources.
+constexpr int64_t kMergeExchangeBufferBytes = 32 << 20;
+
+} // namespace
+
 std::string Executor::runTask(const std::string& bytes) {
   TaskResult result;
   uint64_t wallMicros = 0;
@@ -95,6 +102,12 @@ std::string Executor::runTask(const std::string& bytes) {
     auto config = std::unordered_map<std::string, std::string>(
         description.config.begin(), description.config.end());
     config[std::string(shuffle::kExecutorLocation)] = options_.location;
+    // Velox's 128 MB per merge would let the merges of a few reduce tasks
+    // hold more Kiln read buffers than the pool has, and the rest of their
+    // reads would be copied.
+    config.try_emplace(
+        std::string(core::QueryConfig::kMaxMergeExchangeBufferSize),
+        std::to_string(kMergeExchangeBufferBytes));
     // With a memory limit, the task's pool cannot grow past it: the
     // arbitrator makes its operators spill, if spilling is enabled, or fails
     // the task.

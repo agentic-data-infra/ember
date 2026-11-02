@@ -53,8 +53,7 @@ PartFileWriter::PartFileWriter(
     // One write buffer, held until the part is done: the writer never needs
     // a second, so writers holding one never wait for each other.
     pool_ = shuffle::kilnWritePool(metadata);
-    kilnBuffer_ = std::make_unique<kiln::Buffer>(
-        std::move(blockingWait(pool_->co_acquire(1))[0]));
+    kilnBuffers_ = blockingWait(pool_->co_acquire(1));
     return;
   }
   fileSystem_ = velox::filesystems::getFileSystem(files_.directory, nullptr);
@@ -64,7 +63,7 @@ PartFileWriter::PartFileWriter(
 
 PartFileWriter::~PartFileWriter() {
   if (pool_ != nullptr) {
-    pool_->release(std::move(*kilnBuffer_));
+    pool_->release(std::move(kilnBuffers_));
   }
   if (committed_) {
     return;
@@ -126,25 +125,26 @@ void PartFileWriter::append(const velox::RowVectorPtr& rows) {
 }
 
 void PartFileWriter::appendToChunk(const std::string& data) {
-  auto& buffer = *kilnBuffer_;
   for (size_t done = 0; done < data.size();) {
+    auto& buffer = kilnBuffers_[0];
     const auto n =
         std::min(data.size() - done, buffer.capacity() - buffer.size());
     std::memcpy(buffer.data() + buffer.size(), data.data() + done, n);
     buffer.setSize(buffer.size() + n);
     done += n;
     if (buffer.size() == buffer.capacity()) {
-      buffer = blockingWait(chunkWriter_->co_append(std::move(buffer)));
-      buffer.setSize(0);
+      kilnBuffers_ =
+          blockingWait(chunkWriter_->co_append(std::move(kilnBuffers_)));
+      kilnBuffers_[0].setSize(0);
     }
   }
 }
 
 int64_t PartFileWriter::commit() {
   if (chunkWriter_ != nullptr) {
-    if (kilnBuffer_->size() > 0) {
-      *kilnBuffer_ =
-          blockingWait(chunkWriter_->co_append(std::move(*kilnBuffer_)));
+    if (kilnBuffers_[0].size() > 0) {
+      kilnBuffers_ =
+          blockingWait(chunkWriter_->co_append(std::move(kilnBuffers_)));
     }
     if (bytes_ == 0) {
       // No chunk for no rows: the driver leaves the part out.
