@@ -103,12 +103,12 @@ std::string TaskResult::serialize() const {
         shuffle::blockUrl(fetchFailure->location, fetchFailure->block);
   }
   if (mapStatus.has_value()) {
-    folly::dynamic lengths = folly::dynamic::array;
-    for (auto length : mapStatus->partitionLengths) {
-      lengths.push_back(length);
+    folly::dynamic segments = folly::dynamic::array;
+    for (const auto& segment : mapStatus->segments) {
+      segments.push_back(folly::dynamic::array(segment.begin(), segment.end()));
     }
     obj["mapStatus"] = folly::dynamic::object("location", mapStatus->location)(
-        "partitionLengths", std::move(lengths));
+        "segments", std::move(segments));
   }
   obj["numPages"] = resultPages.size();
   obj["outputRows"] = outputRows;
@@ -150,8 +150,11 @@ TaskResult TaskResult::deserialize(const std::string& bytes) {
   if (obj.count("mapStatus")) {
     shuffle::MapStatus status;
     status.location = obj["mapStatus"]["location"].asString();
-    for (const auto& length : obj["mapStatus"]["partitionLengths"]) {
-      status.partitionLengths.push_back(length.asInt());
+    for (const auto& segment : obj["mapStatus"]["segments"]) {
+      auto& lengths = status.segments.emplace_back();
+      for (const auto& length : segment) {
+        lengths.push_back(length.asInt());
+      }
     }
     result.mapStatus = std::move(status);
   }

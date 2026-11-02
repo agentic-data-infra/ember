@@ -14,6 +14,13 @@ inline constexpr std::string_view kExecutorLocation = "ember.executor_location";
 inline constexpr std::string_view kSpillThreshold =
     "ember.shuffle.spill_threshold_bytes";
 
+/// Whether a map task spills its buffered pages to run files on the
+/// executor (true, the default) and writes its output at commit, or, with
+/// the "kiln" store, appends them to its Kiln chunk as it runs (false), so
+/// that a reduce partition's bytes are one range per append (see
+/// MapStatus::segments).
+inline constexpr std::string_view kShuffleSpill = "ember.shuffle.spill";
+
 /// Where map outputs go: "file" (the default), the executor's shuffle files,
 /// or "kiln", one Kiln chunk per map output (see KilnShuffle.h).
 inline constexpr std::string_view kShuffleStore = "ember.shuffle.store";

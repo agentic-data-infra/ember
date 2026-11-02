@@ -79,9 +79,10 @@ class FileShuffleTest : public testing::Test {
 TEST_F(FileShuffleTest, partitionsAreContiguousAndInOrder) {
   auto status = writeMap(0, 0, {3, 0, 2}, ShuffleBlockStore::kDefaultSpillThreshold);
   EXPECT_EQ(status.location, "test-executor");
-  ASSERT_EQ(status.partitionLengths.size(), 3);
+  ASSERT_EQ(status.segments.size(), 1);
+  ASSERT_EQ(status.partitionLengths().size(), 3);
   // Each frame is a 4-byte length plus "p-i".
-  EXPECT_EQ(status.partitionLengths, (std::vector<int64_t>{21, 0, 14}));
+  EXPECT_EQ(status.partitionLengths(), (std::vector<int64_t>{21, 0, 14}));
   EXPECT_EQ(readBlock(0, 0, 0), (std::vector<std::string>{"0-0", "0-1", "0-2"}));
   EXPECT_TRUE(readBlock(0, 0, 1).empty());
   EXPECT_EQ(readBlock(0, 0, 2), (std::vector<std::string>{"2-0", "2-1"}));
@@ -118,7 +119,7 @@ TEST_F(FileShuffleTest, firstCommitWins) {
   second->commit();
   auto status = first->commit();
   EXPECT_EQ(readBlock(2, 0, 0), (std::vector<std::string>{"second, longer"}));
-  EXPECT_EQ(status.partitionLengths[0], 4 + 14);
+  EXPECT_EQ(status.partitionLengths()[0], 4 + 14);
 }
 
 TEST_F(FileShuffleTest, abortLeavesNoOutput) {

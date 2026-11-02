@@ -424,7 +424,7 @@ TEST_F(SchedulerTest, taskMessagesRoundTrip) {
   result.state = TaskState::kFailed;
   result.error = "boom";
   result.userError = true;
-  result.mapStatus = shuffle::MapStatus{"executor-1", {10, 0, 7}};
+  result.mapStatus = shuffle::MapStatus{"executor-1", {{10, 0, 7}, {1, 2, 0}}};
   result.resultPages = {"page one", std::string("\0binary\0", 8)};
   result.outputRows = 42;
   auto resultCopy = TaskResult::deserialize(result.serialize());
@@ -433,8 +433,7 @@ TEST_F(SchedulerTest, taskMessagesRoundTrip) {
   EXPECT_EQ(resultCopy.error, "boom");
   EXPECT_TRUE(resultCopy.userError);
   EXPECT_EQ(resultCopy.mapStatus->location, "executor-1");
-  EXPECT_EQ(
-      resultCopy.mapStatus->partitionLengths, (std::vector<int64_t>{10, 0, 7}));
+  EXPECT_EQ(resultCopy.mapStatus->segments, result.mapStatus->segments);
   EXPECT_EQ(resultCopy.resultPages, result.resultPages);
   EXPECT_EQ(resultCopy.outputRows, 42);
 }
@@ -923,12 +922,26 @@ TEST_F(SchedulerTest, kilnStoreMatchesFileStore) {
 TEST_F(SchedulerTest, kilnStoreSpills) {
   auto path = writeCorpus(2, 3000);
   auto df = wordCount(path);
-  auto config = kilnConfig();
-  config[std::string(shuffle::kSpillThreshold)] = "1";
-  auto [dag, backend] = scheduler(std::move(config));
-  EXPECT_EQ(
-      toStrings(dag->runJob(*df.physicalPlan(), pool_.get())),
-      toStrings(df.collectBatches()));
+  for (const auto* spill : {"true", "false"}) {
+    SCOPED_TRACE(spill);
+    auto config = kilnConfig();
+    config[std::string(shuffle::kSpillThreshold)] = "1";
+    config[std::string(shuffle::kShuffleSpill)] = spill;
+    auto [dag, backend] = scheduler(std::move(config));
+    EXPECT_EQ(
+        toStrings(dag->runJob(*df.physicalPlan(), pool_.get())),
+        toStrings(df.collectBatches()));
+  }
+}
+
+TEST_F(SchedulerTest, noSpillNeedsTheKilnStore) {
+  auto path = writeCorpus(1, 10);
+  auto df = wordCount(path);
+  auto [dag, backend] =
+      scheduler({{std::string(shuffle::kShuffleSpill), "false"}});
+  VELOX_ASSERT_THROW(
+      dag->runJob(*df.physicalPlan(), pool_.get()),
+      "ember.shuffle.spill=false needs ember.shuffle.store=kiln");
 }
 
 // Each shuffle's chunks are in a Kiln bucket of its own, which goes with
@@ -1005,13 +1018,13 @@ TEST(MapOutputTrackerTest, kilnOutputsOutliveTheirExecutor) {
   MapOutputTracker tracker;
   tracker.registerShuffle(0, 2);
   const auto kiln = shuffle::kilnLocation("meta:7000", "abc");
-  ASSERT_TRUE(tracker.registerMapOutput(0, 0, {"executor-1", {10, 20}}));
-  ASSERT_TRUE(tracker.registerMapOutput(0, 1, {kiln, {10, 20}}));
+  ASSERT_TRUE(tracker.registerMapOutput(0, 0, {"executor-1", {{10, 20}}}));
+  ASSERT_TRUE(tracker.registerMapOutput(0, 1, {kiln, {{10, 20}}}));
   EXPECT_EQ(tracker.markLocationLost("executor-1"), 1);
   EXPECT_EQ(tracker.missingMaps(0), (std::vector<int32_t>{0}));
   // Reported by a task on the lost executor, but held in Kiln.
   tracker.registerShuffle(1, 1);
-  EXPECT_TRUE(tracker.registerMapOutput(1, 0, {kiln, {5}}));
+  EXPECT_TRUE(tracker.registerMapOutput(1, 0, {kiln, {{5}}}));
   // Block URLs carry each partition's byte range of the chunk.
   EXPECT_EQ(
       tracker.mapBlockUrls(0, 1),
@@ -1021,6 +1034,17 @@ TEST(MapOutputTrackerTest, kilnOutputsOutliveTheirExecutor) {
   EXPECT_EQ(
       tracker.blockUrls(1, 0),
       (std::vector<std::string>{"kiln://meta:7000/abc/0/5/1/0/0"}));
+  // An output of several segments: a block has one range in each that holds
+  // bytes of it.
+  tracker.registerShuffle(2, 1);
+  EXPECT_TRUE(tracker.registerMapOutput(2, 0, {kiln, {{10, 0}, {5, 7}}}));
+  EXPECT_EQ(
+      tracker.blockUrls(2, 0),
+      (std::vector<std::string>{"kiln://meta:7000/abc/0,10/10,5/2/0/0"}));
+  EXPECT_EQ(
+      tracker.blockUrls(2, 1),
+      (std::vector<std::string>{"kiln://meta:7000/abc/15/7/2/0/1"}));
+  EXPECT_EQ(tracker.partitionSizes(2), (std::vector<int64_t>{15, 7}));
   // A failed fetch drops that output only.
   EXPECT_EQ(tracker.removeOutputsAt(0, kiln), 1);
 }

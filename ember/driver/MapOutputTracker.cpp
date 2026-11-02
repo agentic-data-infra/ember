@@ -103,14 +103,13 @@ std::vector<std::string> MapOutputTracker::mapBlockUrls(
       mapId,
       shuffleId);
   std::vector<std::string> urls;
-  int64_t offset = 0;
-  for (int32_t p = 0; p < map->partitionLengths.size(); ++p) {
-    const auto length = map->partitionLengths[p];
-    if (length > 0) {
-      urls.push_back(shuffle::blockUrl(
-          map->location, {shuffleId, mapId, p}, offset, length));
+  const auto numPartitions = map->partitionLengths().size();
+  for (int32_t p = 0; p < numPartitions; ++p) {
+    auto ranges = map->blockRanges(p);
+    if (!ranges.empty()) {
+      urls.push_back(
+          shuffle::blockUrl(map->location, {shuffleId, mapId, p}, ranges));
     }
-    offset += length;
   }
   return urls;
 }
@@ -127,16 +126,10 @@ std::vector<std::string> MapOutputTracker::blockUrls(
         "Map output {} of shuffle {} is missing",
         mapId,
         shuffleId);
-    const auto& lengths = maps[mapId]->partitionLengths;
-    VELOX_CHECK_LT(reduceId, lengths.size());
-    if (lengths[reduceId] > 0) {
-      const auto offset = std::accumulate(
-          lengths.begin(), lengths.begin() + reduceId, int64_t{0});
+    auto ranges = maps[mapId]->blockRanges(reduceId);
+    if (!ranges.empty()) {
       urls.push_back(shuffle::blockUrl(
-          maps[mapId]->location,
-          {shuffleId, mapId, reduceId},
-          offset,
-          lengths[reduceId]));
+          maps[mapId]->location, {shuffleId, mapId, reduceId}, ranges));
     }
   }
   return urls;
@@ -162,10 +155,10 @@ std::vector<int64_t> MapOutputTracker::partitionSizes(int32_t shuffleId) const {
     if (!status.has_value()) {
       continue;
     }
-    sizes.resize(
-        std::max(sizes.size(), status->partitionLengths.size()), 0);
-    for (size_t i = 0; i < status->partitionLengths.size(); ++i) {
-      sizes[i] += status->partitionLengths[i];
+    const auto lengths = status->partitionLengths();
+    sizes.resize(std::max(sizes.size(), lengths.size()), 0);
+    for (size_t i = 0; i < lengths.size(); ++i) {
+      sizes[i] += lengths[i];
     }
   }
   return sizes;

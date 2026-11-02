@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <folly/coro/Task.h>
@@ -34,11 +35,24 @@ struct BlockId {
 
 /// What a map task reports to the driver when it commits: where its output
 /// lives and how many bytes each reduce partition holds.
+///
+/// The output is a sequence of segments, each laid out partition by
+/// partition. A map output written at commit has one segment; one whose
+/// buffered pages went to Kiln as it ran (ember.shuffle.spill=false) has one
+/// per append.
 struct MapStatus {
   /// Executor that holds the output, blocks are fetched from it; or, for an
   /// output in Kiln, the chunk that holds it (see kilnLocation()).
   std::string location;
-  std::vector<int64_t> partitionLengths;
+  /// Bytes of each reduce partition, per segment.
+  std::vector<std::vector<int64_t>> segments;
+
+  /// Bytes of each reduce partition, over all segments.
+  std::vector<int64_t> partitionLengths() const;
+
+  /// The (offset, length) byte ranges of reduce partition 'reduceId' in the
+  /// output, one per segment that has bytes of it.
+  std::vector<std::pair<int64_t, int64_t>> blockRanges(int32_t reduceId) const;
 };
 
 /// Receives the serialized output of one map task.
@@ -78,13 +92,13 @@ class BlockTransport {
 
 /// Remote split id of a shuffle block, as read by ShuffleRead:
 /// "ember-shuffle://<location>/<shuffleId>/<mapId>/<reduceId>". For a block
-/// in Kiln, the block's bytes [offset, offset + length) of the chunk:
-/// "<kiln location>/<offset>/<length>/<shuffleId>/<mapId>/<reduceId>".
+/// in Kiln, the block's byte ranges of the chunk ('ranges', see
+/// MapStatus::blockRanges()):
+/// "<kiln location>/<offset>,.../<length>,.../<shuffleId>/<mapId>/<reduceId>".
 std::string blockUrl(
     const std::string& location,
     const BlockId& id,
-    int64_t offset = 0,
-    int64_t length = 0);
+    const std::vector<std::pair<int64_t, int64_t>>& ranges = {});
 
 /// True if 'url' names a shuffle block.
 bool isBlockUrl(const std::string& url);
@@ -101,8 +115,8 @@ std::string kilnLocation(const std::string& metadata, const std::string& chunk);
 
 bool isKilnLocation(const std::string& location);
 
-/// The byte range [offset, offset + length) of a Kiln block URL.
-std::pair<int64_t, int64_t> kilnBlockRange(const std::string& url);
+/// The (offset, length) byte ranges of a Kiln block URL.
+std::vector<std::pair<int64_t, int64_t>> kilnBlockRanges(const std::string& url);
 
 /// A reduce task could not fetch a block: its map output is lost, e.g. the
 /// executor that holds it died. The driver then recomputes the output rather

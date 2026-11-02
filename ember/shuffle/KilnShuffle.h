@@ -11,6 +11,13 @@
 // has evicted fails the read with a FetchFailure, and the driver recomputes
 // the map output as for a lost executor.
 //
+// With ember.shuffle.spill=false, a writer does not spill to run files:
+// whenever its buffered pages pass the spill threshold, it appends them to
+// its chunk, partition by partition, and goes on without waiting for Kiln.
+// The chunk is then a sequence of such segments, and a block is one byte
+// range per segment (MapStatus::segments), which the reduce task reads at
+// once.
+//
 // Each shuffle's chunks go into a Kiln bucket of its own
 // (ember.shuffle.kiln.bucket), which the driver deletes with the shuffle.
 // Chunks of outputs stored in Kiln's catalog stay until Kiln evicts them.
@@ -45,9 +52,10 @@ std::pair<std::string, std::string> parseKilnLocation(
 /// output to the Kiln cluster of metadata server 'metadata' (as kilnClient()),
 /// in Kiln tier 'tier': "dram", "localfs", or "dram+localfs", DRAM if the
 /// whole output fits into Kiln's free DRAM, else local FS; and in Kiln bucket
-/// 'bucket' (0 for Kiln's default bucket). It spills to 'store''s directory like a file
-/// shuffle writer and records the committed output in 'store', so that the
-/// executor reports it.
+/// 'bucket' (0 for Kiln's default bucket). With 'spill', it spills to
+/// 'store''s directory like a file shuffle writer; without, it appends the
+/// buffered pages to the chunk instead. It records the committed output in
+/// 'store', so that the executor reports it.
 std::unique_ptr<ShuffleWriter> createKilnWriter(
     std::shared_ptr<ShuffleBlockStore> store,
     std::string metadata,
@@ -57,9 +65,11 @@ std::unique_ptr<ShuffleWriter> createKilnWriter(
     int32_t mapId,
     int32_t numPartitions,
     const std::string& attemptTag,
-    int64_t spillThreshold);
+    int64_t spillThreshold,
+    bool spill = true);
 
-/// The bytes of the Kiln block at block URL 'url' (see blockUrl()).
+/// The bytes of the Kiln block at block URL 'url' (see blockUrl()): its
+/// ranges, read in parallel and chained in order.
 folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchKilnBlock(
     std::string url);
 

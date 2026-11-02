@@ -1,6 +1,6 @@
 // The Kiln shuffle store against an in-process Kiln cluster: one chunk per
-// map output, block reads by byte range, spills, empty outputs, first commit
-// wins, removed chunks, and the local-FS tier.
+// map output, block reads by byte range, spills, appends without spills,
+// empty outputs, first commit wins, removed chunks, and the local-FS tier.
 //
 // With $EMBER_TEST_KILN_METADATA set (Kiln's URL list), the tests use that
 // cluster instead. rdmaTransfersWithoutCopies checks that the client moves
@@ -65,7 +65,8 @@ class KilnShuffleTest : public testing::Test {
       const std::string& attemptTag = "attempt0",
       int64_t spillThreshold = ShuffleBlockStore::kDefaultSpillThreshold,
       const std::string& tier = "dram",
-      uint64_t bucket = kiln::kDefaultBucket) {
+      uint64_t bucket = kiln::kDefaultBucket,
+      bool spill = true) {
     return createKilnWriter(
         store_,
         metadata(),
@@ -75,7 +76,8 @@ class KilnShuffleTest : public testing::Test {
         mapId,
         numPartitions,
         attemptTag,
-        spillThreshold);
+        spillThreshold,
+        spill);
   }
 
   // Writes pages "<p>-<i>" for i < count[p] in round-robin order over the
@@ -84,9 +86,17 @@ class KilnShuffleTest : public testing::Test {
       int32_t shuffleId,
       int32_t mapId,
       const std::vector<int32_t>& counts,
-      int64_t spillThreshold = ShuffleBlockStore::kDefaultSpillThreshold) {
-    auto mapWriter =
-        writer(shuffleId, mapId, counts.size(), "attempt0", spillThreshold);
+      int64_t spillThreshold = ShuffleBlockStore::kDefaultSpillThreshold,
+      bool spill = true) {
+    auto mapWriter = writer(
+        shuffleId,
+        mapId,
+        counts.size(),
+        "attempt0",
+        spillThreshold,
+        "dram",
+        kiln::kDefaultBucket,
+        spill);
     const auto max = *std::max_element(counts.begin(), counts.end());
     for (int32_t i = 0; i < max; ++i) {
       for (int32_t p = 0; p < counts.size(); ++p) {
@@ -100,16 +110,12 @@ class KilnShuffleTest : public testing::Test {
   }
 
   // The pages of partition 'reduceId' of 'status', read as a reduce task
-  // would: at the byte range the driver puts into the block URL.
+  // would: at the byte ranges the driver puts into the block URL.
   static std::vector<std::string> readBlock(
       const MapStatus& status,
       int32_t reduceId) {
-    int64_t offset = 0;
-    for (int32_t p = 0; p < reduceId; ++p) {
-      offset += status.partitionLengths[p];
-    }
     auto url = blockUrl(
-        status.location, {0, 0, reduceId}, offset, status.partitionLengths[reduceId]);
+        status.location, {0, 0, reduceId}, status.blockRanges(reduceId));
     std::vector<std::string> pages;
     auto block = folly::coro::blockingWait(co_fetchKilnBlock(url));
     for (auto& page : splitFrames(std::move(block))) {
@@ -128,7 +134,8 @@ TEST_F(KilnShuffleTest, oneChunkWithPartitionsInOrder) {
   ASSERT_TRUE(isKilnLocation(status.location));
   EXPECT_EQ(parseKilnLocation(status.location).first, metadata());
   // Each frame is a 4-byte length plus "p-i".
-  EXPECT_EQ(status.partitionLengths, (std::vector<int64_t>{21, 0, 14}));
+  EXPECT_EQ(
+      status.segments, (std::vector<std::vector<int64_t>>{{21, 0, 14}}));
   EXPECT_EQ(readBlock(status, 0), (std::vector<std::string>{"0-0", "0-1", "0-2"}));
   EXPECT_EQ(readBlock(status, 2), (std::vector<std::string>{"2-0", "2-1"}));
 
@@ -153,6 +160,86 @@ TEST_F(KilnShuffleTest, spilledRunsMergeInWriteOrder) {
   EXPECT_TRUE(fs::is_empty(dir_));
 }
 
+// Without spills, every time the buffer passes the threshold, here after
+// every page, its pages go to the chunk as a segment of their own; a block
+// is then one range per segment that has bytes of it.
+TEST_F(KilnShuffleTest, appendsSegmentsWithoutSpillFiles) {
+  auto status = writeMap(10, 0, {5, 4}, /*spillThreshold=*/1, /*spill=*/false);
+  ASSERT_EQ(status.segments.size(), 9);
+  EXPECT_EQ(status.segments[0], (std::vector<int64_t>{7, 0}));
+  EXPECT_EQ(status.segments[1], (std::vector<int64_t>{0, 7}));
+  EXPECT_EQ(status.partitionLengths(), (std::vector<int64_t>{35, 28}));
+  EXPECT_EQ(
+      status.blockRanges(1),
+      (std::vector<std::pair<int64_t, int64_t>>{
+          {7, 7}, {21, 7}, {35, 7}, {49, 7}}));
+  EXPECT_EQ(
+      readBlock(status, 0),
+      (std::vector<std::string>{"0-0", "0-1", "0-2", "0-3", "0-4"}));
+  EXPECT_EQ(
+      readBlock(status, 1), (std::vector<std::string>{"1-0", "1-1", "1-2", "1-3"}));
+  EXPECT_TRUE(fs::is_empty(dir_));
+
+  const auto chunk =
+      kiln::ChunkId::parse(parseKilnLocation(status.location).second);
+  auto info = folly::coro::blockingWait(kilnClient(metadata())->co_stat(chunk));
+  EXPECT_EQ(info.size, 63);
+}
+
+// Appends of several Kiln blocks each, with pages left in memory at commit:
+// those go last, as one more segment.
+TEST_F(KilnShuffleTest, largeAppendsWithoutSpills) {
+  const std::string data(3 << 20, 'y');
+  auto mapWriter = writer(
+      11,
+      0,
+      2,
+      "attempt0",
+      /*spillThreshold=*/5 << 20,
+      "dram",
+      kiln::kDefaultBucket,
+      /*spill=*/false);
+  for (int i = 0; i < 5; ++i) {
+    mapWriter->collect(i % 2, folly::IOBuf::copyBuffer(data + std::to_string(i)));
+  }
+  auto status = mapWriter->commit();
+  const int64_t frame = 4 + (3 << 20) + 1;
+  EXPECT_EQ(
+      status.segments,
+      (std::vector<std::vector<int64_t>>{
+          {frame, frame}, {frame, frame}, {frame, 0}}));
+  EXPECT_EQ(
+      readBlock(status, 0),
+      (std::vector<std::string>{data + "0", data + "2", data + "4"}));
+  EXPECT_EQ(
+      readBlock(status, 1), (std::vector<std::string>{data + "1", data + "3"}));
+}
+
+// Never past the threshold, the output is written at commit as one segment.
+TEST_F(KilnShuffleTest, noSpillsNeededIsOneSegment) {
+  auto status = writeMap(
+      12, 0, {2, 1}, ShuffleBlockStore::kDefaultSpillThreshold, /*spill=*/false);
+  EXPECT_EQ(status.segments, (std::vector<std::vector<int64_t>>{{14, 7}}));
+  EXPECT_EQ(readBlock(status, 0), (std::vector<std::string>{"0-0", "0-1"}));
+}
+
+// An aborted writer drops its chunk, appends in flight included; another
+// attempt then commits.
+TEST_F(KilnShuffleTest, abortDropsAppendedSegments) {
+  auto aborted = writer(
+      13, 0, 1, "attempt0", 1, "dram", kiln::kDefaultBucket, /*spill=*/false);
+  aborted->collect(0, folly::IOBuf::copyBuffer("lost"));
+  aborted->collect(0, folly::IOBuf::copyBuffer("also lost"));
+  aborted->abort();
+  EXPECT_FALSE(store_->hasMapOutput(13, 0));
+
+  auto retry = writer(
+      13, 0, 1, "attempt1", 1, "dram", kiln::kDefaultBucket, /*spill=*/false);
+  retry->collect(0, folly::IOBuf::copyBuffer("kept"));
+  auto status = retry->commit();
+  EXPECT_EQ(readBlock(status, 0), (std::vector<std::string>{"kept"}));
+}
+
 TEST_F(KilnShuffleTest, largeOutputSpansAppends) {
   // More than one append buffer and one Kiln block.
   const std::string data(3 << 20, 'x');
@@ -162,7 +249,7 @@ TEST_F(KilnShuffleTest, largeOutputSpansAppends) {
   }
   auto status = mapWriter->commit();
   EXPECT_EQ(
-      status.partitionLengths,
+      status.partitionLengths(),
       (std::vector<int64_t>{2 * (4 + (3 << 20)), 4 + (3 << 20)}));
   EXPECT_EQ(readBlock(status, 0), (std::vector<std::string>{data, data}));
   EXPECT_EQ(readBlock(status, 1), (std::vector<std::string>{data}));
@@ -172,7 +259,8 @@ TEST_F(KilnShuffleTest, emptyOutputHasNoChunk) {
   auto status = writer(3, 0, 2)->commit();
   EXPECT_TRUE(isKilnLocation(status.location));
   EXPECT_EQ(parseKilnLocation(status.location).second, "");
-  EXPECT_EQ(status.partitionLengths, (std::vector<int64_t>{0, 0}));
+  EXPECT_EQ(status.partitionLengths(), (std::vector<int64_t>{0, 0}));
+  EXPECT_TRUE(status.blockRanges(0).empty());
 }
 
 TEST_F(KilnShuffleTest, firstCommitWins) {
@@ -196,12 +284,9 @@ TEST_F(KilnShuffleTest, manyBlocksHeldAtOnce) {
   auto status = writeMap(6, 0, counts);
   for (int round = 0; round < 2; ++round) {
     std::vector<std::unique_ptr<folly::IOBuf>> blocks;
-    int64_t offset = 0;
     for (int32_t p = 0; p < counts.size(); ++p) {
-      const auto length = status.partitionLengths[p];
       blocks.push_back(folly::coro::blockingWait(co_fetchKilnBlock(
-          blockUrl(status.location, {6, 0, p}, offset, length))));
-      offset += length;
+          blockUrl(status.location, {6, 0, p}, status.blockRanges(p)))));
     }
     for (int32_t p = 0; p < counts.size(); ++p) {
       auto pages = splitFrames(std::move(blocks[p]));
@@ -227,33 +312,40 @@ TEST_F(KilnShuffleTest, rdmaTransfersWithoutCopies) {
   };
   const auto metadata = cluster.metadataAddress().toString();
   auto client = kilnClient(metadata);
-  const auto before = client->stats();
   const std::string data(1 << 20, 'r');
-  auto mapWriter = createKilnWriter(
-      store_,
-      metadata,
-      "dram",
-      kiln::kDefaultBucket,
-      7,
-      0,
-      2,
-      "attempt0",
-      ShuffleBlockStore::kDefaultSpillThreshold);
-  for (int i = 0; i < 6; ++i) {
-    // Partition 1 is larger than a pooled buffer.
-    mapWriter->collect(i == 0 ? 0 : 1, folly::IOBuf::copyBuffer(data));
-  }
-  auto status = mapWriter->commit();
-  EXPECT_EQ(readBlock(status, 0).size(), 1);
-  EXPECT_EQ(readBlock(status, 1).size(), 5);
+  // Written at commit, and appended as the map runs (two segments).
+  for (const bool spill : {true, false}) {
+    SCOPED_TRACE(spill);
+    const auto before = client->stats();
+    auto mapWriter = createKilnWriter(
+        store_,
+        metadata,
+        "dram",
+        kiln::kDefaultBucket,
+        7,
+        spill ? 0 : 1,
+        2,
+        "attempt0",
+        /*spillThreshold=*/3 << 20,
+        spill);
+    for (int i = 0; i < 6; ++i) {
+      // Partition 1 is larger than a pooled buffer.
+      mapWriter->collect(i == 0 ? 0 : 1, folly::IOBuf::copyBuffer(data));
+    }
+    auto status = mapWriter->commit();
+    EXPECT_EQ(status.segments.size(), spill ? 1 : 2);
+    EXPECT_EQ(readBlock(status, 0).size(), 1);
+    EXPECT_EQ(readBlock(status, 1).size(), 5);
 
-  const auto after = client->stats();
-  EXPECT_TRUE(after.rdmaMetadata);
-  EXPECT_TRUE(after.rdmaData);
-  // Written once and read once, all straight from registered memory.
-  const auto bytes = status.partitionLengths[0] + status.partitionLengths[1];
-  EXPECT_GE(after.rdmaBytes - before.rdmaBytes, 2 * bytes);
-  EXPECT_EQ(after.rdmaCopiedBytes, before.rdmaCopiedBytes);
+    const auto after = client->stats();
+    EXPECT_TRUE(after.rdmaMetadata);
+    EXPECT_TRUE(after.rdmaData);
+    // Written once and read once, all straight from registered memory.
+    const auto lengths = status.partitionLengths();
+    const auto bytes = lengths[0] + lengths[1];
+    EXPECT_GE(after.rdmaBytes - before.rdmaBytes, 2 * bytes);
+    EXPECT_EQ(after.rdmaCopiedBytes, before.rdmaCopiedBytes);
+  }
 }
 
 TEST_F(KilnShuffleTest, removedChunkFailsTheFetch) {
@@ -340,8 +432,7 @@ class KilnTierTest : public testing::Test {
       const auto& status = outputs[mapId];
       try {
         auto block = folly::coro::blockingWait(co_fetchKilnBlock(blockUrl(
-            status.location, {shuffleId, mapId, 0}, 0,
-            status.partitionLengths[0])));
+            status.location, {shuffleId, mapId, 0}, status.blockRanges(0))));
         auto pages = splitFrames(std::move(block));
         count += pages.size() == 1 &&
             pages[0]->moveToFbString().toStdString() == data(mapId);
@@ -386,13 +477,23 @@ TEST(KilnBlockUrlTest, roundTrip) {
   BlockId id{7, 12, 3};
   const auto location = kilnLocation("meta:7000", "abc123");
   EXPECT_EQ(location, "kiln://meta:7000/abc123");
-  auto url = blockUrl(location, id, 100, 42);
+  auto url = blockUrl(location, id, {{100, 42}});
   EXPECT_EQ(url, "kiln://meta:7000/abc123/100/42/7/12/3");
   EXPECT_TRUE(isBlockUrl(url));
   auto [parsedLocation, parsed] = parseBlockUrl(url);
   EXPECT_EQ(parsedLocation, location);
   EXPECT_EQ(parsed, id);
-  EXPECT_EQ(kilnBlockRange(url), (std::pair<int64_t, int64_t>{100, 42}));
+  EXPECT_EQ(
+      kilnBlockRanges(url),
+      (std::vector<std::pair<int64_t, int64_t>>{{100, 42}}));
+
+  // A block of several segments has one range in each.
+  auto ranged = blockUrl(location, id, {{0, 10}, {50, 20}});
+  EXPECT_EQ(ranged, "kiln://meta:7000/abc123/0,50/10,20/7/12/3");
+  EXPECT_EQ(parseBlockUrl(ranged).second, id);
+  EXPECT_EQ(
+      kilnBlockRanges(ranged),
+      (std::vector<std::pair<int64_t, int64_t>>{{0, 10}, {50, 20}}));
 
   // Kiln's URL lists keep their '/'s escaped inside the location.
   const auto urls = "tcp://meta:7470,rdma://10.0.0.1:7471";
@@ -402,9 +503,11 @@ TEST(KilnBlockUrlTest, roundTrip) {
   EXPECT_EQ(
       parseKilnLocation(listed),
       (std::pair<std::string, std::string>{urls, "abc123"}));
-  const auto listedUrl = blockUrl(listed, id, 100, 42);
+  const auto listedUrl = blockUrl(listed, id, {{100, 42}, {200, 1}});
   EXPECT_EQ(parseBlockUrl(listedUrl).first, listed);
-  EXPECT_EQ(kilnBlockRange(listedUrl), (std::pair<int64_t, int64_t>{100, 42}));
+  EXPECT_EQ(
+      kilnBlockRanges(listedUrl),
+      (std::vector<std::pair<int64_t, int64_t>>{{100, 42}, {200, 1}}));
   EXPECT_EQ(
       parseKilnLocation(kilnLocation("odd%name/x:1", "")).first,
       "odd%name/x:1");

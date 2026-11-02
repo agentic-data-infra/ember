@@ -5,9 +5,11 @@
 #include <unistd.h>
 
 #include <filesystem>
+#include <numeric>
 
 #include <folly/File.h>
 #include <folly/FileUtil.h>
+#include <folly/String.h>
 #include <folly/io/Cursor.h>
 #include <folly/lang/Bits.h>
 
@@ -233,19 +235,23 @@ void PartitionedPageWriter::spill() {
   SpillRun run;
   run.path = tmpPath(fmt::format("spill{}", runs_.size()));
   folly::File out(run.path, O_WRONLY | O_CREAT | O_TRUNC);
-  const auto write = fileWrite(out.fd(), run.path);
+  run.offsets = writeBuffered(fileWrite(out.fd(), run.path));
+  runs_.push_back(std::move(run));
+  ++spillCount_;
+}
+
+std::vector<int64_t> PartitionedPageWriter::writeBuffered(const Write& write) {
+  std::vector<int64_t> offsets{0};
   int64_t offset = 0;
-  run.offsets.push_back(0);
   for (auto& pages : pages_) {
     for (const auto& page : pages) {
       offset += writeFrame(write, *page);
     }
     pages.clear();
-    run.offsets.push_back(offset);
+    offsets.push_back(offset);
   }
-  runs_.push_back(std::move(run));
-  ++spillCount_;
   bufferedBytes_ = 0;
+  return offsets;
 }
 
 void PartitionedPageWriter::removeRuns() {
@@ -258,6 +264,33 @@ void PartitionedPageWriter::removeRuns() {
 
 std::string BlockId::toString() const {
   return fmt::format("shuffle_{}_{}_{}", shuffleId, mapId, reduceId);
+}
+
+std::vector<int64_t> MapStatus::partitionLengths() const {
+  std::vector<int64_t> lengths;
+  for (const auto& segment : segments) {
+    lengths.resize(std::max(lengths.size(), segment.size()), 0);
+    for (size_t p = 0; p < segment.size(); ++p) {
+      lengths[p] += segment[p];
+    }
+  }
+  return lengths;
+}
+
+std::vector<std::pair<int64_t, int64_t>> MapStatus::blockRanges(
+    int32_t reduceId) const {
+  std::vector<std::pair<int64_t, int64_t>> ranges;
+  int64_t start = 0;
+  for (const auto& segment : segments) {
+    VELOX_CHECK_LT(reduceId, segment.size());
+    const auto offset = std::accumulate(
+        segment.begin(), segment.begin() + reduceId, start);
+    if (segment[reduceId] > 0) {
+      ranges.emplace_back(offset, segment[reduceId]);
+    }
+    start = std::accumulate(segment.begin(), segment.end(), start);
+  }
+  return ranges;
 }
 
 void BlockTransport::setInstance(std::shared_ptr<BlockTransport> transport) {
@@ -285,14 +318,19 @@ std::vector<std::string> urlParts(const std::string& url, size_t schemeSize) {
 std::string blockUrl(
     const std::string& location,
     const BlockId& id,
-    int64_t offset,
-    int64_t length) {
+    const std::vector<std::pair<int64_t, int64_t>>& ranges) {
   if (isKilnLocation(location)) {
+    std::vector<int64_t> offsets;
+    std::vector<int64_t> lengths;
+    for (const auto& [offset, length] : ranges) {
+      offsets.push_back(offset);
+      lengths.push_back(length);
+    }
     return fmt::format(
         "{}/{}/{}/{}/{}/{}",
         location,
-        offset,
-        length,
+        folly::join(',', offsets),
+        folly::join(',', lengths),
         id.shuffleId,
         id.mapId,
         id.reduceId);
@@ -313,7 +351,7 @@ bool isBlockUrl(const std::string& url) {
 std::pair<std::string, BlockId> parseBlockUrl(const std::string& url) {
   VELOX_CHECK(isBlockUrl(url), "Not a shuffle block: {}", url);
   if (isKilnLocation(url)) {
-    // kiln://<metadata>/<chunk>/<offset>/<length>/<shuffle>/<map>/<reduce>
+    // kiln://<metadata>/<chunk>/<offsets>/<lengths>/<shuffle>/<map>/<reduce>
     auto parts = urlParts(url, kKilnScheme.size());
     VELOX_CHECK_EQ(parts.size(), 7, "Malformed shuffle block: {}", url);
     return {
@@ -351,10 +389,25 @@ bool isKilnLocation(const std::string& location) {
   return location.starts_with(kKilnScheme);
 }
 
-std::pair<int64_t, int64_t> kilnBlockRange(const std::string& url) {
+std::vector<std::pair<int64_t, int64_t>> kilnBlockRanges(
+    const std::string& url) {
   auto parts = urlParts(url, kKilnScheme.size());
   VELOX_CHECK_EQ(parts.size(), 7, "Malformed Kiln shuffle block: {}", url);
-  return {folly::to<int64_t>(parts[2]), folly::to<int64_t>(parts[3])};
+  std::vector<int64_t> offsets;
+  std::vector<int64_t> lengths;
+  if (!parts[2].empty()) {
+    folly::split(',', parts[2], offsets);
+  }
+  if (!parts[3].empty()) {
+    folly::split(',', parts[3], lengths);
+  }
+  VELOX_CHECK_EQ(
+      offsets.size(), lengths.size(), "Malformed Kiln shuffle block: {}", url);
+  std::vector<std::pair<int64_t, int64_t>> ranges;
+  for (size_t i = 0; i < offsets.size(); ++i) {
+    ranges.emplace_back(offsets[i], lengths[i]);
+  }
+  return ranges;
 }
 
 namespace {
@@ -476,9 +529,7 @@ MapStatus ShuffleBlockStore::mapStatus(int32_t shuffleId, int32_t mapId) const {
   auto offsets = readOffsets(shuffleId, mapId);
   MapStatus status;
   status.location = location_;
-  for (size_t i = 1; i < offsets.size(); ++i) {
-    status.partitionLengths.push_back(offsets[i] - offsets[i - 1]);
-  }
+  status.segments.push_back(partitionLengths(offsets));
   return status;
 }
 
@@ -545,6 +596,14 @@ std::shared_ptr<ShuffleBlockStore> ShuffleBlockStore::find(
 folly::coro::Task<std::unique_ptr<folly::IOBuf>>
 LocalBlockTransport::co_fetchBlock(std::string location, BlockId id) {
   co_return ShuffleBlockStore::lookup(location)->readBlock(id);
+}
+
+std::vector<int64_t> partitionLengths(const std::vector<int64_t>& offsets) {
+  std::vector<int64_t> lengths;
+  for (size_t i = 1; i < offsets.size(); ++i) {
+    lengths.push_back(offsets[i] - offsets[i - 1]);
+  }
+  return lengths;
 }
 
 std::vector<std::unique_ptr<folly::IOBuf>> splitFrames(

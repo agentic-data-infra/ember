@@ -5,6 +5,9 @@
 #include <folly/ScopeGuard.h>
 #include <folly/Uri.h>
 #include <folly/coro/BlockingWait.h>
+#include <folly/coro/Collect.h>
+#include <folly/executors/GlobalExecutor.h>
+#include <glog/logging.h>
 
 #include "kiln/client/Client.h"
 #include "velox/common/base/Exceptions.h"
@@ -131,7 +134,8 @@ class KilnShuffleWriter : public PartitionedPageWriter {
       int32_t mapId,
       int32_t numPartitions,
       std::string attemptTag,
-      int64_t spillThreshold)
+      int64_t spillThreshold,
+      bool spill)
       : PartitionedPageWriter(
             std::move(store),
             shuffleId,
@@ -141,10 +145,54 @@ class KilnShuffleWriter : public PartitionedPageWriter {
             spillThreshold),
         metadata_{std::move(metadata)},
         bucket_{bucket},
-        placement_{placement} {}
+        placement_{placement},
+        spill_{spill} {}
+
+  ~KilnShuffleWriter() override {
+    discardChunk();
+  }
+
+  void abort() override {
+    PartitionedPageWriter::abort();
+    discardChunk();
+  }
 
  protected:
+  // With spill off, appends the buffered pages to the chunk as a segment of
+  // their own instead of writing a run file.
+  void spill() override {
+    if (spill_) {
+      PartitionedPageWriter::spill();
+      return;
+    }
+    appendSegment();
+  }
+
   MapStatus commitOutput() override {
+    if (chunk_ == nullptr) {
+      return commitWhole();
+    }
+    MapStatus status;
+    try {
+      if (outputBytes() > 0) {
+        appendSegment();
+      }
+      awaitAppend();
+      const auto id = blockingWait(chunk_->co_commit());
+      chunk_.reset();
+      status.location = kilnLocation(metadata_, id.toString());
+    } catch (const std::exception&) {
+      discardChunk();
+      throw;
+    }
+    status.segments = std::move(segments_);
+    return record(std::move(status));
+  }
+
+ private:
+  // Writes the whole output, partition by partition, as one chunk of one
+  // segment.
+  MapStatus commitWhole() {
     const auto cluster = kilnCluster(metadata_);
     const auto& client = cluster.client;
     const auto& pool = cluster.pool;
@@ -195,17 +243,85 @@ class KilnShuffleWriter : public PartitionedPageWriter {
       const auto id = blockingWait(chunk->co_commit());
       status.location = kilnLocation(metadata_, id.toString());
     }
-    for (size_t i = 1; i < offsets.size(); ++i) {
-      status.partitionLengths.push_back(offsets[i] - offsets[i - 1]);
+    status.segments.push_back(partitionLengths(offsets));
+    return record(std::move(status));
+  }
+
+  // Copies the buffered pages into one registered buffer and starts
+  // appending it to the chunk, without waiting: the map task goes on while
+  // Kiln moves the bytes. Kiln takes one append per chunk at a time, so this
+  // first waits for the previous one, which also frees its buffer for reuse.
+  void appendSegment() {
+    awaitAppend();
+    const auto client = kilnCluster(metadata_).client;
+    const auto bytes = outputBytes();
+    if (chunk_ == nullptr) {
+      // The size of the whole output is not known yet: an overflow placement
+      // picks the tier by the first segment.
+      chunk_ = blockingWait(client->co_create(bucket_, placement_, bytes));
     }
+    if (buffer_.capacity() < static_cast<size_t>(bytes)) {
+      buffer_ = client->allocateBuffer(bytes);
+    }
+    buffer_.setSize(0);
+    const auto offsets = writeBuffered([&](const void* data, size_t size) {
+      std::memcpy(buffer_.data() + buffer_.size(), data, size);
+      buffer_.setSize(buffer_.size() + size);
+    });
+    segments_.push_back(partitionLengths(offsets));
+    // co_append holds on to buffer_ until it completes and then hands it
+    // back; awaitAppend() and discardChunk() wait for that.
+    append_ = folly::coro::co_withExecutor(
+                  folly::getGlobalCPUExecutor(),
+                  chunk_->co_append(std::move(buffer_)))
+                  .start();
+  }
+
+  // Waits for the append in flight, if any, and takes its buffer back.
+  void awaitAppend() {
+    if (append_.has_value()) {
+      auto append = std::move(*append_);
+      append_.reset();
+      buffer_ = std::move(append).get();
+    }
+  }
+
+  // Drops a chunk that was started but not committed. Its append in flight
+  // still uses it, so that one is waited for first.
+  void discardChunk() {
+    if (append_.has_value()) {
+      try {
+        std::move(*append_).get();
+      } catch (const std::exception&) {
+      }
+      append_.reset();
+    }
+    if (chunk_ != nullptr) {
+      try {
+        blockingWait(chunk_->co_abort());
+      } catch (const std::exception& e) {
+        LOG(WARNING) << "Could not abort Kiln chunk: " << e.what();
+      }
+      chunk_.reset();
+    }
+  }
+
+  MapStatus record(MapStatus status) {
     store().commitKilnOutput(shuffleId(), mapId(), std::move(status));
     return store().mapStatus(shuffleId(), mapId());
   }
 
- private:
   const std::string metadata_;
   const kiln::BucketId bucket_;
   const kiln::Placement placement_;
+  const bool spill_;
+  // With spill off: the chunk, started at the first append; the append in
+  // flight; the buffer appends copy into while none is in flight; and the
+  // partition lengths of each append.
+  std::unique_ptr<kiln::client::ChunkWriter> chunk_;
+  std::optional<folly::SemiFuture<kiln::Buffer>> append_;
+  kiln::Buffer buffer_;
+  std::vector<std::vector<int64_t>> segments_;
 };
 
 } // namespace
@@ -239,7 +355,8 @@ std::unique_ptr<ShuffleWriter> createKilnWriter(
     int32_t mapId,
     int32_t numPartitions,
     const std::string& attemptTag,
-    int64_t spillThreshold) {
+    int64_t spillThreshold,
+    bool spill) {
   kiln::Placement placement;
   if (tier == "dram+localfs") {
     placement = {.tier = kiln::Tier::kDram, .overflow = kiln::Tier::kLocalFs};
@@ -259,17 +376,20 @@ std::unique_ptr<ShuffleWriter> createKilnWriter(
       mapId,
       numPartitions,
       attemptTag,
-      spillThreshold);
+      spillThreshold,
+      spill);
 }
 
-folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchKilnBlock(
-    std::string url) {
-  const auto [metadata, chunk] = parseKilnLocation(parseBlockUrl(url).first);
-  const auto cluster = kilnCluster(metadata);
+namespace {
+
+// Reads bytes [offset, offset + length) of chunk 'id'.
+folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_readRange(
+    KilnCluster cluster,
+    kiln::ChunkId id,
+    int64_t offset,
+    int64_t length) {
   const auto& client = cluster.client;
-  const auto id = kiln::ChunkId::parse(chunk);
-  const auto [offset, length] = kilnBlockRange(url);
-  // A block that fits goes into a pooled buffer, which Velox then holds as
+  // A range that fits goes into a pooled buffer, which Velox then holds as
   // the block's IOBuf.
   auto pooled = length <= static_cast<int64_t>(kAppendBytes)
       ? cluster.pool->acquire()
@@ -288,7 +408,7 @@ folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchKilnBlock(
     }
     co_return cluster.pool->wrap(std::move(read));
   }
-  // Else Kiln reads straight into the block's IOBuf.
+  // Else Kiln reads straight into the range's IOBuf.
   auto data = folly::IOBuf::create(length);
   auto buffer = client->registerMemory(data->writableData(), length);
   auto read = co_await client->co_read(id, offset, length, std::move(buffer));
@@ -296,6 +416,31 @@ folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchKilnBlock(
       read.size(), length, "Short read of Kiln chunk {}", id.toString());
   data->append(length);
   co_return data;
+}
+
+} // namespace
+
+folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchKilnBlock(
+    std::string url) {
+  const auto [metadata, chunk] = parseKilnLocation(parseBlockUrl(url).first);
+  const auto cluster = kilnCluster(metadata);
+  const auto id = kiln::ChunkId::parse(chunk);
+  // One range per segment of the map output, each whole frames: read them
+  // all at once and chain them in order.
+  std::vector<folly::coro::Task<std::unique_ptr<folly::IOBuf>>> reads;
+  for (const auto& [offset, length] : kilnBlockRanges(url)) {
+    reads.push_back(co_readRange(cluster, id, offset, length));
+  }
+  auto ranges = co_await folly::coro::collectAllRange(std::move(reads));
+  std::unique_ptr<folly::IOBuf> block;
+  for (auto& range : ranges) {
+    if (block == nullptr) {
+      block = std::move(range);
+    } else {
+      block->appendToChain(std::move(range));
+    }
+  }
+  co_return block;
 }
 
 } // namespace ember::shuffle
