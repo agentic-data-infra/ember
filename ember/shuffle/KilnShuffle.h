@@ -96,11 +96,6 @@ std::shared_ptr<kiln::client::BufferPool> kilnStagingPool(
 std::shared_ptr<kiln::client::BufferPool> kilnWritePool(
     const std::string& metadata);
 
-/// Creates the client and pools of the Kiln cluster of metadata server
-/// 'metadata' now, e.g. when a local session starts, so that the first
-/// task does not wait for the pools to be allocated and registered.
-void warmUpKiln(const std::string& metadata);
-
 /// The metadata server and chunk (hex) of a kilnLocation().
 std::pair<std::string, std::string> parseKilnLocation(
     const std::string& location);
@@ -111,8 +106,7 @@ std::pair<std::string, std::string> parseKilnLocation(
 /// whole output fits into Kiln's free DRAM, else local FS; and in Kiln bucket
 /// 'bucket' (0 for Kiln's default bucket). With 'spill', it spills to
 /// 'store''s directory like a file shuffle writer; without, it appends the
-/// buffered pages to the chunk instead, at 'spillThreshold' or half the
-/// write pool's bytes, whichever is less. It records the committed output in
+/// buffered pages to the chunk instead. It records the committed output in
 /// 'store', so that the executor reports it.
 std::unique_ptr<ShuffleWriter> createKilnWriter(
     std::shared_ptr<ShuffleBlockStore> store,

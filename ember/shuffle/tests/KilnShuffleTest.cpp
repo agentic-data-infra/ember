@@ -490,44 +490,6 @@ TEST(KilnBufferPoolTest, readsNeverWaitForHeldBuffers) {
   }
 }
 
-// Against its own cluster, with write pools of two buffers (8 MiB): pools
-// warmed up before the first writer, and without spills, segments of at
-// most half the write pool, whatever the threshold.
-TEST(KilnBufferPoolTest, segmentsFitTheWritePool) {
-  kiln::local::LocalCluster cluster{kiln::local::LocalClusterOptions{
-      .dramServers = 1, .localFsServers = 0}};
-  const auto metadata = cluster.metadataAddress().toString();
-  setKilnBufferPools(2, 2, 2);
-  SCOPE_EXIT {
-    setKilnBufferPools(kDefaultKilnReadBuffers, kDefaultKilnWriteBuffers);
-  };
-  warmUpKiln(metadata);
-  auto writes = kilnWritePool(metadata);
-  ASSERT_EQ(writes->count(), 2);
-  EXPECT_EQ(writes->available(), 2);
-
-  const auto dir = fs::temp_directory_path() /
-      fmt::format("ember_kiln_segments_{}", ::getpid());
-  auto store = std::make_shared<ShuffleBlockStore>("test-executor", dir.string());
-  SCOPE_EXIT {
-    fs::remove_all(dir);
-  };
-  auto mapWriter = createKilnWriter(
-      store, metadata, "dram", kiln::kDefaultBucket, 0, 0, 1, "attempt0",
-      /*spillThreshold=*/int64_t{1} << 30, /*spill=*/false);
-  const std::string data(3 << 20, 's');
-  for (int i = 0; i < 4; ++i) {
-    mapWriter->collect(0, folly::IOBuf::copyBuffer(data));
-  }
-  auto status = mapWriter->commit();
-  // 4 MiB at most before each append: a page past it, then the next.
-  EXPECT_EQ(status.segments.size(), 2);
-  EXPECT_EQ(writes->available(), 2);
-  auto block = folly::coro::blockingWait(co_fetchKilnBlock(
-      blockUrl(status.location, {0, 0, 0}, status.blockRanges(0))));
-  EXPECT_EQ(splitFrames(std::move(block)).size(), 4);
-}
-
 // Against its own cluster, whose metadata and DRAM servers serve RDMA, with
 // shared memory off so that RDMA is used on this one host.
 TEST_F(KilnShuffleTest, rdmaTransfersWithoutCopies) {

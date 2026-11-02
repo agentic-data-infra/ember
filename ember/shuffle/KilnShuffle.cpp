@@ -67,9 +67,9 @@ size_t buffersFor(int64_t bytes) {
 }
 
 // Takes 'n' buffers from 'pool', waiting until that many are free. More
-// than the pool has, for a segment with a page larger than half the pool
-// (see createKilnWriter()), are allocated instead, with a warning:
-// allocating, and with RDMA registering, them costs time.
+// than the pool has, e.g. for a spill threshold above the pool's bytes, are
+// allocated instead, with a warning: allocating, and with RDMA registering,
+// them costs time.
 std::vector<kiln::Buffer> acquire(
     kiln::client::Client& client,
     kiln::client::BufferPool& pool,
@@ -406,15 +406,6 @@ std::unique_ptr<ShuffleWriter> createKilnWriter(
         tier);
     placement = {.tier = kiln::parseTier(tier)};
   }
-  if (!spill) {
-    // A segment is appended from write buffers, so that its bytes, up to
-    // the threshold plus a page, fit into them. Half the pool leaves room
-    // for the page.
-    const auto poolBytes = static_cast<int64_t>(
-        kilnCluster(metadata, /*pools=*/true).writes->count() *
-        kKilnBufferBytes);
-    spillThreshold = std::min(spillThreshold, poolBytes / 2);
-  }
   return std::make_unique<KilnShuffleWriter>(
       std::move(store),
       std::move(metadata),
@@ -628,10 +619,6 @@ void setKilnBufferPools(size_t reads, size_t writes, size_t staging) {
   readBuffers = reads;
   writeBuffers = writes;
   stagingBuffers = staging;
-}
-
-void warmUpKiln(const std::string& metadata) {
-  kilnCluster(metadata, /*pools=*/true);
 }
 
 std::shared_ptr<kiln::client::BufferPool> kilnReadPool(

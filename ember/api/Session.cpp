@@ -14,8 +14,6 @@
 #include "ember/driver/ClusterBackend.h"
 #include "ember/driver/DagScheduler.h"
 #include "ember/driver/LocalBackend.h"
-#include "ember/shuffle/KilnShuffle.h"
-#include "ember/shuffle/ShuffleConfig.h"
 #include "velox/common/memory/HashStringAllocator.h"
 #include "velox/expression/Expr.h"
 #include "velox/functions/prestosql/coercion/PrestoCoercions.h"
@@ -129,13 +127,6 @@ SessionState::SessionState(
             .numSlots = parallelism_,
             .numThreads = std::max(4, 2 * parallelism_),
             .localDirectory = localDirectory});
-    // The tasks run in this process: allocate the Kiln buffer pools now
-    // rather than in the first task.
-    const auto kiln = configValue(config_, shuffle::kKilnMetadata.data(), "");
-    if (configValue(config_, shuffle::kShuffleStore.data(), "") == "kiln" &&
-        !kiln.empty()) {
-      shuffle::warmUpKiln(kiln);
-    }
   }
   parallelism_ = configInt(config_, kDefaultParallelism, parallelism_);
   scheduler_ = std::make_unique<driver::DagScheduler>(
