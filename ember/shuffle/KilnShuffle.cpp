@@ -1,5 +1,6 @@
 #include "ember/shuffle/KilnShuffle.h"
 
+#include <array>
 #include <atomic>
 
 #include <folly/ScopeGuard.h>
@@ -201,23 +202,57 @@ class KilnShuffleWriter : public PartitionedPageWriter {
     auto chunk = blockingWait(client->co_create(bucket_, placement_, outputBytes()));
     std::vector<int64_t> offsets;
     try {
-      auto pooled = pool->acquire();
-      auto buffer = pooled.has_value() ? std::move(*pooled)
-                                       : client->allocateBuffer(kAppendBytes);
-      SCOPE_EXIT {
-        if (pooled.has_value()) {
-          pool->release(std::move(buffer));
+      // Two buffers: the map task fills one while Kiln appends the other.
+      std::array<kiln::Buffer, 2> buffers;
+      std::array<bool, 2> pooled{};
+      for (size_t i = 0; i < buffers.size(); ++i) {
+        auto buffer = pool->acquire();
+        pooled[i] = buffer.has_value();
+        buffers[i] = pooled[i] ? std::move(*buffer)
+                               : client->allocateBuffer(kAppendBytes);
+      }
+      size_t current = 0;
+      std::optional<folly::SemiFuture<kiln::Buffer>> append;
+      // Waits for the append in flight, of the other buffer, and empties
+      // that buffer for reuse.
+      auto awaitAppend = [&]() {
+        if (append.has_value()) {
+          auto future = std::move(*append);
+          append.reset();
+          auto& other = buffers[current ^ 1];
+          other = std::move(future).get();
+          other.setSize(0);
         }
       };
+      SCOPE_EXIT {
+        // On failure, co_append still holds its buffer: wait for it first.
+        try {
+          awaitAppend();
+        } catch (const std::exception&) {
+        }
+        for (size_t i = 0; i < buffers.size(); ++i) {
+          if (pooled[i]) {
+            pool->release(std::move(buffers[i]));
+          }
+        }
+      };
+      // Starts appending the current buffer without waiting (Kiln takes one
+      // append per chunk at a time, so after the previous one) and goes on
+      // with the other.
       auto flush = [&]() {
-        if (buffer.size() > 0) {
-          buffer = blockingWait(chunk->co_append(std::move(buffer)));
-          buffer.setSize(0);
+        if (buffers[current].size() > 0) {
+          awaitAppend();
+          append = folly::coro::co_withExecutor(
+                       folly::getGlobalCPUExecutor(),
+                       chunk->co_append(std::move(buffers[current])))
+                       .start();
+          current ^= 1;
         }
       };
       offsets = writePartitions([&](const void* data, size_t size) {
         auto* bytes = static_cast<const uint8_t*>(data);
         while (size > 0) {
+          auto& buffer = buffers[current];
           const auto n = std::min(size, buffer.capacity() - buffer.size());
           std::memcpy(buffer.data() + buffer.size(), bytes, n);
           buffer.setSize(buffer.size() + n);
@@ -229,6 +264,7 @@ class KilnShuffleWriter : public PartitionedPageWriter {
         }
       });
       flush();
+      awaitAppend();
     } catch (const std::exception&) {
       blockingWait(chunk->co_abort());
       throw;
