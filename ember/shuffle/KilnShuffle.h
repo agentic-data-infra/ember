@@ -77,16 +77,17 @@ void setKilnBufferPools(
     size_t stagingBuffers = kDefaultKilnStagingBuffers);
 
 /// The process's pools of buffers for moving data from and to the Kiln
-/// cluster of metadata server 'metadata', allocated (with RDMA, registered
-/// with the NIC) at the first use, so that no read or append allocates or
-/// registers memory:
+/// cluster of metadata server 'metadata', each allocated (with RDMA,
+/// registered with the NIC) at its first use, so that no read or append
+/// allocates or registers memory:
 /// - Shuffle blocks are read piece by piece into the read pool's buffers,
 ///   which they keep until Velox frees their pages, without a copy. Nobody
 ///   waits for them: a piece that finds none free is read through the
 ///   staging pool (see KilnBlockReader).
 /// - Reads through the staging pool copy the data out and give the buffers
 ///   back at once (see co_readKiln()), so its buffers are never held for
-///   long, and waiting for them is safe.
+///   long, and waiting for them is safe. Kiln catalogs read and write
+///   manifests through them too.
 /// - Appends hold write buffers while filling and appending, and an output
 ///   file writer one for its lifetime; they wait for free ones.
 std::shared_ptr<kiln::client::BufferPool> kilnReadPool(

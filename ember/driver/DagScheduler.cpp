@@ -469,7 +469,8 @@ int64_t DagScheduler::writeKilnDataset(
   kiln::catalog::Catalog catalog(
       *client,
       kiln::catalog::CatalogOptions{
-          .placement = kilnFilesPlacement(options_.config)});
+          .placement = kilnFilesPlacement(options_.config),
+          .buffers = shuffle::kilnStagingPool(path.metadata)});
   VELOX_USER_CHECK(
       !folly::coro::blockingWait(catalog.co_getDataset(path.dataset))
            .has_value(),
