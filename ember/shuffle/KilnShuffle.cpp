@@ -52,7 +52,7 @@ KilnCluster kilnCluster(const std::string& metadata, bool pools = false) {
   }
   if (pools && cluster.reads == nullptr) {
     cluster.reads = std::make_shared<kiln::client::BufferPool>(
-        *cluster.client, kKilnBufferBytes, readBuffers.load());
+        *cluster.client, kKilnReadPieceBytes, readBuffers.load());
     cluster.staging = std::make_shared<kiln::client::BufferPool>(
         *cluster.client, kKilnBufferBytes, stagingBuffers.load());
     cluster.writes = std::make_shared<kiln::client::BufferPool>(
@@ -437,15 +437,15 @@ folly::coro::Task<kiln::Buffer> co_readPiece(
   co_return read;
 }
 
-// The byte ranges ('offset', 'length') 'ranges', cut into pieces of
-// kKilnBufferBytes.
+// The byte ranges ('offset', 'length') 'ranges', cut into pieces of at
+// most 'size' bytes.
 std::vector<std::pair<int64_t, int64_t>> pieces(
-    const std::vector<std::pair<int64_t, int64_t>>& ranges) {
+    const std::vector<std::pair<int64_t, int64_t>>& ranges,
+    int64_t size) {
   std::vector<std::pair<int64_t, int64_t>> pieces;
   for (const auto& [offset, length] : ranges) {
-    for (int64_t done = 0; done < length; done += kKilnBufferBytes) {
-      pieces.emplace_back(
-          offset + done, std::min<int64_t>(length - done, kKilnBufferBytes));
+    for (int64_t done = 0; done < length; done += size) {
+      pieces.emplace_back(offset + done, std::min(length - done, size));
     }
   }
   return pieces;
@@ -486,7 +486,7 @@ folly::coro::Task<void> co_readKiln(
     folly::Function<void(const uint8_t*, size_t)> sink) {
   const auto cluster = kilnCluster(metadata, /*pools=*/true);
   auto& pool = *cluster.staging;
-  const auto all = pieces(ranges);
+  const auto all = pieces(ranges, kKilnBufferBytes);
   for (size_t first = 0; first < all.size();) {
     const auto n = std::min(all.size() - first, pool.count());
     auto buffers = co_await pool.co_acquire(n);
@@ -501,50 +501,115 @@ folly::coro::Task<void> co_readKiln(
   }
 }
 
+struct KilnBlockReader::State {
+  std::string metadata;
+  KilnCluster cluster;
+  kiln::ChunkId id;
+  std::vector<std::pair<int64_t, int64_t>> pieces;
+};
+
+namespace {
+
+// Reads piece 'i' of 'state''s block into 'buffer', from the read pool,
+// and returns it as an IOBuf that gives the buffer back when freed.
+folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_readPooled(
+    std::shared_ptr<const KilnBlockReader::State> state,
+    size_t i,
+    kiln::Buffer buffer) {
+  const auto& [offset, length] = state->pieces[i];
+  auto read = co_await folly::coro::co_awaitTry(co_readPiece(
+      *state->cluster.client, state->id, offset, length, buffer));
+  if (read.hasException()) {
+    state->cluster.reads->release(std::move(buffer));
+    co_yield folly::coro::co_error(std::move(read.exception()));
+  }
+  co_return wrap(state->cluster.reads, std::move(read).value());
+}
+
+// Reads piece 'i' of 'state''s block through the staging pool.
+folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_readStaged(
+    std::shared_ptr<const KilnBlockReader::State> state,
+    size_t i) {
+  const auto piece = state->pieces[i];
+  auto data = folly::IOBuf::create(piece.second);
+  co_await co_readKiln(
+      state->metadata,
+      state->id,
+      {piece},
+      [&](const uint8_t* bytes, size_t size) {
+        std::memcpy(data->writableTail(), bytes, size);
+        data->append(size);
+      });
+  co_return data;
+}
+
+} // namespace
+
+KilnBlockReader::KilnBlockReader(const std::string& url) {
+  const auto [metadata, chunk] = parseKilnLocation(parseBlockUrl(url).first);
+  auto state = std::make_shared<State>();
+  state->metadata = metadata;
+  state->cluster = kilnCluster(metadata, /*pools=*/true);
+  state->id = kiln::ChunkId::parse(chunk);
+  state->pieces = pieces(kilnBlockRanges(url), kKilnReadPieceBytes);
+  state_ = std::move(state);
+}
+
+KilnBlockReader::~KilnBlockReader() = default;
+
+bool KilnBlockReader::atEnd() const {
+  return next_ == state_->pieces.size();
+}
+
+int64_t KilnBlockReader::nextLength() const {
+  return atEnd() ? 0 : state_->pieces[next_].second;
+}
+
+void KilnBlockReader::prefetch() {
+  if (atEnd() || prefetch_.has_value()) {
+    return;
+  }
+  auto buffers = state_->cluster.reads->tryAcquire(1);
+  if (buffers.empty()) {
+    return;
+  }
+  prefetch_ = folly::coro::co_withExecutor(
+                  folly::getGlobalCPUExecutor(),
+                  co_readPooled(state_, next_, std::move(buffers[0])))
+                  .start();
+}
+
+folly::coro::Task<std::unique_ptr<folly::IOBuf>> KilnBlockReader::co_next() {
+  VELOX_CHECK(!atEnd());
+  std::unique_ptr<folly::IOBuf> piece;
+  if (prefetch_.has_value()) {
+    auto read = std::move(*prefetch_);
+    prefetch_.reset();
+    piece = co_await std::move(read);
+  } else if (auto buffers = state_->cluster.reads->tryAcquire(1);
+             !buffers.empty()) {
+    piece = co_await co_readPooled(state_, next_, std::move(buffers[0]));
+  } else {
+    piece = co_await co_readStaged(state_, next_);
+    copiedBytes_ += state_->pieces[next_].second;
+  }
+  ++next_;
+  prefetch();
+  co_return piece;
+}
+
 folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchKilnBlock(
     std::string url) {
-  const auto [metadata, chunk] = parseKilnLocation(parseBlockUrl(url).first);
-  const auto cluster = kilnCluster(metadata, /*pools=*/true);
-  const auto id = kiln::ChunkId::parse(chunk);
-  auto ranges = kilnBlockRanges(url);
-  const auto all = pieces(ranges);
-  if (all.empty()) {
-    co_return nullptr;
-  }
-  // Zero-copy if the read pool has a buffer for each piece now: the block
-  // then keeps them until Velox frees its pages. Never waits for them, as
-  // the buffers it would wait for may be held by pages that wait for this
-  // block, e.g. in a merge.
-  auto buffers = cluster.reads->tryAcquire(all.size());
-  if (!buffers.empty()) {
-    auto read = co_await folly::coro::co_awaitTry(
-        co_readPieces(*cluster.client, id, all, 0, buffers));
-    if (read.hasException()) {
-      cluster.reads->release(std::move(buffers));
-      co_yield folly::coro::co_error(std::move(read.exception()));
+  KilnBlockReader reader{url};
+  std::unique_ptr<folly::IOBuf> block;
+  while (!reader.atEnd()) {
+    auto piece = co_await reader.co_next();
+    if (block == nullptr) {
+      block = std::move(piece);
+    } else {
+      block->appendToChain(std::move(piece));
     }
-    std::unique_ptr<folly::IOBuf> block;
-    for (auto& buffer : buffers) {
-      auto piece = wrap(cluster.reads, std::move(buffer));
-      if (block == nullptr) {
-        block = std::move(piece);
-      } else {
-        block->appendToChain(std::move(piece));
-      }
-    }
-    co_return block;
   }
-  // Else copied out of staging buffers, which no reader holds past its read.
-  int64_t bytes = 0;
-  for (const auto& piece : all) {
-    bytes += piece.second;
-  }
-  auto block = folly::IOBuf::create(bytes);
-  co_await co_readKiln(
-      metadata, id, std::move(ranges), [&](const uint8_t* data, size_t size) {
-        std::memcpy(block->writableTail(), data, size);
-        block->append(size);
-      });
   co_return block;
 }
 

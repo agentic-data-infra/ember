@@ -142,14 +142,9 @@ class ShuffleBlockSource : public exec::ExchangeSource {
 
  private:
   folly::coro::Task<Response> co_request() {
-    folly::Try<std::unique_ptr<folly::IOBuf>> data;
-    if (isKilnLocation(location_)) {
-      data = co_await folly::coro::co_awaitTry(co_fetchKilnBlock(url_));
-    } else {
-      auto transport = BlockTransport::instance();
-      data = co_await folly::coro::co_awaitTry(
-          transport->co_fetchBlock(location_, block_));
-    }
+    auto transport = BlockTransport::instance();
+    auto data = co_await folly::coro::co_awaitTry(
+        transport->co_fetchBlock(location_, block_));
     if (data.hasException()) {
       const FetchFailure failure{location_, block_};
       VELOX_FAIL(failure.message(data.exception().what().toStdString()));
@@ -184,6 +179,115 @@ class ShuffleBlockSource : public exec::ExchangeSource {
   int64_t bytes_{0};
 };
 
+// Reads one shuffle block from Kiln as a stream: each request reads pieces
+// (KilnBlockReader) until it has whole pages, about as many bytes as Velox
+// asks for, and keeps the next piece read ahead. Velox asks for more as its
+// queue drains, so a block holds only a few read buffers at a time, even
+// in a merge, which holds a page of every source until it has used it up.
+class KilnBlockSource : public exec::ExchangeSource {
+ public:
+  KilnBlockSource(
+      const std::string& url,
+      int destination,
+      std::shared_ptr<exec::ExchangeQueue> queue,
+      velox::memory::MemoryPool* pool)
+      : ExchangeSource(url, destination, std::move(queue), pool),
+        url_{url},
+        reader_{url} {}
+
+  bool shouldRequestLocked() override {
+    if (atEnd_) {
+      return false;
+    }
+    return !requestPending_.exchange(true);
+  }
+
+  folly::SemiFuture<Response> request(
+      uint32_t maxBytes,
+      std::chrono::microseconds /*maxWait*/) override {
+    auto self = std::static_pointer_cast<KilnBlockSource>(shared_from_this());
+    return folly::coro::co_invoke([self, maxBytes] {
+             return self->co_request(maxBytes);
+           }).semi();
+  }
+
+  // The next piece's size, without waiting for it: starts reading it.
+  folly::SemiFuture<Response> requestDataSizes(
+      std::chrono::microseconds maxWait) override {
+    if (reader_.atEnd() && pending_.empty()) {
+      return request(0, maxWait);
+    }
+    reader_.prefetch();
+    std::lock_guard<std::mutex> l(queue_->mutex());
+    requestPending_ = false;
+    return folly::makeSemiFuture(Response{0, false, remainingBytes()});
+  }
+
+  void close() override {}
+
+  folly::F14FastMap<std::string, int64_t> stats() const override {
+    return {
+        {"shuffleBlockBytes", bytes_},
+        {"kilnCopiedBytes", reader_.copiedBytes()}};
+  }
+
+ private:
+  folly::coro::Task<Response> co_request(uint32_t maxBytes) {
+    std::vector<std::unique_ptr<folly::IOBuf>> pages;
+    int64_t bytes = 0;
+    while (!reader_.atEnd() && (pages.empty() || bytes < maxBytes)) {
+      auto piece = co_await folly::coro::co_awaitTry(reader_.co_next());
+      if (piece.hasException()) {
+        const auto [location, block] = parseBlockUrl(url_);
+        const FetchFailure failure{location, block};
+        VELOX_FAIL(failure.message(piece.exception().what().toStdString()));
+      }
+      pending_.append(std::move(piece).value());
+      for (auto& page : takeFrames(pending_)) {
+        bytes += page->computeChainDataLength();
+        pages.push_back(std::move(page));
+      }
+    }
+    VELOX_CHECK(
+        !reader_.atEnd() || pending_.empty(), "{} ends in a cut page", url_);
+    std::vector<velox::ContinuePromise> promises;
+    std::vector<int64_t> remaining;
+    {
+      std::lock_guard<std::mutex> l(queue_->mutex());
+      requestPending_ = false;
+      bytes_ += bytes;
+      for (auto& page : pages) {
+        queue_->enqueueLocked(
+            std::make_unique<exec::PrestoSerializedPage>(std::move(page)),
+            promises);
+      }
+      if (reader_.atEnd()) {
+        queue_->enqueueLocked(nullptr, promises);
+        atEnd_ = true;
+      }
+      remaining = remainingBytes();
+    }
+    for (auto& promise : promises) {
+      promise.setValue();
+    }
+    co_return Response{bytes, reader_.atEnd(), std::move(remaining)};
+  }
+
+  // What Velox may ask for next: one piece, so that it asks again for each.
+  std::vector<int64_t> remainingBytes() const {
+    if (reader_.atEnd()) {
+      return {};
+    }
+    return {reader_.nextLength()};
+  }
+
+  const std::string url_;
+  KilnBlockReader reader_;
+  // Bytes read but not yet whole pages.
+  folly::IOBufQueue pending_{folly::IOBufQueue::cacheChainLength()};
+  int64_t bytes_{0};
+};
+
 } // namespace
 
 std::shared_ptr<exec::ExchangeSource> createShuffleBlockSource(
@@ -193,6 +297,10 @@ std::shared_ptr<exec::ExchangeSource> createShuffleBlockSource(
     velox::memory::MemoryPool* pool) {
   if (!isBlockUrl(url)) {
     return nullptr;
+  }
+  if (isKilnLocation(parseBlockUrl(url).first)) {
+    return std::make_shared<KilnBlockSource>(
+        url, destination, std::move(queue), pool);
   }
   return std::make_shared<ShuffleBlockSource>(
       url, destination, std::move(queue), pool);

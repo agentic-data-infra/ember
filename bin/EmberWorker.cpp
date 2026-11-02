@@ -44,7 +44,7 @@ DEFINE_int32(
 DEFINE_int32(
     kiln_read_buffers,
     ember::shuffle::kDefaultKilnReadBuffers,
-    "4 MiB buffers for reads from each Kiln cluster, allocated up front.");
+    "1 MiB buffers for reads from each Kiln cluster, allocated up front.");
 DEFINE_int32(
     kiln_write_buffers,
     ember::shuffle::kDefaultKilnWriteBuffers,

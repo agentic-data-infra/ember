@@ -622,4 +622,17 @@ std::vector<std::unique_ptr<folly::IOBuf>> splitFrames(
   return pages;
 }
 
+std::vector<std::unique_ptr<folly::IOBuf>> takeFrames(folly::IOBufQueue& queue) {
+  std::vector<std::unique_ptr<folly::IOBuf>> pages;
+  while (queue.chainLength() >= sizeof(uint32_t)) {
+    const auto length = folly::io::Cursor(queue.front()).readLE<uint32_t>();
+    if (queue.chainLength() < sizeof(uint32_t) + length) {
+      break;
+    }
+    queue.trimStart(sizeof(uint32_t));
+    pages.push_back(length > 0 ? queue.split(length) : folly::IOBuf::create(0));
+  }
+  return pages;
+}
+
 } // namespace ember::shuffle

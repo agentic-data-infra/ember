@@ -15,12 +15,17 @@
 
 #include <folly/ScopeGuard.h>
 #include <folly/coro/BlockingWait.h>
+#include <folly/executors/GlobalExecutor.h>
 
 #include "ember/shuffle/KilnShuffle.h"
+#include "ember/shuffle/ShuffleRead.h"
 #include "kiln/client/BufferPool.h"
 #include "kiln/client/Client.h"
 #include "kiln/local/LocalCluster.h"
 #include "velox/common/base/Exceptions.h"
+#include "velox/common/memory/Memory.h"
+#include "velox/exec/ExchangeQueue.h"
+#include "velox/exec/ExchangeSource.h"
 
 namespace ember::shuffle {
 namespace {
@@ -30,6 +35,8 @@ namespace fs = std::filesystem;
 class KilnShuffleTest : public testing::Test {
  protected:
   static void SetUpTestSuite() {
+    facebook::velox::memory::MemoryManager::testingSetInstance(
+        facebook::velox::memory::MemoryManager::Options{});
     if (std::getenv("EMBER_TEST_KILN_METADATA") == nullptr) {
       cluster_ = new kiln::local::LocalCluster(kiln::local::LocalClusterOptions{
           .dramServers = 1, .localFsServers = 1});
@@ -292,6 +299,102 @@ TEST_F(KilnShuffleTest, firstCommitWins) {
   auto status = first->commit();
   EXPECT_EQ(status.location, secondStatus.location);
   EXPECT_EQ(readBlock(status, 0), (std::vector<std::string>{"second, longer"}));
+}
+
+TEST(TakeFramesTest, leavesCutPages) {
+  folly::IOBufQueue queue{folly::IOBufQueue::cacheChainLength()};
+  auto frame = [](const std::string& page) {
+    std::string bytes(sizeof(uint32_t), '\0');
+    const uint32_t length = page.size();
+    std::memcpy(bytes.data(), &length, sizeof(length));
+    return bytes + page;
+  };
+  const auto data = frame("first") + frame("") + frame("second");
+  // Cut inside the second length and inside "second".
+  queue.append(folly::IOBuf::copyBuffer(data.substr(0, 11)));
+  auto pages = takeFrames(queue);
+  ASSERT_EQ(pages.size(), 1);
+  EXPECT_EQ(pages[0]->moveToFbString().toStdString(), "first");
+  queue.append(folly::IOBuf::copyBuffer(data.substr(11, 10)));
+  pages = takeFrames(queue);
+  ASSERT_EQ(pages.size(), 1);
+  EXPECT_EQ(pages[0]->computeChainDataLength(), 0);
+  queue.append(folly::IOBuf::copyBuffer(data.substr(21)));
+  pages = takeFrames(queue);
+  ASSERT_EQ(pages.size(), 1);
+  EXPECT_EQ(pages[0]->moveToFbString().toStdString(), "second");
+  EXPECT_TRUE(queue.empty());
+}
+
+TEST_F(KilnShuffleTest, sourceStreamsBlockInPieces) {
+  // Pages of 700 KiB, so that most are cut between two pieces of 1 MiB.
+  // With spill=false, each page is a segment of its own, read as one piece.
+  for (const bool spill : {true, false}) {
+    SCOPED_TRACE(spill);
+    auto mapWriter = writer(
+        12, spill ? 0 : 1, 1, "attempt0", spill ? 1 << 30 : 1, "dram",
+        kiln::kDefaultBucket, spill);
+    std::vector<std::string> data;
+    for (int i = 0; i < 5; ++i) {
+      data.push_back(std::string(700 << 10, 'a' + i));
+      mapWriter->collect(0, folly::IOBuf::copyBuffer(data.back()));
+    }
+    auto status = mapWriter->commit();
+    const auto url = blockUrl(
+        status.location, {12, spill ? 0 : 1, 0}, status.blockRanges(0));
+
+    auto pool = facebook::velox::memory::memoryManager()->addLeafPool();
+    auto queue = std::make_shared<facebook::velox::exec::ExchangeQueue>(1, 0);
+    {
+      std::lock_guard<std::mutex> l(queue->mutex());
+      queue->addSourceLocked();
+    }
+    queue->noMoreSources();
+    auto source = createShuffleBlockSource(url, 0, queue, pool.get());
+    auto request = [&](auto future) {
+      {
+        std::lock_guard<std::mutex> l(queue->mutex());
+        EXPECT_TRUE(source->shouldRequestLocked());
+      }
+      return std::move(future).via(folly::getGlobalCPUExecutor()).get();
+    };
+    // Sizes come without a read: one piece at a time.
+    auto sizes = request(folly::makeSemiFuture().deferValue([&](auto&&) {
+      return source->requestDataSizes(std::chrono::seconds(1));
+    }));
+    EXPECT_EQ(sizes.bytes, 0);
+    EXPECT_EQ(
+        sizes.remainingBytes,
+        std::vector<int64_t>{std::min<int64_t>(
+            status.blockRanges(0)[0].second, 1 << 20)});
+    // Each request of a piece returns whole pages, about that many bytes.
+    int requests = 0;
+    for (bool atEnd = false; !atEnd; ++requests) {
+      auto response = request(folly::makeSemiFuture().deferValue([&](auto&&) {
+        return source->request(1 << 20, std::chrono::seconds(1));
+      }));
+      EXPECT_GT(response.bytes, 0);
+      atEnd = response.atEnd;
+      EXPECT_EQ(response.remainingBytes.empty(), atEnd);
+    }
+    EXPECT_GT(requests, 2);
+
+    std::vector<std::string> pages;
+    bool atEnd = false;
+    facebook::velox::ContinueFuture future;
+    facebook::velox::ContinuePromise stale;
+    std::lock_guard<std::mutex> l(queue->mutex());
+    while (!atEnd) {
+      auto dequeued =
+          queue->dequeueLocked(0, 1 << 30, &atEnd, &future, &stale);
+      ASSERT_TRUE(!dequeued.empty() || atEnd);
+      for (auto& page : dequeued) {
+        pages.push_back(page->getIOBuf()->moveToFbString().toStdString());
+      }
+    }
+    EXPECT_EQ(pages, data);
+    EXPECT_EQ(source->stats().at("kilnCopiedBytes"), 0);
+  }
 }
 
 TEST_F(KilnShuffleTest, manyBlocksHeldAtOnce) {

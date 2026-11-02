@@ -15,8 +15,10 @@
 // whenever its buffered pages pass the spill threshold, it appends them to
 // its chunk, partition by partition, and goes on without waiting for Kiln.
 // The chunk is then a sequence of such segments, and a block is one byte
-// range per segment (MapStatus::segments), which the reduce task reads at
-// once.
+// range per segment (MapStatus::segments).
+//
+// Reduce tasks stream their blocks: a piece of 1 MiB at a time, as Velox
+// asks for more, with the next piece read ahead (KilnBlockReader).
 //
 // Each shuffle's chunks go into a Kiln bucket of its own
 // (ember.shuffle.kiln.bucket), which the driver deletes with the shuffle.
@@ -24,7 +26,10 @@
 
 #pragma once
 
+#include <optional>
+
 #include <folly/Function.h>
+#include <folly/futures/Future.h>
 
 #include "ember/shuffle/FileShuffle.h"
 #include "kiln/common/ChunkId.h"
@@ -48,14 +53,19 @@ std::shared_ptr<kiln::client::Client> kilnClient(const std::string& metadata);
 /// on one host. Clients created before keep their setting.
 void setKilnUseShm(bool useShm);
 
-/// The size of the buffers Kiln data moves through: Kiln's buffer pools
-/// (see kilnReadPool()) hold buffers of this size, and reads and appends
-/// are cut into pieces of it.
+/// The size of the buffers Kiln data moves through: the write and staging
+/// pools (see kilnReadPool()) hold buffers of this size, and appends and
+/// staged reads are cut into pieces of it.
 inline constexpr size_t kKilnBufferBytes = 4 << 20;
+
+/// The size of the read pool's buffers, and of the pieces shuffle blocks
+/// are read in: small, so that a reader streaming many blocks at once holds
+/// little each.
+inline constexpr size_t kKilnReadPieceBytes = 1 << 20;
 
 /// Default buffers of each pool: 256 MiB to read and to write, 32 MiB to
 /// stage reads.
-inline constexpr size_t kDefaultKilnReadBuffers = 64;
+inline constexpr size_t kDefaultKilnReadBuffers = 256;
 inline constexpr size_t kDefaultKilnWriteBuffers = 64;
 inline constexpr size_t kDefaultKilnStagingBuffers = 8;
 
@@ -70,9 +80,10 @@ void setKilnBufferPools(
 /// cluster of metadata server 'metadata', allocated (with RDMA, registered
 /// with the NIC) at the first use, so that no read or append allocates or
 /// registers memory:
-/// - Shuffle blocks are read into the read pool's buffers and keep them
-///   until Velox frees their pages, without a copy. Nobody waits for them:
-///   a block that finds too few free is read through the staging pool.
+/// - Shuffle blocks are read piece by piece into the read pool's buffers,
+///   which they keep until Velox frees their pages, without a copy. Nobody
+///   waits for them: a piece that finds none free is read through the
+///   staging pool (see KilnBlockReader).
 /// - Reads through the staging pool copy the data out and give the buffers
 ///   back at once (see co_readKiln()), so its buffers are never held for
 ///   long, and waiting for them is safe.
@@ -121,10 +132,46 @@ folly::coro::Task<void> co_readKiln(
     std::vector<std::pair<int64_t, int64_t>> ranges,
     folly::Function<void(const uint8_t*, size_t)> sink);
 
-/// The bytes of the Kiln block at block URL 'url' (see blockUrl()): its
-/// ranges, read in pieces of kKilnBufferBytes into buffers of the read pool
-/// and chained, if it has enough free; else read with co_readKiln() into
-/// one IOBuf.
+/// Reads the Kiln block at block URL 'url' (see blockUrl()) piece by piece,
+/// each at most kKilnReadPieceBytes, in order. A piece goes into a buffer
+/// of the read pool if one is free, and keeps it until the IOBuf is freed;
+/// else it is copied through the staging pool. Never waits for a read
+/// buffer, as those may be held by pages that wait for this block, e.g. in
+/// a merge. Not thread safe.
+class KilnBlockReader {
+ public:
+  explicit KilnBlockReader(const std::string& url);
+  ~KilnBlockReader();
+
+  /// Whether all pieces have been returned.
+  bool atEnd() const;
+
+  /// The bytes of the next piece, 0 at the end.
+  int64_t nextLength() const;
+
+  /// Starts reading the next piece in the background, if not yet started
+  /// and a read buffer is free.
+  void prefetch();
+
+  /// The next piece; then prefetches the one after.
+  folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_next();
+
+  /// Bytes returned so far that were copied through the staging pool.
+  int64_t copiedBytes() const {
+    return copiedBytes_;
+  }
+
+  struct State;
+
+ private:
+  std::shared_ptr<const State> state_;
+  size_t next_{0};
+  int64_t copiedBytes_{0};
+  std::optional<folly::SemiFuture<std::unique_ptr<folly::IOBuf>>> prefetch_;
+};
+
+/// The bytes of the Kiln block at block URL 'url': its pieces from a
+/// KilnBlockReader, chained.
 folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchKilnBlock(
     std::string url);
 
