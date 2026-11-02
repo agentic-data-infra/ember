@@ -11,8 +11,9 @@
 // has evicted fails the read with a FetchFailure, and the driver recomputes
 // the map output as for a lost executor.
 //
-// The chunks stay in Kiln until it evicts them; nothing removes them when a
-// shuffle is removed.
+// Each shuffle's chunks go into a Kiln bucket of its own
+// (ember.shuffle.kiln.bucket), which the driver deletes with the shuffle.
+// Chunks of outputs stored in Kiln's catalog stay until Kiln evicts them.
 
 #pragma once
 
