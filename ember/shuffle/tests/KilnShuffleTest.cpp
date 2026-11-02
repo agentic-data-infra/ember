@@ -255,6 +255,25 @@ TEST_F(KilnShuffleTest, largeOutputSpansAppends) {
   EXPECT_EQ(readBlock(status, 1), (std::vector<std::string>{data}));
 }
 
+// Spilled runs and buffered pages, regrouped at commit into many appends:
+// each buffer is filled while the previous one is appended.
+TEST_F(KilnShuffleTest, largeSpilledOutputSpansAppends) {
+  const std::string data(3 << 20, 'z');
+  auto mapWriter = writer(14, 0, 2, "attempt0", /*spillThreshold=*/5 << 20);
+  for (int i = 0; i < 7; ++i) {
+    mapWriter->collect(i % 2, folly::IOBuf::copyBuffer(data + std::to_string(i)));
+  }
+  auto status = mapWriter->commit();
+  ASSERT_EQ(status.segments.size(), 1);
+  EXPECT_EQ(
+      readBlock(status, 0),
+      (std::vector<std::string>{data + "0", data + "2", data + "4", data + "6"}));
+  EXPECT_EQ(
+      readBlock(status, 1),
+      (std::vector<std::string>{data + "1", data + "3", data + "5"}));
+  EXPECT_TRUE(fs::is_empty(dir_));
+}
+
 TEST_F(KilnShuffleTest, emptyOutputHasNoChunk) {
   auto status = writer(3, 0, 2)->commit();
   EXPECT_TRUE(isKilnLocation(status.location));

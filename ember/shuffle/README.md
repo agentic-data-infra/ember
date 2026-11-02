@@ -70,7 +70,7 @@ host, else RDMA where the build, the device and the region allow it, else
 TCP; metadata calls go over RDMA with an `rdma://` URL. Ember only hands it
 memory it can move without copies: each process keeps up to 16 buffers of 4
 MiB per cluster from `Client::allocateBuffer` (registered with the NIC under
-RDMA). Writers stage appends in one; a block read that fits goes into one,
+RDMA). A writer that regroups its output at commit stages appends in two, filling one while Kiln appends the other; a block read that fits goes into one,
 handed to Velox as an IOBuf that returns the buffer to the pool when freed.
 Larger blocks, and reads while all buffers are in use, read into a fresh
 IOBuf registered for that read.
