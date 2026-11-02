@@ -50,6 +50,11 @@ DEFINE_int32(
     ember::shuffle::kDefaultKilnWriteBuffers,
     "4 MiB buffers for writes to each Kiln cluster, allocated up front.");
 DEFINE_int32(
+    kiln_staging_buffers,
+    ember::shuffle::kDefaultKilnStagingBuffers,
+    "4 MiB buffers for copied reads from each Kiln cluster, allocated up "
+    "front.");
+DEFINE_int32(
     connect_timeout_s,
     60,
     "Seconds to keep trying to reach the driver; 0 for ever.");
@@ -74,7 +79,9 @@ int main(int argc, char** argv) {
     return 2;
   }
   ember::shuffle::setKilnBufferPools(
-      FLAGS_kiln_read_buffers, FLAGS_kiln_write_buffers);
+      FLAGS_kiln_read_buffers,
+      FLAGS_kiln_write_buffers,
+      FLAGS_kiln_staging_buffers);
   ember::WorkerOptions options;
   options.driver = ember::rpc::HostAndPort::parse(FLAGS_driver);
   options.bindHost = FLAGS_bind_host;

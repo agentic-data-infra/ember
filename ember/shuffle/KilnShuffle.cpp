@@ -24,6 +24,7 @@ using folly::coro::blockingWait;
 struct KilnCluster {
   std::shared_ptr<kiln::client::Client> client;
   std::shared_ptr<kiln::client::BufferPool> reads;
+  std::shared_ptr<kiln::client::BufferPool> staging;
   std::shared_ptr<kiln::client::BufferPool> writes;
 };
 
@@ -31,6 +32,7 @@ struct KilnCluster {
 std::atomic<bool> useShm{true};
 std::atomic<size_t> readBuffers{kDefaultKilnReadBuffers};
 std::atomic<size_t> writeBuffers{kDefaultKilnWriteBuffers};
+std::atomic<size_t> stagingBuffers{kDefaultKilnStagingBuffers};
 
 // One client per cluster: clients cache where chunks are and keep their
 // connections. They are never destroyed: at exit, folly's singletons may be
@@ -51,6 +53,8 @@ KilnCluster kilnCluster(const std::string& metadata, bool pools = false) {
   if (pools && cluster.reads == nullptr) {
     cluster.reads = std::make_shared<kiln::client::BufferPool>(
         *cluster.client, kKilnBufferBytes, readBuffers.load());
+    cluster.staging = std::make_shared<kiln::client::BufferPool>(
+        *cluster.client, kKilnBufferBytes, stagingBuffers.load());
     cluster.writes = std::make_shared<kiln::client::BufferPool>(
         *cluster.client, kKilnBufferBytes, writeBuffers.load());
   }
@@ -117,6 +121,28 @@ class BufferFiller {
   std::vector<kiln::Buffer>& buffers_;
   size_t next_{0};
 };
+
+// The data of 'buffer', from 'pool', as an IOBuf that gives the buffer back
+// when freed.
+std::unique_ptr<folly::IOBuf> wrap(
+    std::shared_ptr<kiln::client::BufferPool> pool,
+    kiln::Buffer buffer) {
+  struct Held {
+    std::shared_ptr<kiln::client::BufferPool> pool;
+    kiln::Buffer buffer;
+  };
+  auto* held = new Held{std::move(pool), std::move(buffer)};
+  return folly::IOBuf::takeOwnership(
+      held->buffer.data(),
+      held->buffer.capacity(),
+      held->buffer.size(),
+      [](void* /*data*/, void* userData) {
+        auto* held = static_cast<Held*>(userData);
+        held->pool->release(std::move(held->buffer));
+        delete held;
+      },
+      held);
+}
 
 class KilnShuffleWriter : public PartitionedPageWriter {
  public:
@@ -411,6 +437,46 @@ folly::coro::Task<kiln::Buffer> co_readPiece(
   co_return read;
 }
 
+// The byte ranges ('offset', 'length') 'ranges', cut into pieces of
+// kKilnBufferBytes.
+std::vector<std::pair<int64_t, int64_t>> pieces(
+    const std::vector<std::pair<int64_t, int64_t>>& ranges) {
+  std::vector<std::pair<int64_t, int64_t>> pieces;
+  for (const auto& [offset, length] : ranges) {
+    for (int64_t done = 0; done < length; done += kKilnBufferBytes) {
+      pieces.emplace_back(
+          offset + done, std::min<int64_t>(length - done, kKilnBufferBytes));
+    }
+  }
+  return pieces;
+}
+
+// Reads 'pieces' of chunk 'id' in parallel into 'buffers', one each. On
+// failure the buffers of the failed reads stay empty.
+folly::coro::Task<void> co_readPieces(
+    kiln::client::Client& client,
+    kiln::ChunkId id,
+    const std::vector<std::pair<int64_t, int64_t>>& pieces,
+    size_t first,
+    std::vector<kiln::Buffer>& buffers) {
+  std::vector<folly::coro::Task<kiln::Buffer>> reads;
+  for (size_t i = 0; i < buffers.size(); ++i) {
+    const auto& [offset, length] = pieces[first + i];
+    reads.push_back(co_readPiece(client, id, offset, length, buffers[i]));
+  }
+  auto results = co_await folly::coro::collectAllTryRange(std::move(reads));
+  for (size_t i = 0; i < results.size(); ++i) {
+    if (results[i].hasValue()) {
+      buffers[i] = std::move(results[i]).value();
+    }
+  }
+  for (auto& result : results) {
+    if (result.hasException()) {
+      co_yield folly::coro::co_error(std::move(result.exception()));
+    }
+  }
+}
+
 } // namespace
 
 folly::coro::Task<void> co_readKiln(
@@ -419,42 +485,15 @@ folly::coro::Task<void> co_readKiln(
     std::vector<std::pair<int64_t, int64_t>> ranges,
     folly::Function<void(const uint8_t*, size_t)> sink) {
   const auto cluster = kilnCluster(metadata, /*pools=*/true);
-  auto& pool = *cluster.reads;
-  struct Piece {
-    int64_t offset;
-    int64_t length;
-  };
-  std::vector<Piece> pieces;
-  for (const auto& [offset, length] : ranges) {
-    for (int64_t done = 0; done < length; done += kKilnBufferBytes) {
-      pieces.push_back(
-          {offset + done,
-           std::min<int64_t>(length - done, kKilnBufferBytes)});
-    }
-  }
-  for (size_t first = 0; first < pieces.size();) {
-    const auto n = std::min(pieces.size() - first, pool.count());
+  auto& pool = *cluster.staging;
+  const auto all = pieces(ranges);
+  for (size_t first = 0; first < all.size();) {
+    const auto n = std::min(all.size() - first, pool.count());
     auto buffers = co_await pool.co_acquire(n);
     SCOPE_EXIT {
       pool.release(std::move(buffers));
     };
-    std::vector<folly::coro::Task<kiln::Buffer>> reads;
-    for (size_t i = 0; i < n; ++i) {
-      const auto& piece = pieces[first + i];
-      reads.push_back(co_readPiece(
-          *cluster.client, id, piece.offset, piece.length, buffers[i]));
-    }
-    auto results = co_await folly::coro::collectAllTryRange(std::move(reads));
-    for (size_t i = 0; i < n; ++i) {
-      if (results[i].hasValue()) {
-        buffers[i] = std::move(results[i]).value();
-      }
-    }
-    for (auto& result : results) {
-      if (result.hasException()) {
-        co_yield folly::coro::co_error(std::move(result.exception()));
-      }
-    }
+    co_await co_readPieces(*cluster.client, id, all, first, buffers);
     for (auto& buffer : buffers) {
       sink(buffer.data(), buffer.size());
     }
@@ -465,35 +504,66 @@ folly::coro::Task<void> co_readKiln(
 folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchKilnBlock(
     std::string url) {
   const auto [metadata, chunk] = parseKilnLocation(parseBlockUrl(url).first);
+  const auto cluster = kilnCluster(metadata, /*pools=*/true);
+  const auto id = kiln::ChunkId::parse(chunk);
   auto ranges = kilnBlockRanges(url);
-  int64_t bytes = 0;
-  for (const auto& range : ranges) {
-    bytes += range.second;
-  }
-  if (bytes == 0) {
+  const auto all = pieces(ranges);
+  if (all.empty()) {
     co_return nullptr;
+  }
+  // Zero-copy if the read pool has a buffer for each piece now: the block
+  // then keeps them until Velox frees its pages. Never waits for them, as
+  // the buffers it would wait for may be held by pages that wait for this
+  // block, e.g. in a merge.
+  auto buffers = cluster.reads->tryAcquire(all.size());
+  if (!buffers.empty()) {
+    auto read = co_await folly::coro::co_awaitTry(
+        co_readPieces(*cluster.client, id, all, 0, buffers));
+    if (read.hasException()) {
+      cluster.reads->release(std::move(buffers));
+      co_yield folly::coro::co_error(std::move(read.exception()));
+    }
+    std::unique_ptr<folly::IOBuf> block;
+    for (auto& buffer : buffers) {
+      auto piece = wrap(cluster.reads, std::move(buffer));
+      if (block == nullptr) {
+        block = std::move(piece);
+      } else {
+        block->appendToChain(std::move(piece));
+      }
+    }
+    co_return block;
+  }
+  // Else copied out of staging buffers, which no reader holds past its read.
+  int64_t bytes = 0;
+  for (const auto& piece : all) {
+    bytes += piece.second;
   }
   auto block = folly::IOBuf::create(bytes);
   co_await co_readKiln(
-      metadata,
-      kiln::ChunkId::parse(chunk),
-      std::move(ranges),
-      [&](const uint8_t* data, size_t size) {
+      metadata, id, std::move(ranges), [&](const uint8_t* data, size_t size) {
         std::memcpy(block->writableTail(), data, size);
         block->append(size);
       });
   co_return block;
 }
 
-void setKilnBufferPools(size_t reads, size_t writes) {
-  VELOX_USER_CHECK(reads > 0 && writes > 0, "Kiln buffer pools need buffers");
+void setKilnBufferPools(size_t reads, size_t writes, size_t staging) {
+  VELOX_USER_CHECK(
+      reads > 0 && writes > 0 && staging > 0, "Kiln buffer pools need buffers");
   readBuffers = reads;
   writeBuffers = writes;
+  stagingBuffers = staging;
 }
 
 std::shared_ptr<kiln::client::BufferPool> kilnReadPool(
     const std::string& metadata) {
   return kilnCluster(metadata, /*pools=*/true).reads;
+}
+
+std::shared_ptr<kiln::client::BufferPool> kilnStagingPool(
+    const std::string& metadata) {
+  return kilnCluster(metadata, /*pools=*/true).staging;
 }
 
 std::shared_ptr<kiln::client::BufferPool> kilnWritePool(
