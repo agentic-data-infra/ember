@@ -160,7 +160,8 @@ void materializeOutput(StagePlan& plan, velox::memory::MemoryPool* pool) {
 
 // Range-partitions a global sort (see StagePlan.h). It applies when the
 // result stage merges one gathered shuffle under row-wise nodes only (no
-// limit), and the first sort key is a string column.
+// limit), and the first sort key is a string column. A table write on top
+// counts as row-wise: each task writes its range.
 void rangeSort(
     StagePlan& plan,
     int32_t numPartitions,
@@ -172,6 +173,9 @@ void rangeSort(
     return;
   }
   auto node = result.plan;
+  if (node->is<core::TableWriteNode>()) {
+    node = node->sources()[0];
+  }
   while (node->is<core::ProjectNode>() || node->is<core::FilterNode>()) {
     node = node->sources()[0];
   }

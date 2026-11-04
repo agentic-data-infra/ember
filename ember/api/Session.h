@@ -28,6 +28,7 @@
 #include "ember/Dataframe.h"
 #include "ember/DataframeReader.h"
 #include "ember/DataframeWriter.h"
+#include "axiom/connectors/ConnectorMetadata.h"
 #include "axiom/connectors/ConnectorSession.h"
 
 namespace ember::driver {
@@ -119,10 +120,13 @@ class SessionState {
 
   /// Optimizes and runs 'plan', which ends in a table write, then commits
   /// the write (or aborts it if the job fails). 'properties' are the
-  /// connectors' session properties. Returns the number of rows written.
+  /// connectors' session properties. A write that creates its table (a
+  /// CREATE TABLE AS) passes the new table as 'target', in the connector
+  /// it writes to. Returns the number of rows written.
   int64_t writeTable(
       const facebook::axiom::logical_plan::LogicalPlanNodePtr& plan,
-      facebook::axiom::connector::ConnectorProperties properties);
+      facebook::axiom::connector::ConnectorProperties properties,
+      facebook::axiom::connector::TablePtr target = nullptr);
 
   /// The stages 'plan' runs as, with their shuffle reads and writes.
   std::string explainStages(

@@ -122,7 +122,9 @@ EMBER_CONF="ember.kiln.metadata=localhost:7470" \
 buck2 run kiln//bin:kiln -- --metadata=localhost:7470 data ls sorted
 ```
 
-`write()` to a dataset that exists already fails. Each result task writes its
+`write().parquet(path)` writes the rows as Parquet files, to a local or
+shared directory or to a Kiln dataset alike; `read().parquet(path)` reads
+them back. `write()` to a dataset that exists already fails. Each result task writes its
 part as one chunk, in Kiln's DRAM tier by default (`ember.kiln.files.tier=localfs`
 for local disks, `ember.kiln.files.write_through=localfs` to keep a copy
 there), into a bucket of the job's; the driver publishes the dataset when the

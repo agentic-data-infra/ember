@@ -69,6 +69,16 @@ class ApiTest(unittest.TestCase):
             self.assertIn("count", counts.showString())
             self.assertTrue(counts.explainString())
 
+    def test_write_parquet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "people")
+            self.assertEqual(self.people().write.parquet(out), 4)
+            self.assertTrue(any(name.endswith(".parquet") for name in os.listdir(out)))
+            back = self.ember.read.parquet(out)
+            self.assertEqual(sorted(back.collect()), sorted(self.people().collect()))
+            with self.assertRaises(RuntimeError):
+                self.people().write.parquet(out)
+
     def test_errors(self):
         with self.assertRaises(RuntimeError):
             self.people().select("missing").collect()

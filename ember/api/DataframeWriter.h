@@ -1,4 +1,13 @@
-// DataframeWriter: dataframe.write().gensort(directory) or .stream(name).
+// DataframeWriter: dataframe.write().parquet(directory), .gensort(directory)
+// or .stream(name).
+//
+// parquet: an Axiom table write into the "ember_output" connector
+// (OutputConnector.h): every task of the stage that makes the rows writes
+// them to <directory>/part-NNNNN.parquet with Velox's Parquet writer. The
+// directory may be on a shared file system, on each worker's local disk, or
+// a Kiln dataset, kiln://<metadata>/data/<dataset> (KilnFiles.h), published
+// when the job is done. Writing fails if the directory holds part files, or
+// the dataset exists, already.
 //
 // gensort: each task of the result stage writes its rows to
 // <directory>/part-NNNNN (NNNNN = the task's partition, 5 digits) and returns
@@ -30,6 +39,10 @@ inline constexpr std::string_view kStokeChunkBytesConfig =
 class DataframeWriter {
  public:
   explicit DataframeWriter(Dataframe df) : df_{std::move(df)} {}
+
+  /// Writes the rows as snappy-compressed Parquet files, read back with
+  /// read().parquet(directory). Returns the number of rows written.
+  int64_t parquet(const std::string& directory) const;
 
   /// Writes the rows as gensort records: each row's "key" and "payload"
   /// (VARBINARY, 100 bytes together), as valsort reads them. Returns the

@@ -12,6 +12,7 @@
 #include "ember/FunctionRegistry.h"
 #include "ember/GensortFileHandler.h"
 #include "ember/KilnFiles.h"
+#include "ember/OutputConnector.h"
 #include "ember/ParquetFileHandler.h"
 #include "ember/Stoke.h"
 #include "ember/TextFileHandler.h"
@@ -71,6 +72,7 @@ void initializeRuntime() {
         connector->connectorId(),
         std::make_shared<axiom_connector::file::FileConnectorMetadata>(
             connector.get()));
+    registerOutputConnector();
     registerStokeConnector();
   });
 }

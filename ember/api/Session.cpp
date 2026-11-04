@@ -204,7 +204,8 @@ optimizer::PlanAndStats optimizePlan(
     const lp::LogicalPlanNodePtr& plan,
     const QueryEnv& env,
     int32_t parallelism,
-    const std::shared_ptr<velox::memory::MemoryPool>& pool) {
+    const std::shared_ptr<velox::memory::MemoryPool>& pool,
+    const axiom_connector::TablePtr& target = nullptr) {
   velox::HashStringAllocator allocator(pool.get());
   optimizer::QueryGraphContext context(
       allocator, optimizer::OptimizerOptions::kMaxPlanObjectsDefault);
@@ -216,6 +217,12 @@ optimizer::PlanAndStats optimizePlan(
       env.queryCtx.get(), pool.get());
   axiom_connector::SchemaResolver schemaResolver{
       axiom_connector::ConnectorMetadataRegistry::global()};
+  if (target != nullptr) {
+    schemaResolver.setTargetTable(
+        target->layouts()[0]->connector()->connectorId(),
+        target->name(),
+        target);
+  }
   optimizer::OptimizerSession session(
       env.connectorContext,
       env.statsWriter,
@@ -255,11 +262,13 @@ int64_t SessionState::write(
 
 int64_t SessionState::writeTable(
     const lp::LogicalPlanNodePtr& plan,
-    axiom_connector::ConnectorProperties properties) {
+    axiom_connector::ConnectorProperties properties,
+    axiom_connector::TablePtr target) {
   VELOX_USER_CHECK_NOT_NULL(scheduler_, "Session {} is stopped", appName_);
   auto env = makeQueryEnv(
       nextQueryId(), appName_, nullptr, config_, std::move(properties));
-  auto optimized = optimizePlan(plan, env, parallelism_, optimizerPool_);
+  auto optimized =
+      optimizePlan(plan, env, parallelism_, optimizerPool_, target);
   VELOX_CHECK(optimized.finishWrite, "Not a table write");
   std::vector<velox::RowVectorPtr> results;
   try {
