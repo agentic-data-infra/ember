@@ -10,6 +10,7 @@
 #include "ember/shuffle/RangePartitionFunction.h"
 #include "ember/shuffle/ShuffleRead.h"
 #include "ember/shuffle/ShuffleWrite.h"
+#include "velox/core/TableWriteTraits.h"
 
 namespace ember::driver {
 
@@ -222,6 +223,15 @@ void rangeSort(
   parent->plan =
       velox::ISerializable::deserialize<core::PlanNode>(parent->fragment, pool);
   result.numTasks = numPartitions;
+  if (result.plan->is<core::TableWriteNode>()) {
+    // Axiom planned one writer, whose stats row is final. Tasks cannot merge
+    // theirs, and a commit takes a write without stats.
+    result.fragment.erase("columnStatsSpec");
+    result.fragment["outputType"] =
+        core::TableWriteTraits::outputType(std::nullopt)->serialize();
+    result.plan = velox::ISerializable::deserialize<core::PlanNode>(
+        result.fragment, pool);
+  }
 }
 
 } // namespace
