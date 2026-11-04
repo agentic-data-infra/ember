@@ -120,14 +120,6 @@ class DagScheduler {
       const facebook::axiom::optimizer::MultiFragmentPlan& plan,
       facebook::velox::memory::MemoryPool* pool);
 
-  /// Runs 'plan' with each result task writing its rows to a part file of
-  /// 'files' (TaskDescription.h). Returns the number of rows written. A
-  /// kiln:// directory names a dataset that must not exist yet; it appears
-  /// when the job succeeds, with all its parts (KilnFiles.h).
-  int64_t write(
-      const facebook::axiom::optimizer::MultiFragmentPlan& plan,
-      const OutputFiles& files);
-
   /// The stages 'plan' runs as.
   StagePlan stagePlan(const facebook::axiom::optimizer::MultiFragmentPlan& plan);
 
@@ -150,37 +142,21 @@ class DagScheduler {
   struct JobContext;
   struct StageState;
 
-  // What a result task wrote to its part.
-  struct WrittenPart {
-    int64_t rows{0};
-    // For a kiln:// directory: the chunk (hex), empty for no rows.
-    std::string chunk;
-    int64_t bytes{0};
-  };
-
   // What runStages() returns, by the kind of job.
   struct JobResult {
-    // The result stage's rows, without an output key or output files.
+    // The result stage's rows, without an output key.
     std::vector<facebook::velox::RowVectorPtr> rows;
     // With an output key: the shuffle that keeps the output.
     int32_t outputShuffle{0};
-    // With output files: the parts written, by partition.
-    std::vector<WrittenPart> writtenParts;
   };
 
   // Runs 'stages' as one job. The last stage is the result stage, whose rows
-  // are returned (allocated from 'pool'), or written to 'outputFiles', or,
-  // with 'outputKey', a map stage whose output is kept in the memo under
-  // that key.
+  // are returned (allocated from 'pool'), or, with 'outputKey', a map stage
+  // whose output is kept in the memo under that key.
   JobResult runStages(
       StagePlan& stages,
       const std::optional<std::string>& outputKey,
-      facebook::velox::memory::MemoryPool* pool,
-      const std::optional<OutputFiles>& outputFiles = std::nullopt);
-
-  // write() to a kiln:// directory: the parts go into a new bucket, and are
-  // published as a new dataset once they are all written.
-  int64_t writeKilnDataset(StagePlan& stages, const OutputFiles& files);
+      facebook::velox::memory::MemoryPool* pool);
 
   // Runs 'stage' until all its partitions are done, first rerunning lost
   // outputs of the stages it reads.

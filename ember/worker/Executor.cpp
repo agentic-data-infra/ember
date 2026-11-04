@@ -9,7 +9,6 @@
 #include "ember/Runtime.h"
 #include "ember/shuffle/ShuffleConfig.h"
 #include "ember/shuffle/ShuffleWrite.h"
-#include "ember/worker/PartFileWriter.h"
 #include "ember/worker/TaskDescription.h"
 #include "velox/common/config/Config.h"
 #include "velox/common/file/FileSystems.h"
@@ -148,27 +147,7 @@ std::string Executor::runTask(const std::string& bytes) {
 
     std::mutex resultMutex;
     exec::ConsumerSupplier consumer;
-    std::unique_ptr<PartFileWriter> writer;
-    if (description.outputFiles.has_value()) {
-      VELOX_CHECK(description.resultTask);
-      writer = std::make_unique<PartFileWriter>(
-          *description.outputFiles,
-          description.partition,
-          result.taskId,
-          description.config);
-      consumer = [&]() -> exec::Consumer {
-        return [&](velox::RowVectorPtr rows,
-                   bool /*drained*/,
-                   velox::ContinueFuture* /*future*/) {
-          if (rows != nullptr && rows->size() > 0) {
-            std::lock_guard<std::mutex> l(resultMutex);
-            writer->append(rows);
-            result.outputRows += rows->size();
-          }
-          return exec::BlockingReason::kNotBlocked;
-        };
-      };
-    } else if (description.resultTask) {
+    if (description.resultTask) {
       consumer = [&]() -> exec::Consumer {
         return [&](velox::RowVectorPtr rows,
                    bool /*drained*/,
@@ -233,10 +212,6 @@ std::string Executor::runTask(const std::string& bytes) {
         result.userError = false;
       }
     } else {
-      if (writer != nullptr) {
-        result.outputBytes = writer->commit();
-        result.outputChunk = writer->chunk();
-      }
       if (auto write =
               std::dynamic_pointer_cast<const shuffle::ShuffleWriteNode>(
                   plan)) {

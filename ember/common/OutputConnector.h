@@ -1,13 +1,14 @@
 // The "ember_output" connector: a dataframe's rows written as files in a
-// directory, through Axiom's table write (df.write().parquet(directory)).
+// directory, through Axiom's table write (df.write().parquet(directory) and
+// .gensort(directory)).
 //
 // The target table is the directory: DataframeWriter makes it with the
 // dataframe's schema (makeOutputTable()) and plans a CREATE TABLE AS of it,
 // so Axiom puts a Velox TableWriter into the fragment that makes the rows.
-// Every task of that stage writes its own rows to part-NNNNN.<format>, with
-// NNNNN its partition (taskPartition()), encoded by Velox's writer for the
-// format. After a range-partitioned sort, the parts in name order hold the
-// sorted rows. A task without rows writes no part.
+// Every task of that stage writes its own rows to part-NNNNN.parquet, encoded
+// by Velox's writer, or to part-NNNNN as 100-byte gensort records, with NNNNN
+// its partition (taskPartition()). After a range-partitioned sort, the parts
+// in name order hold the sorted rows. A task without rows writes no part.
 //
 // Where the bytes go is chosen by the directory, behind Velox's WriteFile:
 // - A local or shared file system: the task writes a hidden temporary file
@@ -40,7 +41,7 @@ namespace ember {
 
 inline constexpr std::string_view kOutputConnectorId = "ember_output";
 
-/// Session property: the format of the parts: "parquet".
+/// Session property: the format of the parts: "parquet" or "gensort".
 inline constexpr std::string_view kOutputFormat = "format";
 
 /// What a write's tasks need: where the parts go and how to encode them.
