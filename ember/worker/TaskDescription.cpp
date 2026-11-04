@@ -4,18 +4,13 @@
 #include <folly/json.h>
 #include <folly/lang/Bits.h>
 
+#include "ember/TaskId.h"
 #include "velox/common/base/Exceptions.h"
 
 namespace ember {
 
 std::string TaskDescription::taskId() const {
-  return fmt::format(
-      "ember://{}/{}.{}/{}.{}",
-      jobId,
-      stageId,
-      stageAttempt,
-      partition,
-      attempt);
+  return formatTaskId(jobId, stageId, stageAttempt, partition, attempt);
 }
 
 std::string TaskDescription::serialize() const {

@@ -14,6 +14,7 @@
 
 #include "axiom/runner/LocalRunner.h"
 #include "ember/Session.h"
+#include "ember/TaskId.h"
 #include "ember/driver/DagScheduler.h"
 #include "ember/driver/LocalBackend.h"
 #include "ember/driver/MapOutputTracker.h"
@@ -414,6 +415,7 @@ TEST_F(SchedulerTest, taskMessagesRoundTrip) {
   task.config = {{"ember.x", "y"}};
   auto copy = TaskDescription::deserialize(task.serialize());
   EXPECT_EQ(copy.taskId(), "ember://job_1/3.1/2.1");
+  EXPECT_EQ(taskPartition(copy.taskId()), 2);
   EXPECT_EQ(copy.fragment, task.fragment);
   EXPECT_EQ(copy.splits, task.splits);
   EXPECT_TRUE(copy.resultTask);

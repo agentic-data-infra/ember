@@ -286,5 +286,66 @@ TEST_F(KilnFilesTest, failedJobPublishesNothing) {
       blockingWait(catalog().co_getDataset("bad-out")).has_value());
 }
 
+TEST_F(KilnFilesTest, writesParquetDataset) {
+  auto expected = publishRecords("pq-in", 4, 2000);
+  auto& ember = session(
+      {{"ember.sort.range_partitions", "6"},
+       {std::string(kKilnFilesTier), "localfs"}});
+  auto written = ember.read()
+                     .gensort("kiln:///data/pq-in/")
+                     .orderBy(col("key"))
+                     .write()
+                     .parquet("kiln:///data/pq-out");
+  EXPECT_EQ(written, 8000);
+
+  auto dataset = blockingWait(catalog().co_getDataset("pq-out"));
+  ASSERT_TRUE(dataset.has_value());
+  EXPECT_EQ(dataset->manifest.rows, 8000);
+  EXPECT_EQ(dataset->manifest.schema, "parquet");
+  EXPECT_NE(dataset->manifest.bucket, kiln::kDefaultBucket);
+  std::vector<std::string> names;
+  for (const auto& entry : dataset->manifest.chunks) {
+    names.push_back(entry.name);
+    EXPECT_GT(*entry.rows, 0);
+    const auto info = blockingWait(client().co_stat(entry.id));
+    EXPECT_EQ(info.placement.tier, kiln::Tier::kLocalFs);
+  }
+  ASSERT_FALSE(names.empty());
+  EXPECT_EQ(names.front(), "part-00000.parquet");
+  EXPECT_TRUE(std::is_sorted(names.begin(), names.end()));
+
+  // The parts in name order hold the sorted records.
+  std::vector<std::string> sorted;
+  for (const auto& name : names) {
+    for (const auto& row :
+         ember.read().parquet(kilnPath(metadata(), "pq-out", name)).collect()) {
+      sorted.push_back(
+          row[0].value<velox::TypeKind::VARBINARY>() +
+          row[1].value<velox::TypeKind::VARBINARY>());
+    }
+  }
+  EXPECT_EQ(sorted, expected);
+  EXPECT_EQ(ember.read().parquet("kiln:///data/pq-out/").count(), 8000);
+
+  // Not written over.
+  EXPECT_THROW(
+      ember.read()
+          .gensort("kiln:///data/pq-in/")
+          .write()
+          .parquet("kiln:///data/pq-out"),
+      velox::VeloxUserError);
+}
+
+TEST_F(KilnFilesTest, failedParquetWritePublishesNothing) {
+  publish("pq-bad-in", {{"a", std::string(150, 'x')}});
+  EXPECT_ANY_THROW(session()
+                       .read()
+                       .gensort("kiln:///data/pq-bad-in/")
+                       .write()
+                       .parquet("kiln:///data/pq-bad-out"));
+  EXPECT_FALSE(
+      blockingWait(catalog().co_getDataset("pq-bad-out")).has_value());
+}
+
 } // namespace
 } // namespace ember

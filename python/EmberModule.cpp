@@ -406,6 +406,11 @@ PYBIND11_MODULE(_ember, m) {
 
   py::class_<DataframeWriter>(m, "DataframeWriter")
       .def(
+          "parquet",
+          &DataframeWriter::parquet,
+          py::arg("directory"),
+          py::call_guard<py::gil_scoped_release>())
+      .def(
           "gensort",
           &DataframeWriter::gensort,
           py::arg("directory"),

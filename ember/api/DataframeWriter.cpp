@@ -4,6 +4,7 @@
 
 #include "ember/GensortFileHandler.h"
 #include "ember/KilnFiles.h"
+#include "ember/OutputConnector.h"
 #include "ember/Session.h"
 #include "ember/Stoke.h"
 #include "ember/StokeConnector.h"
@@ -48,6 +49,38 @@ std::string outputDirectory(
 }
 
 } // namespace
+
+int64_t DataframeWriter::parquet(const std::string& directory) const {
+  const auto& config = df_.session()->config();
+  const auto output = outputDirectory(directory, config);
+  facebook::axiom::connector::Properties properties{
+      {std::string(kOutputFormat), "parquet"}};
+  for (auto key : {kKilnFilesTier, kKilnFilesWriteThrough}) {
+    if (auto it = config.find(std::string(key)); it != config.end()) {
+      properties[std::string(key)] = it->second;
+    }
+  }
+  const auto schema = df_.schema();
+  auto plan = df_.then([output, schema](
+                           auto& builder, const auto& /*context*/) {
+                   std::vector<lp::ExprApi> columns;
+                   for (const auto& name : schema->names()) {
+                     columns.push_back(lp::Col(name));
+                   }
+                   builder.tableWrite(
+                       std::string(kOutputConnectorId),
+                       "default",
+                       output,
+                       lp::WriteKind::kCreate,
+                       schema->names(),
+                       columns);
+                 })
+                  .logicalPlan();
+  return df_.session()->writeTable(
+      plan,
+      {{std::string(kOutputConnectorId), std::move(properties)}},
+      makeOutputTable(output, schema));
+}
 
 int64_t DataframeWriter::gensort(const std::string& directory) const {
   return df_.session()->write(
