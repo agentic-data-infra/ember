@@ -15,18 +15,6 @@
 
 namespace ember {
 
-/// Files a result task writes its rows to, instead of returning them.
-struct OutputFiles {
-  /// "gensort": each row's key and payload, as a 100-byte record.
-  std::string format;
-  /// Task p writes <directory>/part-NNNNN, NNNNN = p with 5 digits. In a
-  /// kiln:// directory (KilnFiles.h), task p writes a chunk instead, and the
-  /// driver publishes the chunks as the dataset's part-NNNNN.
-  std::string directory;
-  /// The Kiln bucket of the chunks, for a kiln:// directory.
-  uint64_t kilnBucket{0};
-};
-
 /// One task: a stage's plan fragment plus this task's splits.
 struct TaskDescription {
   std::string jobId;
@@ -47,9 +35,6 @@ struct TaskDescription {
 
   /// The final stage's task: its rows go back to the driver.
   bool resultTask{false};
-
-  /// Set on a result task whose rows go to files; it returns only counts.
-  std::optional<OutputFiles> outputFiles;
 
   /// The machine whose executors may run the task, because it reads files
   /// local to it; empty for any.
@@ -85,10 +70,6 @@ struct TaskResult {
   std::vector<std::string> resultPages;
 
   int64_t outputRows{0};
-  /// The chunk (hex) a result task wrote to a kiln:// directory and its
-  /// bytes; empty if it wrote no rows.
-  std::string outputChunk;
-  int64_t outputBytes{0};
   int64_t wallMicros{0};
 
   std::string serialize() const;

@@ -10,13 +10,10 @@
 #include "axiom/runner/LocalRunner.h"
 #include "ember/CachedTable.h"
 #include "ember/FileSerde.h"
-#include "ember/KilnFiles.h"
 #include "ember/RowPages.h"
 #include "ember/shuffle/KilnShuffle.h"
 #include "ember/shuffle/ShuffleConfig.h"
 #include "ember/shuffle/ShuffleWrite.h"
-#include "ember/worker/PartFileWriter.h"
-#include "kiln/catalog/Catalog.h"
 #include "kiln/client/Client.h"
 #include "velox/common/file/FileSystems.h"
 #include "velox/core/QueryCtx.h"
@@ -60,9 +57,6 @@ struct DagScheduler::StageState {
   // A result stage's pages and rows, per partition.
   std::vector<std::vector<std::string>> resultPages;
   std::vector<int64_t> resultRows;
-  // A result stage's chunks and bytes written to Kiln, per partition.
-  std::vector<std::string> resultChunks;
-  std::vector<int64_t> resultBytes;
 
   int32_t numTasks() const {
     return static_cast<int32_t>(splits.size());
@@ -75,8 +69,6 @@ struct DagScheduler::JobContext {
   std::shared_ptr<velox::memory::MemoryPool> pool;
   std::unique_ptr<velox::exec::SimpleExpressionEvaluator> evaluator;
   runner::RunnerSessionPtr session;
-  // Where the result tasks write their rows, if not back to the driver.
-  std::optional<OutputFiles> outputFiles;
   // Stages by the shuffle they write.
   std::map<int32_t, StageState*> producers;
 };
@@ -445,82 +437,6 @@ std::vector<velox::RowVectorPtr> DagScheduler::runJob(
   return runStages(stages, std::nullopt, pool).rows;
 }
 
-int64_t DagScheduler::write(
-    const optimizer::MultiFragmentPlan& plan,
-    const OutputFiles& files) {
-  auto stages = stagePlan(plan);
-  if (isKilnPath(files.directory)) {
-    return writeKilnDataset(stages, files);
-  }
-  const auto parts =
-      runStages(stages, std::nullopt, nullptr, files).writtenParts;
-  int64_t rows = 0;
-  for (const auto& part : parts) {
-    rows += part.rows;
-  }
-  return rows;
-}
-
-int64_t DagScheduler::writeKilnDataset(
-    StagePlan& stages,
-    const OutputFiles& files) {
-  const auto path = parseKilnPath(files.directory);
-  auto client = shuffle::kilnClient(path.metadata);
-  kiln::catalog::Catalog catalog(
-      *client,
-      kiln::catalog::CatalogOptions{
-          .placement = kilnFilesPlacement(options_.config),
-          .buffers = shuffle::kilnStagingPool(path.metadata)});
-  VELOX_USER_CHECK(
-      !folly::coro::blockingWait(catalog.co_getDataset(path.dataset))
-           .has_value(),
-      "Kiln dataset {} exists already",
-      files.directory);
-
-  auto kilnFiles = files;
-  kilnFiles.kilnBucket = folly::coro::blockingWait(client->co_createBucket());
-  auto deleteBucket = [&]() {
-    try {
-      folly::coro::blockingWait(client->co_deleteBucket(kilnFiles.kilnBucket));
-    } catch (const std::exception& e) {
-      LOG(WARNING) << "Cannot delete Kiln bucket " << kilnFiles.kilnBucket
-                   << ": " << e.what();
-    }
-  };
-  std::optional<uint64_t> version;
-  kiln::catalog::Manifest manifest;
-  try {
-    const auto parts =
-        runStages(stages, std::nullopt, nullptr, kilnFiles).writtenParts;
-    manifest.schema = files.format;
-    manifest.bucket = kilnFiles.kilnBucket;
-    for (size_t p = 0; p < parts.size(); ++p) {
-      const auto& part = parts[p];
-      manifest.rows += part.rows;
-      manifest.bytes += part.bytes;
-      if (part.chunk.empty()) {
-        continue;
-      }
-      manifest.chunks.push_back(kiln::catalog::ChunkRange{
-          .id = kiln::ChunkId::parse(part.chunk),
-          .length = static_cast<uint64_t>(part.bytes),
-          .name = PartFileWriter::partName(static_cast<int32_t>(p)),
-          .rows = static_cast<uint64_t>(part.rows)});
-    }
-    version = folly::coro::blockingWait(
-        catalog.co_publishDataset(path.dataset, manifest));
-  } catch (...) {
-    deleteBucket();
-    throw;
-  }
-  if (!version.has_value()) {
-    deleteBucket();
-    VELOX_USER_FAIL(
-        "Kiln dataset {} was published while the job ran", files.directory);
-  }
-  return static_cast<int64_t>(manifest.rows);
-}
-
 int32_t DagScheduler::materialize(const std::string& id) {
   auto stages = cachedStagePlan(id);
   const auto key = cacheMemoKey(id, stages.stages.back().key);
@@ -550,11 +466,9 @@ bool DagScheduler::uncache(const std::string& id) {
 DagScheduler::JobResult DagScheduler::runStages(
     StagePlan& stages,
     const std::optional<std::string>& outputKey,
-    velox::memory::MemoryPool* pool,
-    const std::optional<OutputFiles>& outputFiles) {
+    velox::memory::MemoryPool* pool) {
   JobContext job;
   job.jobId = fmt::format("{}_{}", options_.appName, ++jobCounter_);
-  job.outputFiles = outputFiles;
   job.queryCtx = core::QueryCtx::create(
       /*executor=*/nullptr,
       core::QueryConfig(
@@ -723,8 +637,6 @@ DagScheduler::JobResult DagScheduler::runStages(
     if (state.isResult) {
       state.resultPages.resize(numTasks);
       state.resultRows.resize(numTasks);
-      state.resultChunks.resize(numTasks);
-      state.resultBytes.resize(numTasks);
     }
   }
 
@@ -738,15 +650,6 @@ DagScheduler::JobResult DagScheduler::runStages(
     return jobResult;
   }
   const auto& result = states.back();
-  if (outputFiles.has_value()) {
-    for (size_t p = 0; p < result.resultRows.size(); ++p) {
-      jobResult.writtenParts.push_back(WrittenPart{
-          .rows = result.resultRows[p],
-          .chunk = result.resultChunks[p],
-          .bytes = result.resultBytes[p]});
-    }
-    return jobResult;
-  }
   const auto type = result.stage->plan->outputType();
   for (const auto& pages : result.resultPages) {
     for (const auto& page : pages) {
@@ -843,9 +746,6 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
         }
       }
       task.resultTask = state.isResult;
-      if (state.isResult) {
-        task.outputFiles = job.outputFiles;
-      }
       task.config = options_.config;
       if (stage.shuffleId.has_value()) {
         std::lock_guard<std::mutex> l(bucketsMutex_);
@@ -885,8 +785,6 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
         if (state.isResult) {
           state.resultPages[p] = std::move(result->resultPages);
           state.resultRows[p] = result->outputRows;
-          state.resultChunks[p] = std::move(result->outputChunk);
-          state.resultBytes[p] = result->outputBytes;
         }
       }
       for (const auto& failure : taskSet.fetchFailures) {

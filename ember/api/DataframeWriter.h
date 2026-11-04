@@ -1,20 +1,15 @@
 // DataframeWriter: dataframe.write().parquet(directory), .gensort(directory)
 // or .stream(name).
 //
-// parquet: an Axiom table write into the "ember_output" connector
+// parquet and gensort: an Axiom table write into the "ember_output" connector
 // (OutputConnector.h): every task of the stage that makes the rows writes
-// them to <directory>/part-NNNNN.parquet with Velox's Parquet writer. The
-// directory may be on a shared file system, on each worker's local disk, or
-// a Kiln dataset, kiln://<metadata>/data/<dataset> (KilnFiles.h), published
-// when the job is done. Writing fails if the directory holds part files, or
-// the dataset exists, already.
-//
-// gensort: each task of the result stage writes its rows to
-// <directory>/part-NNNNN (NNNNN = the task's partition, 5 digits) and returns
-// only counts, so the rows never pass through the driver. After a
-// range-partitioned sort, the part files in name order hold the sorted rows.
-// The directory may be on a shared file system or on each worker's local
-// disk. Writing fails if the driver sees part files in it already.
+// them to <directory>/part-NNNNN.parquet with Velox's Parquet writer, or to
+// <directory>/part-NNNNN as gensort records, so the rows never pass through
+// the driver. After a range-partitioned sort, the parts in name order hold
+// the sorted rows. The directory may be on a shared file system, on each
+// worker's local disk, or a Kiln dataset, kiln://<metadata>/data/<dataset>
+// (KilnFiles.h), published when the job is done. Writing fails if the
+// directory holds part files, or the dataset exists, already.
 //
 // stream: in builds with stoke (-c ember.stoke=true), writes training
 // batches into a stoke stream through Axiom's table write into the "stoke"
@@ -58,6 +53,8 @@ class DataframeWriter {
   int64_t stream(const std::string& name, bool seal = false) const;
 
  private:
+  int64_t files(const std::string& directory, const std::string& format) const;
+
   Dataframe df_;
 };
 

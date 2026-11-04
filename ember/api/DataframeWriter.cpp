@@ -9,7 +9,6 @@
 #include "ember/Stoke.h"
 #include "ember/StokeConnector.h"
 #include "ember/shuffle/ShuffleConfig.h"
-#include "ember/worker/TaskDescription.h"
 
 namespace ember {
 
@@ -51,10 +50,20 @@ std::string outputDirectory(
 } // namespace
 
 int64_t DataframeWriter::parquet(const std::string& directory) const {
+  return files(directory, "parquet");
+}
+
+int64_t DataframeWriter::gensort(const std::string& directory) const {
+  return files(directory, kGensortSchema);
+}
+
+int64_t DataframeWriter::files(
+    const std::string& directory,
+    const std::string& format) const {
   const auto& config = df_.session()->config();
   const auto output = outputDirectory(directory, config);
   facebook::axiom::connector::Properties properties{
-      {std::string(kOutputFormat), "parquet"}};
+      {std::string(kOutputFormat), format}};
   for (auto key : {kKilnFilesTier, kKilnFilesWriteThrough}) {
     if (auto it = config.find(std::string(key)); it != config.end()) {
       properties[std::string(key)] = it->second;
@@ -80,14 +89,6 @@ int64_t DataframeWriter::parquet(const std::string& directory) const {
       plan,
       {{std::string(kOutputConnectorId), std::move(properties)}},
       makeOutputTable(output, schema));
-}
-
-int64_t DataframeWriter::gensort(const std::string& directory) const {
-  return df_.session()->write(
-      df_.compile()->physicalPlan,
-      OutputFiles{
-          kGensortSchema,
-          outputDirectory(directory, df_.session()->config())});
 }
 
 int64_t DataframeWriter::stream(const std::string& name, bool seal) const {

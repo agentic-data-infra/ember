@@ -124,7 +124,8 @@ buck2 run kiln//bin:kiln -- --metadata=localhost:7470 data ls sorted
 
 `write().parquet(path)` writes the rows as Parquet files, to a local or
 shared directory or to a Kiln dataset alike; `read().parquet(path)` reads
-them back. `write()` to a dataset that exists already fails. Each result task writes its
+them back, and `write().gensort(path)` does the same with gensort records.
+`write()` to a dataset that exists already fails. Each task writes its
 part as one chunk, in Kiln's DRAM tier by default (`ember.kiln.files.tier=localfs`
 for local disks, `ember.kiln.files.write_through=localfs` to keep a copy
 there), into a bucket of the job's; the driver publishes the dataset when the
@@ -229,8 +230,10 @@ buck2 run //examples:threshold_sweep -- docs/ cache     # or nocache
 
 `examples/SortBenchmark.cpp` sorts the 100-byte records of
 [sortbenchmark.org](https://sortbenchmark.org)'s gensort by their 10-byte key
-(`read().gensort(path)`: binary `key` and `payload` columns). For now the sort
-runs in one task and the driver writes the output. `scripts/gensort.sh`
+(`read().gensort(path)`: binary `key` and `payload` columns) and writes them
+back as files, `write().gensort(path)`, without passing through the driver. It
+runs as one merge task, or as N range tasks with
+`ember.sort.range_partitions=N`. `scripts/gensort.sh`
 downloads gensort and valsort, writes the input and checks the output:
 
 ```

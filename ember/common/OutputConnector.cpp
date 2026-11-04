@@ -6,6 +6,7 @@
 #include <folly/json.h>
 
 #include "axiom/connectors/ConnectorMetadataRegistry.h"
+#include "ember/GensortFileHandler.h"
 #include "ember/KilnFiles.h"
 #include "ember/KilnWriteFile.h"
 #include "ember/TaskId.h"
@@ -33,14 +34,18 @@ constexpr std::string_view kParquet = "parquet";
 // reads skip names starting with '_'.
 constexpr std::string_view kSuccess = "_SUCCESS";
 
-velox::dwio::common::FileFormat fileFormat(const std::string& format) {
-  VELOX_USER_CHECK_EQ(
-      format, kParquet, "Unsupported output format: {}", format);
-  return velox::dwio::common::FileFormat::PARQUET;
+void checkFormat(const std::string& format) {
+  VELOX_USER_CHECK(
+      format == kParquet || format == kGensortSchema,
+      "Unsupported output format: {}",
+      format);
 }
 
+// gensort parts have no suffix: valsort takes any name.
 std::string partName(int32_t partition, const std::string& format) {
-  return fmt::format("part-{:05d}.{}", partition, format);
+  return format == kGensortSchema
+      ? fmt::format("part-{:05d}", partition)
+      : fmt::format("part-{:05d}.{}", partition, format);
 }
 
 // Hidden from directory reads, which skip names starting with '.'.
@@ -81,7 +86,65 @@ class SharedWriteFile : public velox::WriteFile {
   const std::shared_ptr<velox::WriteFile> file_;
 };
 
-// Writes a task's rows to its part with Velox's writer for the format. The
+// Writes each row's key and payload as a gensort record, as valsort reads
+// them.
+class GensortWriter : public velox::dwio::common::Writer {
+ public:
+  GensortWriter(const velox::RowType& type, velox::WriteFile& file)
+      : file_{file} {
+    VELOX_USER_CHECK(
+        type.size() == 2 && type.childAt(0)->isVarbinary() &&
+            type.childAt(1)->isVarbinary(),
+        "gensort output needs a key and a payload column, both VARBINARY: {}",
+        type.toString());
+    setState(State::kRunning);
+  }
+
+  void write(const velox::VectorPtr& data) override {
+    const auto& rows = *data->asChecked<velox::RowVector>();
+    velox::DecodedVector keys(*rows.childAt(0));
+    velox::DecodedVector payloads(*rows.childAt(1));
+    buffer_.clear();
+    buffer_.reserve(rows.size() * kGensortRecordSize);
+    for (velox::vector_size_t i = 0; i < rows.size(); ++i) {
+      VELOX_USER_CHECK(
+          !keys.isNullAt(i) && !payloads.isNullAt(i),
+          "gensort records cannot be null");
+      const auto key = keys.valueAt<velox::StringView>(i);
+      const auto payload = payloads.valueAt<velox::StringView>(i);
+      VELOX_USER_CHECK_EQ(
+          key.size() + payload.size(),
+          kGensortRecordSize,
+          "gensort records are {} bytes",
+          kGensortRecordSize);
+      buffer_.append(key.data(), key.size());
+      buffer_.append(payload.data(), payload.size());
+    }
+    file_.append(buffer_);
+  }
+
+  void flush() override {}
+
+  bool finish() override {
+    return true;
+  }
+
+  std::unique_ptr<velox::dwio::common::FileMetadata> close() override {
+    file_.close();
+    setState(State::kClosed);
+    return nullptr;
+  }
+
+  void abort() override {
+    setState(State::kAborted);
+  }
+
+ private:
+  velox::WriteFile& file_;
+  std::string buffer_;
+};
+
+// Writes a task's rows to its part with the writer for the format. The
 // part is opened on the first rows, and done in finish(); close() reports
 // it to finishWrite as one fragment: name, rows, bytes and Kiln chunk.
 class OutputDataSink : public velox::connector::DataSink {
@@ -94,8 +157,7 @@ class OutputDataSink : public velox::connector::DataSink {
       : type_{std::move(type)},
         handle_{std::move(handle)},
         taskId_{std::move(taskId)},
-        pool_{pool},
-        format_{fileFormat(handle_->format())} {}
+        pool_{pool} {}
 
   ~OutputDataSink() override {
     if (!done_) {
@@ -172,16 +234,22 @@ class OutputDataSink : public velox::connector::DataSink {
       fileSystem_->mkdir(handle_->directory());
       file_ = fileSystem_->openFileForWrite(tempPath_);
     }
+    if (handle_->format() == kGensortSchema) {
+      writer_ = std::make_unique<GensortWriter>(*type_, *file_);
+      return;
+    }
     auto options = std::make_shared<velox::dwio::common::WriterOptions>();
     options->schema = type_;
     options->memoryPool = &pool_;
     // As other engines write Parquet by default.
     options->compressionKind = velox::common::CompressionKind_SNAPPY;
-    writer_ = velox::dwio::common::getWriterFactory(format_)->createWriter(
-        std::make_unique<velox::dwio::common::WriteFileSink>(
-            std::make_unique<SharedWriteFile>(file_),
-            path_.empty() ? name_ : path_),
-        options);
+    writer_ = velox::dwio::common::getWriterFactory(
+                  velox::dwio::common::FileFormat::PARQUET)
+                  ->createWriter(
+                      std::make_unique<velox::dwio::common::WriteFileSink>(
+                          std::make_unique<SharedWriteFile>(file_),
+                          path_.empty() ? name_ : path_),
+                      options);
   }
 
   // Drops what the task wrote: the temporary file, or the Kiln chunk, which
@@ -206,7 +274,6 @@ class OutputDataSink : public velox::connector::DataSink {
   const std::string taskId_;
   // The connector's pool of the TableWriter operator, which outlives it.
   velox::memory::MemoryPool& pool_;
-  const velox::dwio::common::FileFormat format_;
 
   std::string name_;
   std::string path_;
@@ -405,7 +472,7 @@ axiom_connector::ConnectorWriteHandlePtr OutputConnectorMetadata::beginWrite(
   const auto& directory = table->name().table;
   auto format = property(session, kOutputFormat);
   VELOX_USER_CHECK(format.has_value(), "No output format");
-  fileFormat(*format);
+  checkFormat(*format);
 
   std::map<std::string, std::string> kilnConfig;
   kiln::BucketId bucket = kiln::kDefaultBucket;

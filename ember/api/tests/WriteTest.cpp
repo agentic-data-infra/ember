@@ -1,4 +1,4 @@
-// dataframe.write(): result tasks write part files, which hold the sorted
+// dataframe.write().gensort(): tasks write part files, which hold the sorted
 // records in name order, and sorts spill when a task's memory runs out.
 
 #include <gtest/gtest.h>
@@ -106,7 +106,7 @@ TEST_F(WriteTest, writesOnePartFile) {
                      .gensort(output().string());
   EXPECT_EQ(records, 3000);
   auto [names, rows] = readOutput();
-  EXPECT_EQ(names, std::vector<std::string>{"part-00000"});
+  EXPECT_EQ(names, (std::vector<std::string>{"_SUCCESS", "part-00000"}));
   EXPECT_EQ(rows, expected);
 }
 
@@ -123,6 +123,7 @@ TEST_F(WriteTest, writesRangePartitionsInOrder) {
   EXPECT_EQ(
       names,
       (std::vector<std::string>{
+          "_SUCCESS",
           "part-00000",
           "part-00001",
           "part-00002",
@@ -152,6 +153,23 @@ TEST_F(WriteTest, spillsSortOverMemoryLimit) {
       facebook::velox::exec::globalSpillStats().spilledBytes.load(),
       spilledBefore);
   EXPECT_EQ(readOutput().second, expected);
+}
+
+TEST_F(WriteTest, rejectsRowsThatAreNotRecords) {
+  writeInput(1, 10);
+  try {
+    (void)session()
+        .read()
+        .gensort(input().string())
+        .select(col("key"))
+        .write()
+        .gensort(output().string());
+    FAIL() << "Expected an error";
+  } catch (const std::exception& e) {
+    EXPECT_NE(
+        std::string(e.what()).find("gensort output needs"), std::string::npos)
+        << e.what();
+  }
 }
 
 TEST_F(WriteTest, rejectsDirectoryWithPartFiles) {
