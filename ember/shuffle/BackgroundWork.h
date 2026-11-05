@@ -16,8 +16,8 @@
 
 namespace ember::shuffle {
 
-/// One piece of work at a time. Not thread-safe: its owner's thread makes the
-/// calls, and the work has the owner's state to itself until it is done.
+/// One piece of work at a time. Not thread-safe: its owner makes one call at a
+/// time, and the work has the owner's state to itself until it is done.
 class BackgroundWork {
  public:
   explicit BackgroundWork(std::shared_ptr<folly::Executor> executor)
@@ -35,6 +35,10 @@ class BackgroundWork {
 
   /// Waits for the work in flight, dropping its failure.
   void wait();
+
+  /// Waits for the work in flight, leaving a failure for blocked() to rethrow.
+  /// Returns false if it failed.
+  bool finish();
 
  private:
   struct State {

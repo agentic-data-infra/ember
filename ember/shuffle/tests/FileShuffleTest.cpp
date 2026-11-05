@@ -113,6 +113,22 @@ TEST_F(FileShuffleTest, spilledRunsMergeInWriteOrder) {
       (std::vector<std::string>{"shuffle_1_0.data", "shuffle_1_0.index"}));
 }
 
+TEST_F(FileShuffleTest, releaseMemorySpillsCollectedPages) {
+  auto writer = store_->createWriter(
+      12, 0, 1, "attempt0", ShuffleBlockStore::kDefaultSpillThreshold);
+  writer->releaseMemory();
+  EXPECT_EQ(writer->spillCount(), 0);
+  writer->collect(0, page("first"));
+  writer->releaseMemory();
+  writer->releaseMemory();
+  EXPECT_EQ(writer->spillCount(), 1);
+  writer->collect(0, page("second"));
+  writer->commit();
+  writer->releaseMemory();
+  EXPECT_EQ(writer->spillCount(), 1);
+  EXPECT_EQ(readBlock(12, 0, 0), (std::vector<std::string>{"first", "second"}));
+}
+
 TEST_F(FileShuffleTest, firstCommitWins) {
   auto first = store_->createWriter(2, 0, 1, "attempt0");
   auto second = store_->createWriter(2, 0, 1, "attempt1");
@@ -179,6 +195,12 @@ TEST_F(FileShuffleTest, backgroundWorkBlocksUntilDone) {
   std::move(future).via(executor.get()).get();
   EXPECT_THROW(work.blocked(&future), std::runtime_error);
   EXPECT_FALSE(work.blocked(&future));
+
+  // finish() leaves the failure for the owner.
+  EXPECT_TRUE(work.finish());
+  work.start([] { throw std::runtime_error("failed"); });
+  EXPECT_FALSE(work.finish());
+  EXPECT_THROW(work.blocked(&future), std::runtime_error);
 }
 
 TEST_F(FileShuffleTest, missingBlockFailsTheFetch) {
