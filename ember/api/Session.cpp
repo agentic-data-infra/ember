@@ -60,6 +60,14 @@ std::string configValue(
   return it == config.end() ? std::move(defaultValue) : it->second;
 }
 
+// A process has one memory budget, so a task that does not fit has to spill.
+std::map<std::string, std::string> withDefaults(
+    std::map<std::string, std::string> config) {
+  config.try_emplace(
+      std::string(velox::core::QueryConfig::kSpillEnabled), "true");
+  return config;
+}
+
 int32_t configInt(
     const std::map<std::string, std::string>& config,
     const char* key,
@@ -86,7 +94,7 @@ SessionState::SessionState(
     StageListener onStageCompleted)
     : appName_{std::move(appName)},
       master_{std::move(master)},
-      config_{std::move(config)},
+      config_{withDefaults(std::move(config))},
       parallelism_{0},
       eagerAnalysis_{
           config_.contains("ember.eager_analysis") &&

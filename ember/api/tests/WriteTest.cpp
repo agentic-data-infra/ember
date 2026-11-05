@@ -192,7 +192,6 @@ TEST_F(WriteTest, tasksShareTheProcessMemory) {
       facebook::velox::exec::globalSpillStats().spilledBytes.load();
   auto records = session({{"ember.default.parallelism", "2"},
                           {"ember.sort.range_partitions", "2"},
-                          {"spill_enabled", "true"},
                           {"ember.shuffle.spill_threshold_bytes", "1073741824"}})
                      .read()
                      .gensort(input().string())

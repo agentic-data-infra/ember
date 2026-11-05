@@ -18,10 +18,9 @@
 // With ember.files.node_local=true, each node's workers read the input
 // files on that node's own disks.
 //
-// To sort more than fits in memory, add "spill_enabled=true" and, to use less
-// than 80% of the machine's memory, ember.worker.memory_bytes=<bytes>. With the
-// shuffle in Kiln (ember.shuffle.store=kiln), add
-// ember.shuffle.kiln.tier=dram+localfs (or localfs) when it is bigger than
+// To use less than 80% of the machine's memory, add
+// ember.worker.memory_bytes=<bytes>; what does not fit spills. With the shuffle
+// in Kiln (ember.shuffle.store=kiln), add ember.shuffle.kiln.tier=dram+localfs (or localfs) when it is bigger than
 // Kiln's DRAM.
 
 #include <chrono>

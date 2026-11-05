@@ -3,10 +3,10 @@
 // An executor takes a serialized TaskDescription, rebuilds the plan fragment
 // with Velox serde, runs it, and returns a serialized TaskResult. Map tasks
 // write their output to the executor's shuffle store; result tasks return
-// their rows, or write them to part files and return only counts. Velox's
-// spill_enabled lets tasks spill into the shuffle directory; spilling starts
-// when the tasks together reach the process's memory capacity. In local mode the driver
-// calls an executor in the same process; an ember-worker process wraps one
+// their rows, or write them to part files and return only counts. Tasks spill
+// into the shuffle directory, unless spill_enabled=false, once the tasks
+// together reach the process's memory capacity. In local mode the driver calls
+// an executor in the same process; an ember-worker process wraps one
 // behind RPC.
 
 #pragma once
