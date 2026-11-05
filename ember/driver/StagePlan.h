@@ -20,8 +20,8 @@
 // 'rangeSortPartitions', that stage range-partitions its sorted output on the
 // first sort key instead (RangePartitionFunction.h), and the result stage
 // runs one merge task per range. The driver concatenates the result tasks'
-// rows in partition order, which is sorted order. A table write of the
-// sorted rows writes one part per range, in the same order.
+// rows in partition order, which is sorted order. A sorted table write does
+// not come here: Axiom plans its ranges (ember/axiom-extension).
 
 #pragma once
 

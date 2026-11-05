@@ -1,0 +1,11 @@
+# Ember's implementations of Axiom extension points.
+
+cxx_library(
+    name = "axiom-extension",
+    srcs = glob(["*.cpp"]),
+    header_namespace = "ember/axiom-extension",
+    exported_headers = glob(["*.h"]),
+    exported_deps = ["//third-party:velox_axiom"],
+    deps = ["//ember/shuffle:shuffle"],
+    visibility = ["PUBLIC"],
+)

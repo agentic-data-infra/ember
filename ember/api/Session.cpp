@@ -11,6 +11,7 @@
 #include "axiom/optimizer/v2/Optimize.h"
 #include "ember/FunctionRegistry.h"
 #include "ember/Runtime.h"
+#include "ember/axiom-extension/RangePartitionType.h"
 #include "ember/driver/ClusterBackend.h"
 #include "ember/driver/DagScheduler.h"
 #include "ember/driver/LocalBackend.h"
@@ -204,6 +205,7 @@ optimizer::PlanAndStats optimizePlan(
     const lp::LogicalPlanNodePtr& plan,
     const QueryEnv& env,
     int32_t parallelism,
+    int32_t rangeSortPartitions,
     const std::shared_ptr<velox::memory::MemoryPool>& pool,
     const axiom_connector::TablePtr& target = nullptr) {
   velox::HashStringAllocator allocator(pool.get());
@@ -234,6 +236,13 @@ optimizer::PlanAndStats optimizePlan(
   // One task per core for each stage, single-threaded.
   options.maxRemotePartitions = parallelism;
   options.maxLocalPartitions = 1;
+  if (target != nullptr && rangeSortPartitions > 0) {
+    // Axiom plans no more tasks per stage than this; a sorted write runs a
+    // task per range.
+    options.maxRemotePartitions = std::max(parallelism, rangeSortPartitions);
+    options.sortPartitioner =
+        axiom_extension::rangeSortPartitioner(rangeSortPartitions);
+  }
   return optimizer::v2::Optimizer(
              *plan, schemaResolver, session, evaluator, env.queryCtx)
       .optimize(options);
@@ -244,7 +253,12 @@ optimizer::PlanAndStats optimizePlan(
 optimizer::PlanAndStats SessionState::optimize(
     const lp::LogicalPlanNodePtr& plan) {
   auto env = makeQueryEnv(nextQueryId(), appName_, nullptr, config_);
-  return optimizePlan(plan, env, parallelism_, optimizerPool_);
+  return optimizePlan(
+      plan,
+      env,
+      parallelism_,
+      configInt(config_, driver::DagScheduler::kRangeSortPartitions, 0),
+      optimizerPool_);
 }
 
 std::vector<velox::RowVectorPtr> SessionState::execute(
@@ -261,7 +275,13 @@ int64_t SessionState::writeTable(
   auto env = makeQueryEnv(
       nextQueryId(), appName_, nullptr, config_, std::move(properties));
   auto optimized =
-      optimizePlan(plan, env, parallelism_, optimizerPool_, target);
+      optimizePlan(
+          plan,
+          env,
+          parallelism_,
+          configInt(config_, driver::DagScheduler::kRangeSortPartitions, 0),
+          optimizerPool_,
+          target);
   VELOX_CHECK(optimized.finishWrite, "Not a table write");
   std::vector<velox::RowVectorPtr> results;
   try {

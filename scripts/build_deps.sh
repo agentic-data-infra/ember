@@ -15,6 +15,33 @@ PREFIX="${PREFIX:-/opt/deps-gcc12}"
 BUILD_DIR="${BUILD_DIR:-$AXIOM_SRC/_build/release-gcc12}"
 NUM_THREADS="${NUM_THREADS:-$(nproc)}"
 
+# The versions Ember builds with, set only here. See "Updating Axiom and Velox"
+# in README.md.
+AXIOM_REPO=https://github.com/agentic-data-infra/axiom.git
+AXIOM_REF=ember-20261105
+VELOX_REPO=https://github.com/facebookincubator/velox.git
+VELOX_REF=81a48ef0aab17bf4e010e59004f7f905945414b7
+
+# Clones 'repo' at 'ref' into 'dir' if it is missing, and fails if 'dir' sits
+# at another commit: it may hold work, so it is not moved.
+check_source() {
+  local repo=$1 ref=$2 dir=$3
+  if [ ! -d "$dir" ]; then
+    git clone "$repo" "$dir"
+    git -C "$dir" checkout --detach "$ref"
+  fi
+  git -C "$dir" rev-parse -q --verify "$ref^{commit}" >/dev/null ||
+    git -C "$dir" fetch "$repo" --tags
+  if [ "$(git -C "$dir" rev-parse HEAD)" != \
+       "$(git -C "$dir" rev-parse "$ref^{commit}")" ]; then
+    echo "$dir is not at $ref of $repo" >&2
+    exit 1
+  fi
+}
+
+check_source "$AXIOM_REPO" "$AXIOM_REF" "$AXIOM_SRC"
+check_source "$VELOX_REPO" "$VELOX_REF" "$VELOX_SRC"
+
 if [ ! -L "$AXIOM_SRC/velox" ]; then
   rmdir "$AXIOM_SRC/velox"  # Fails (safely) if the submodule is populated.
   ln -s "$VELOX_SRC" "$AXIOM_SRC/velox"

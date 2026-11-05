@@ -2,13 +2,17 @@
 // Velox's Parquet writer, read back with read().parquet(). Parts of a
 // range-partitioned sort hold the sorted rows in name order.
 
+#include <folly/ScopeGuard.h>
 #include <gtest/gtest.h>
 
 #include <filesystem>
 #include <fstream>
 #include <random>
 
+#include "axiom/connectors/ConnectorMetadataRegistry.h"
+#include "ember/OutputConnector.h"
 #include "ember/Session.h"
+#include "ember/driver/DagScheduler.h"
 #include "ember/functions.h"
 
 namespace ember {
@@ -17,6 +21,30 @@ namespace {
 using namespace ember::functions;
 namespace fs = std::filesystem;
 namespace velox = facebook::velox;
+
+namespace axiom_connector = facebook::axiom::connector;
+
+// Records the write stats a commit gets.
+class StatsSpy : public OutputConnectorMetadata {
+ public:
+  axiom_connector::RowsFuture finishWrite(
+      const axiom_connector::ConnectorSessionPtr& session,
+      const axiom_connector::ConnectorWriteHandlePtr& handle,
+      const std::vector<velox::RowVectorPtr>& writeResults,
+      velox::RowVectorPtr groupingKeys,
+      std::vector<std::vector<axiom_connector::ColumnStatistics>> groupStats)
+      override {
+    stats = groupStats;
+    return OutputConnectorMetadata::finishWrite(
+        session,
+        handle,
+        writeResults,
+        std::move(groupingKeys),
+        std::move(groupStats));
+  }
+
+  std::vector<std::vector<axiom_connector::ColumnStatistics>> stats;
+};
 
 class ParquetWriteTest : public testing::Test {
  protected:
@@ -98,6 +126,42 @@ class ParquetWriteTest : public testing::Test {
   std::optional<Session> ember_;
   fs::path dir_;
 };
+
+TEST_F(ParquetWriteTest, sortedWriteRunsWritersInRangeTasks) {
+  auto expected = writeInput(3, 1000);
+  std::vector<std::vector<int32_t>> stages;
+  ember_ = Session::builder()
+               .appName("ParquetWriteTest")
+               .master("local[4]")
+               .config("ember.sort.range_partitions", "6")
+               .onStageCompleted([&](const driver::StageAttemptInfo& stage) {
+                 stages.push_back(stage.partitions);
+               })
+               .getOrCreate();
+
+  auto& registry = axiom_connector::ConnectorMetadataRegistry::global();
+  const std::string connectorId(kOutputConnectorId);
+  auto original = axiom_connector::ConnectorMetadataRegistry::tryGet(connectorId);
+  auto spy = std::make_shared<StatsSpy>();
+  registry.insert(connectorId, spy, /*overwrite=*/true);
+  SCOPE_EXIT {
+    registry.insert(connectorId, original, /*overwrite=*/true);
+  };
+
+  auto written = ember_->read()
+                     .gensort(input().string())
+                     .orderBy(col("key"))
+                     .write()
+                     .parquet(output().string());
+  EXPECT_EQ(written, 3000);
+
+  // Six tasks sort and write a range each, and one merges their stats.
+  ASSERT_EQ(stages.size(), 3);
+  EXPECT_EQ(stages[1].size(), 6);
+  EXPECT_EQ(stages[2].size(), 1);
+  ASSERT_EQ(spy->stats.size(), 1);
+  EXPECT_FALSE(spy->stats[0].empty());
+}
 
 TEST_F(ParquetWriteTest, writesSortedPartsInOrder) {
   auto expected = writeInput(3, 1000);
