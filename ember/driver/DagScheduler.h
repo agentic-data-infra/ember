@@ -211,7 +211,6 @@ class DagScheduler {
 
   const DagSchedulerOptions options_;
   const bool reuseOutputs_;
-  const int32_t rangeSortPartitions_;
   const bool sampleRanges_;
   const bool nodeLocalFiles_;
   // Config that goes into stage keys: what is not Ember's own, splits, and

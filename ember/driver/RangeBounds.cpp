@@ -66,14 +66,6 @@ int32_t numRanges(const Stage& stage) {
 
 folly::dynamic sampleFragment(const Stage& stage, int32_t numTasks) {
   const auto& write = rangeWrite(stage);
-  auto source = write.sources()[0];
-  auto sourceFragment = stage.fragment["sources"][0];
-  // Sorting the sample's rows would be wasted work.
-  if (source->is<core::OrderByNode>()) {
-    source = source->sources()[0];
-    sourceFragment = folly::dynamic(sourceFragment["sources"][0]);
-  }
-
   const auto points =
       std::min(kSamplePointsPerRange * numRanges(stage), kMaxSamplePoints);
   const auto taskPoints = static_cast<int32_t>(std::ceil(
@@ -89,7 +81,7 @@ folly::dynamic sampleFragment(const Stage& stage, int32_t numTasks) {
       write.id() + "_sampleKey",
       std::vector<std::string>{kKeyColumn},
       std::vector<core::TypedExprPtr>{std::move(key)},
-      source);
+      write.sources()[0]);
 
   const auto keyType = velox::VARCHAR();
   const auto arrayType = velox::ARRAY(keyType);
@@ -117,7 +109,7 @@ folly::dynamic sampleFragment(const Stage& stage, int32_t numTasks) {
       /*noGroupsSpanBatches=*/false,
       keys);
   auto fragment = node->serialize();
-  fragment["sources"][0]["sources"][0] = std::move(sourceFragment);
+  fragment["sources"][0]["sources"][0] = stage.fragment["sources"][0];
   return fragment;
 }
 

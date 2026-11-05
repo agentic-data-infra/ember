@@ -21,9 +21,8 @@ bool writesRanges(const Stage& stage);
 /// The number of partitions of the range shuffle 'stage' writes.
 int32_t numRanges(const Stage& stage);
 
-/// A fragment that runs the input of the range shuffle 'stage' writes, without
-/// its sort, and returns one row with a sample of its keys. 'numTasks' tasks
-/// run it.
+/// A fragment that runs the input of the range shuffle 'stage' writes and
+/// returns one row with a sample of its keys. 'numTasks' tasks run it.
 folly::dynamic sampleFragment(const Stage& stage, int32_t numTasks);
 
 /// The rows sampleFragment() returns.

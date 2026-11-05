@@ -17,11 +17,9 @@
 //
 // A global sort without a limit runs as one merge task by default: the stage
 // before it sorts its partitions, the result stage merges them. With
-// 'rangeSortPartitions', that stage range-partitions its sorted output on the
-// first sort key instead (RangePartitionFunction.h), and the result stage
-// runs one merge task per range. The driver concatenates the result tasks'
-// rows in partition order, which is sorted order. A sorted table write does
-// not come here: Axiom plans its ranges (ember/axiom-extension).
+// ember.sort.range_partitions, Axiom plans a range shuffle and one sorting
+// result task per range instead (ember/axiom-extension), and the driver
+// concatenates the tasks' rows in partition order, which is sorted order.
 
 #pragma once
 
@@ -122,15 +120,12 @@ using CachedOutputResolver = std::function<CachedOutput(const std::string&)>;
 /// stage keys. 'cachedOutput' resolves scans of cached tables. With
 /// 'materialize', the plan's output is written to a shuffle with one partition
 /// per map output: the last stage is the map stage that writes it, and there
-/// is no result stage. A 'rangeSortPartitions' above 0 turns a global sort
-/// into that many range-sorted result tasks, where its first key is a VARCHAR
-/// or VARBINARY column.
+/// is no result stage.
 StagePlan planStages(
     const facebook::axiom::optimizer::MultiFragmentPlan& plan,
     facebook::velox::memory::MemoryPool* pool,
     const std::map<std::string, std::string>& keyConfig = {},
     const CachedOutputResolver& cachedOutput = nullptr,
-    bool materialize = false,
-    int32_t rangeSortPartitions = 0);
+    bool materialize = false);
 
 } // namespace ember::driver

@@ -199,6 +199,15 @@ QueryEnv makeQueryEnv(
   return env;
 }
 
+// Whether the result of 'plan' is a global sort, under row-wise nodes only.
+bool sortsResult(const lp::LogicalPlanNodePtr& plan) {
+  const lp::LogicalPlanNode* node = plan.get();
+  while (node->is(lp::NodeKind::kProject) || node->is(lp::NodeKind::kFilter)) {
+    node = node->onlyInput().get();
+  }
+  return node->is(lp::NodeKind::kSort);
+}
+
 // 'pool' must outlive the returned plan, which may hold vectors allocated
 // from it (e.g. folded constants).
 optimizer::PlanAndStats optimizePlan(
@@ -236,10 +245,14 @@ optimizer::PlanAndStats optimizePlan(
   // One task per core for each stage, single-threaded.
   options.maxRemotePartitions = parallelism;
   options.maxLocalPartitions = 1;
-  if (target != nullptr && rangeSortPartitions > 0) {
-    // Axiom plans no more tasks per stage than this; a sorted write runs a
-    // task per range.
+  const bool sortedResult = target == nullptr && sortsResult(plan);
+  if ((target != nullptr || sortedResult) && rangeSortPartitions > 0) {
+    // Axiom plans no more tasks per stage than this; a sorted write or result
+    // runs a task per range.
     options.maxRemotePartitions = std::max(parallelism, rangeSortPartitions);
+    // A sorted result stays in the range tasks, for the driver to read in
+    // partition order.
+    options.remoteOutput = sortedResult;
     options.sortPartitioner =
         axiom_extension::rangeSortPartitioner(rangeSortPartitions);
   }

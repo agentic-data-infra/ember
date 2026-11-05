@@ -36,15 +36,13 @@ Only stages with one scan are supported.
 
 A global sort without a limit runs as one merge task: the stage before it
 sorts each of its partitions and gathers them, and the result task merges
-them. With `ember.sort.range_partitions=N`, `StagePlan` makes that stage
-write N ranges of the first sort key instead (`RangePartitionFunction` in
-`ember/shuffle`), and the result stage runs N merge tasks, one per range. A
-sorted table write takes another way to the same ranges: Axiom plans them
-itself (`ember/axiom-extension`), with a sort and a writer in each of the N
-tasks and a last stage that merges their write stats. For query results, the
-driver concatenates their rows in partition order, which is sorted order. Row-
-wise nodes (project, filter) may sit above the merge; a limit keeps the single
-merge task. Only VARCHAR and VARBINARY first keys are range-partitioned; other
+them. With `ember.sort.range_partitions=N`, Axiom plans a range shuffle on the
+first sort key instead (`ember/axiom-extension`, `RangePartitionFunction` in
+`ember/shuffle`), and N tasks that each sort one range. A sorted table write
+adds a writer to each task and a last stage that merges their write stats. For
+query results, those N tasks are the result stage, and the driver concatenates
+their rows in partition order, which is sorted order. Row-wise nodes (project,
+filter) may sit above the sort; a limit keeps the single merge task. Only VARCHAR and VARBINARY first keys are range-partitioned; other
 sorts keep the merge task.
 
 The plan has no split points: before a stage writes a range shuffle,

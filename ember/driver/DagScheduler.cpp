@@ -82,10 +82,6 @@ DagScheduler::DagScheduler(
       reuseOutputs_{
           !options_.config.contains(kReuseOutputs) ||
           folly::to<bool>(options_.config.at(kReuseOutputs))},
-      rangeSortPartitions_{
-          options_.config.contains(kRangeSortPartitions)
-              ? folly::to<int32_t>(options_.config.at(kRangeSortPartitions))
-              : 0},
       sampleRanges_{
           !options_.config.contains(kRangeSortSample) ||
           folly::to<bool>(options_.config.at(kRangeSortSample))},
@@ -174,9 +170,7 @@ StagePlan DagScheduler::stagePlan(const optimizer::MultiFragmentPlan& plan) {
       plan,
       planPool_.get(),
       keyConfig_,
-      [this](const auto& id) { return cachedOutput(id); },
-      /*materialize=*/false,
-      rangeSortPartitions_);
+      [this](const auto& id) { return cachedOutput(id); });
 }
 
 StagePlan DagScheduler::cachedStagePlan(const std::string& id) {
@@ -187,8 +181,7 @@ StagePlan DagScheduler::cachedStagePlan(const std::string& id) {
       planPool_.get(),
       keyConfig_,
       [this](const auto& id) { return cachedOutput(id); },
-      /*materialize=*/true,
-      rangeSortPartitions_);
+      /*materialize=*/true);
 }
 
 CachedOutput DagScheduler::cachedOutput(const std::string& id) {
