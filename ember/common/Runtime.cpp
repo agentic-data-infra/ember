@@ -37,14 +37,13 @@ void initializeRuntime() {
   std::call_once(once, [] {
     // Ember programs need not call folly::Init; this is the part Velox needs.
     folly::SingletonVault::singleton()->registrationComplete();
-    if (!velox::memory::MemoryManager::testInstance()) {
-      // The shared arbitrator reclaims memory, i.e. makes operators spill,
-      // when a task's pool reaches its capacity.
-      velox::memory::SharedArbitrator::registerFactory();
-      velox::memory::MemoryManager::Options options;
-      options.arbitratorKind = "SHARED";
-      velox::memory::initializeMemoryManager(options);
-    }
+    // The shared arbitrator reclaims memory, i.e. makes operators spill, when a
+    // task's pool reaches its capacity. Ember owns the process memory manager,
+    // so initializing it fails if anything else set one first.
+    velox::memory::SharedArbitrator::registerFactory();
+    velox::memory::MemoryManager::Options options;
+    options.arbitratorKind = "SHARED";
+    velox::memory::initializeMemoryManager(options);
     velox::filesystems::registerLocalFileSystem();
     registerKilnFileSystem();
     if (!velox::isRegisteredNamedVectorSerde("Presto")) {
