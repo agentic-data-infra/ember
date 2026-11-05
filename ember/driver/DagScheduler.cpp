@@ -11,6 +11,7 @@
 #include "axiom/runner/LocalRunner.h"
 #include "ember/CachedTable.h"
 #include "ember/FileSerde.h"
+#include "ember/ParquetConnector.h"
 #include "ember/RowPages.h"
 #include "ember/driver/RangeBounds.h"
 #include "ember/shuffle/KilnShuffle.h"
@@ -18,6 +19,7 @@
 #include "ember/shuffle/ShuffleWrite.h"
 #include "kiln/client/Client.h"
 #include "velox/common/file/FileSystems.h"
+#include "velox/connectors/hive/HiveConnectorSplit.h"
 #include "velox/core/QueryCtx.h"
 #include "velox/exec/Exchange.h"
 #include "velox/expression/Expr.h"
@@ -27,6 +29,7 @@ namespace ember::driver {
 namespace axiom_connector = facebook::axiom::connector;
 namespace core = facebook::velox::core;
 namespace file = facebook::axiom::connector::file;
+namespace hive = facebook::velox::connector::hive;
 namespace optimizer = facebook::axiom::optimizer;
 namespace runner = facebook::axiom::runner;
 namespace velox = facebook::velox;
@@ -39,6 +42,41 @@ constexpr int64_t kSplitBytesCeiling = 128 << 20;
 constexpr int64_t kOpenCostBytes = 4 << 20;
 
 std::atomic<int32_t> schedulerCounter{0};
+
+// The file format and path of what a scan reads.
+std::pair<std::string, std::string> scanSource(
+    const velox::connector::ConnectorTableHandle& handle) {
+  if (handle.connectorId() == kParquetConnectorId) {
+    return {kParquetSchema, handle.name()};
+  }
+  const auto* fileHandle = handle.asChecked<file::FileTableHandle>();
+  return {fileHandle->schemaTableName().schema, fileHandle->filePath()};
+}
+
+// A split of bytes [start, start + length) of 'path'.
+folly::dynamic rangeSplit(
+    const velox::connector::ConnectorTableHandle& handle,
+    const std::string& path,
+    int64_t start,
+    int64_t length) {
+  if (handle.connectorId() == kParquetConnectorId) {
+    return hive::HiveConnectorSplitBuilder(path)
+        .connectorId(handle.connectorId())
+        .fileFormat(velox::dwio::common::FileFormat::PARQUET)
+        .start(start)
+        .length(length)
+        .build()
+        ->serialize();
+  }
+  return FileRangeSplit(handle.connectorId(), path, start, length).serialize();
+}
+
+const std::string& splitPath(const velox::connector::ConnectorSplit& split) {
+  if (const auto* parquet = dynamic_cast<const hive::HiveConnectorSplit*>(&split)) {
+    return parquet->filePath;
+  }
+  return split.asChecked<file::FileSplit>()->filePath;
+}
 
 } // namespace
 
@@ -296,21 +334,24 @@ DagScheduler::scanSplits(
     std::string node;
     std::vector<rpc::FileInfo> files;
   };
+  struct Range {
+    folly::dynamic split;
+    int64_t length;
+  };
   // Ranges per scan and node, in order.
   struct NodeRanges {
     std::string node;
-    std::vector<std::shared_ptr<FileRangeSplit>> ranges;
+    std::vector<Range> ranges;
   };
   std::vector<std::vector<NodeRanges>> rangesPerScan;
   std::vector<int64_t> maxSplitBytesPerScan;
   for (const auto& scan : stage.scans) {
-    const auto* handle =
-        scan->tableHandle()->asChecked<file::FileTableHandle>();
+    const auto& handle = *scan->tableHandle();
+    const auto [schema, path] = scanSource(handle);
     std::vector<NodeFiles> filesPerNode;
     if (nodeLocalFiles_) {
       for (auto& node : backend().nodes()) {
-        auto files = backend().listFiles(
-            node, handle->schemaTableName().schema, handle->filePath());
+        auto files = backend().listFiles(node, schema, path);
         filesPerNode.push_back({std::move(node), std::move(files)});
       }
     } else {
@@ -318,9 +359,7 @@ DagScheduler::scanSplits(
     }
 
     // Files split into byte ranges. A text range owns the lines that start in
-    // it, a gensort range the records, a Parquet range the row groups. A
-    // metadata table (e.g. a Parquet file's row groups) reads whole files.
-    const bool wholeFiles = !handle->suffix().empty();
+    // it, a gensort range the records, a Parquet range the row groups.
     int64_t totalBytes = 0;
     for (const auto& [node, files] : filesPerNode) {
       for (const auto& file : files) {
@@ -339,14 +378,10 @@ DagScheduler::scanSplits(
     for (const auto& [node, files] : filesPerNode) {
       auto& ranges = scanRanges.emplace_back(NodeRanges{node, {}}).ranges;
       for (const auto& file : files) {
-        const auto step =
-            wholeFiles ? std::max<int64_t>(1, file.size) : maxSplitBytes;
-        for (int64_t start = 0; start < file.size; start += step) {
-          ranges.push_back(std::make_shared<FileRangeSplit>(
-              handle->connectorId(),
-              file.path,
-              start,
-              std::min(step, file.size - start)));
+        for (int64_t start = 0; start < file.size; start += maxSplitBytes) {
+          const auto length = std::min(maxSplitBytes, file.size - start);
+          ranges.push_back(
+              {rangeSplit(handle, file.path, start, length), length});
         }
       }
     }
@@ -366,7 +401,7 @@ DagScheduler::scanSplits(
       const auto& nodeId = stage.scans[i]->id();
       const auto& ranges = rangesPerScan[i][0].ranges;
       for (size_t j = 0; j < ranges.size(); ++j) {
-        result[j % result.size()][nodeId].push_back(ranges[j]->serialize());
+        result[j % result.size()][nodeId].push_back(ranges[j].split);
       }
     }
     nodes.assign(result.size(), "");
@@ -382,14 +417,14 @@ DagScheduler::scanSplits(
   for (const auto& [node, ranges] : rangesPerScan[0]) {
     int64_t taskBytes = 0;
     for (const auto& range : ranges) {
-      const auto bytes = range->length + kOpenCostBytes;
+      const auto bytes = range.length + kOpenCostBytes;
       if (nodes.empty() || nodes.back() != node ||
           (taskBytes > 0 && taskBytes + bytes > maxSplitBytesPerScan[0])) {
         result.emplace_back();
         nodes.push_back(node);
         taskBytes = 0;
       }
-      result.back()[nodeId].push_back(range->serialize());
+      result.back()[nodeId].push_back(range.split);
       taskBytes += bytes;
     }
   }
@@ -412,14 +447,11 @@ std::vector<rpc::FileInfo> DagScheduler::listFiles(
     for (;;) {
       auto batch = folly::coro::blockingWait(source->co_getSplits(1024));
       for (auto& split : batch.splits) {
-        auto fileSplit =
-            std::dynamic_pointer_cast<file::FileSplit>(split.connectorSplit);
-        VELOX_CHECK_NOT_NULL(fileSplit, "Expected a file split");
-        const auto size =
-            velox::filesystems::getFileSystem(fileSplit->filePath, nullptr)
-                ->openFileForRead(fileSplit->filePath)
-                ->size();
-        files.push_back(rpc::FileInfo{fileSplit->filePath, size});
+        const auto path = splitPath(*split.connectorSplit);
+        const auto size = velox::filesystems::getFileSystem(path, nullptr)
+                              ->openFileForRead(path)
+                              ->size();
+        files.push_back(rpc::FileInfo{path, size});
       }
       if (batch.noMoreSplits) {
         break;

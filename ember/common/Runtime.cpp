@@ -13,7 +13,7 @@
 #include "ember/GensortFileHandler.h"
 #include "ember/KilnFiles.h"
 #include "ember/OutputConnector.h"
-#include "ember/ParquetFileHandler.h"
+#include "ember/ParquetConnector.h"
 #include "ember/Stoke.h"
 #include "ember/TextFileHandler.h"
 #include "ember/shuffle/Shuffle.h"
@@ -60,7 +60,6 @@ void initializeRuntime() {
     registerFileSerde();
     shuffle::registerShuffle();
 
-    registerParquetFileHandler();
     registerTextFileHandler();
     registerGensortFileHandler();
     registerCachedTableHandler();
@@ -71,6 +70,7 @@ void initializeRuntime() {
         connector->connectorId(),
         std::make_shared<axiom_connector::file::FileConnectorMetadata>(
             connector.get()));
+    registerParquetConnector();
     registerOutputConnector();
     registerStokeConnector();
   });
