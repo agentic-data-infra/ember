@@ -7,7 +7,7 @@
 #include "axiom/connectors/file/FileHandler.h"
 #include "ember/RowPages.h"
 #include "ember/Runtime.h"
-#include "ember/shuffle/ShuffleConfig.h"
+#include "ember/shuffle/ShuffleContext.h"
 #include "ember/shuffle/ShuffleWrite.h"
 #include "ember/worker/TaskDescription.h"
 #include "velox/common/config/Config.h"
@@ -42,7 +42,10 @@ Executor::Executor(ExecutorOptions options) : options_{std::move(options)} {
   initializeRuntime();
   blockStore_ = std::make_shared<shuffle::ShuffleBlockStore>(
       options_.location, options_.shuffleDirectory);
-  shuffle::ShuffleBlockStore::registerStore(blockStore_);
+  transport_ = options_.fetchOwnBlocksRemotely
+      ? options_.remoteTransport
+      : std::make_shared<shuffle::LocalBlockTransport>(
+            blockStore_, options_.remoteTransport);
   driverExecutor_ =
       std::make_unique<folly::CPUThreadPoolExecutor>(options_.numThreads);
   spillExecutor_ =
@@ -56,7 +59,6 @@ Executor::Executor(ExecutorOptions options) : options_{std::move(options)} {
 Executor::~Executor() {
   driverExecutor_->join();
   spillExecutor_->join();
-  shuffle::ShuffleBlockStore::unregisterStore(options_.location);
   std::error_code ec;
   std::filesystem::remove_all(options_.shuffleDirectory, ec);
 }
@@ -100,7 +102,6 @@ std::string Executor::runTask(const std::string& bytes) {
 
     auto config = std::unordered_map<std::string, std::string>(
         description.config.begin(), description.config.end());
-    config[std::string(shuffle::kExecutorLocation)] = options_.location;
     // Velox's 128 MB per merge would let the merges of a few reduce tasks
     // hold more Kiln read buffers than the pool has, and the rest of their
     // reads would be copied.
@@ -128,7 +129,8 @@ std::string Executor::runTask(const std::string& bytes) {
         std::move(taskPool),
         spillExecutor_.get(),
         result.taskId);
-    const shuffle::FetchFailureScope fetchFailures(*queryCtx->pool());
+    const shuffle::ShuffleContextScope shuffle(
+        *queryCtx->pool(), blockStore_, transport_);
     // Created on the first spill, removed with the task.
     const auto spillDirectory = fmt::format(
         "{}/spill/{}_{}.{}_{}.{}",
@@ -208,7 +210,7 @@ std::string Executor::runTask(const std::string& bytes) {
         result.error = fmt::format(
             "Task ended as {}", exec::taskStateString(task->state()));
       }
-      result.fetchFailure = fetchFailures.slot().failure();
+      result.fetchFailure = shuffle.context().fetchFailures.failure();
       if (result.fetchFailure.has_value()) {
         result.userError = false;
       }

@@ -26,7 +26,7 @@ class ShuffleBlockSource : public exec::ExchangeSource {
       velox::memory::MemoryPool* pool)
       : ExchangeSource(url, destination, std::move(queue), pool),
         url_{url},
-        fetchFailures_{FetchFailureSlot::of(*pool)} {
+        context_{ShuffleContext::of(*pool)} {
     std::tie(location_, block_) = parseBlockUrl(url);
   }
 
@@ -59,11 +59,10 @@ class ShuffleBlockSource : public exec::ExchangeSource {
 
  private:
   folly::coro::Task<Response> co_request() {
-    auto transport = BlockTransport::instance();
     auto data = co_await folly::coro::co_awaitTry(
-        transport->co_fetchBlock(location_, block_));
+        context_->transport->co_fetchBlock(location_, block_));
     if (data.hasException()) {
-      fetchFailures_->fail(
+      context_->fetchFailures.fail(
           {location_, block_}, data.exception().what().toStdString());
     }
     co_return enqueue(std::move(data).value());
@@ -91,7 +90,7 @@ class ShuffleBlockSource : public exec::ExchangeSource {
   }
 
   const std::string url_;
-  const std::shared_ptr<FetchFailureSlot> fetchFailures_;
+  const std::shared_ptr<ShuffleContext> context_;
   std::string location_;
   BlockId block_;
   int64_t bytes_{0};
@@ -111,7 +110,7 @@ class KilnBlockSource : public exec::ExchangeSource {
       velox::memory::MemoryPool* pool)
       : ExchangeSource(url, destination, std::move(queue), pool),
         url_{url},
-        fetchFailures_{FetchFailureSlot::of(*pool)},
+        context_{ShuffleContext::of(*pool)},
         reader_{url} {}
 
   bool shouldRequestLocked() override {
@@ -158,7 +157,7 @@ class KilnBlockSource : public exec::ExchangeSource {
       auto piece = co_await folly::coro::co_awaitTry(reader_.co_next());
       if (piece.hasException()) {
         auto [location, block] = parseBlockUrl(url_);
-        fetchFailures_->fail(
+        context_->fetchFailures.fail(
             {std::move(location), block},
             piece.exception().what().toStdString());
       }
@@ -202,7 +201,7 @@ class KilnBlockSource : public exec::ExchangeSource {
   }
 
   const std::string url_;
-  const std::shared_ptr<FetchFailureSlot> fetchFailures_;
+  const std::shared_ptr<ShuffleContext> context_;
   KilnBlockReader reader_;
   // Bytes read but not yet whole pages.
   folly::IOBufQueue pending_{folly::IOBufQueue::cacheChainLength()};
@@ -230,7 +229,7 @@ std::shared_ptr<exec::ExchangeSource> createShuffleBlockSource(
 BlockPageReader::BlockPageReader(
     const std::string& url,
     const velox::memory::MemoryPool& pool)
-    : url_{url}, fetchFailures_{FetchFailureSlot::of(pool)} {
+    : url_{url}, context_{ShuffleContext::of(pool)} {
   std::tie(location_, block_) = parseBlockUrl(url);
   if (isKilnLocation(location_)) {
     kiln_ = std::make_unique<KilnBlockReader>(url);
@@ -246,9 +245,8 @@ std::vector<std::unique_ptr<folly::IOBuf>> BlockPageReader::nextPages() {
         return {};
       }
       fetched_ = true;
-      auto transport = BlockTransport::instance();
       return splitFrames(folly::coro::blockingWait(
-          transport->co_fetchBlock(location_, block_)));
+          context_->transport->co_fetchBlock(location_, block_)));
     }
     while (!kiln_->atEnd()) {
       pending_.append(folly::coro::blockingWait(kiln_->co_next()));
@@ -258,7 +256,7 @@ std::vector<std::unique_ptr<folly::IOBuf>> BlockPageReader::nextPages() {
       }
     }
   } catch (const std::exception& e) {
-    fetchFailures_->fail({location_, block_}, e.what());
+    context_->fetchFailures.fail({location_, block_}, e.what());
   }
   VELOX_CHECK(pending_.empty(), "{} ends in a cut page", url_);
   return {};

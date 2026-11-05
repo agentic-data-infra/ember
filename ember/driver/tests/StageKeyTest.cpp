@@ -184,6 +184,22 @@ TEST_F(StageKeyTest, sameWorkSameKeys) {
   EXPECT_EQ(keys(wordCount()), first);
 }
 
+// Where a shuffle is stored does not change what it holds.
+TEST_F(StageKeyTest, shuffleTargetIsNotInTheKeys) {
+  auto df = wordCount();
+  shuffle::ShuffleTarget target;
+  target.store = "kiln";
+  target.kilnMetadata = "localhost:7470";
+  target.kilnBucket = 7;
+  auto plan = df.physicalPlan();
+  const auto file = planStages(*plan, pool_.get());
+  const auto kiln = planStages(*plan, pool_.get(), {}, nullptr, false, target);
+  ASSERT_EQ(file.stages.size(), kiln.stages.size());
+  for (size_t i = 0; i < file.stages.size(); ++i) {
+    EXPECT_EQ(file.stages[i].key, kiln.stages[i].key);
+  }
+}
+
 TEST_F(StageKeyTest, changesKeyTheirStageAndDownstream) {
   // Stages: scan to partial count | final count and sort | merge.
   const auto base = keys(wordCount());

@@ -35,6 +35,11 @@ struct ExecutorOptions {
   std::string shuffleDirectory;
   /// Threads that run Velox drivers.
   int32_t numThreads{4};
+  /// Fetches the blocks of other executors; null if there are none.
+  std::shared_ptr<shuffle::BlockTransport> remoteTransport;
+  /// Fetches this executor's own blocks through 'remoteTransport' too, which
+  /// tests use.
+  bool fetchOwnBlocksRemotely{false};
 };
 
 class Executor {
@@ -68,6 +73,7 @@ class Executor {
  private:
   const ExecutorOptions options_;
   std::shared_ptr<shuffle::ShuffleBlockStore> blockStore_;
+  std::shared_ptr<shuffle::BlockTransport> transport_;
   std::unique_ptr<folly::CPUThreadPoolExecutor> driverExecutor_;
   std::unique_ptr<folly::CPUThreadPoolExecutor> spillExecutor_;
   std::shared_ptr<facebook::velox::memory::MemoryPool> rootPool_;

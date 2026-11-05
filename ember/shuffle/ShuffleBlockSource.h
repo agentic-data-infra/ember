@@ -8,7 +8,7 @@
 
 #include <folly/io/IOBufQueue.h>
 
-#include "ember/shuffle/ShuffleInterface.h"
+#include "ember/shuffle/ShuffleContext.h"
 #include "velox/exec/ExchangeSource.h"
 
 namespace ember::shuffle {
@@ -38,7 +38,7 @@ class BlockPageReader {
 
  private:
   const std::string url_;
-  const std::shared_ptr<FetchFailureSlot> fetchFailures_;
+  const std::shared_ptr<ShuffleContext> context_;
   std::string location_;
   BlockId block_;
   std::unique_ptr<KilnBlockReader> kiln_;

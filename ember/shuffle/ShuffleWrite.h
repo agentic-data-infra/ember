@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "ember/shuffle/ShuffleConfig.h"
 #include "velox/core/PlanNode.h"
 #include "velox/exec/Operator.h"
 
@@ -16,7 +17,8 @@ class ShuffleWriteNode : public facebook::velox::core::PlanNode {
   /// Writes 'source' to shuffle 'shuffleId' in 'numPartitions' reduce
   /// partitions. 'kind', 'keys', 'partitionFunctionSpec', 'outputType' and
   /// 'serdeKind' mean what they mean on PartitionedOutputNode. A broadcast
-  /// writes one partition, which every reducer reads.
+  /// writes one partition, which every reducer reads. 'target' says where the
+  /// output goes.
   ShuffleWriteNode(
       const facebook::velox::core::PlanNodeId& id,
       int32_t shuffleId,
@@ -26,6 +28,7 @@ class ShuffleWriteNode : public facebook::velox::core::PlanNode {
       facebook::velox::core::PartitionFunctionSpecPtr partitionFunctionSpec,
       facebook::velox::RowTypePtr outputType,
       std::string serdeKind,
+      ShuffleTarget target,
       facebook::velox::core::PlanNodePtr source);
 
   /// A ShuffleWriteNode with the partitioning of 'output', reading from its
@@ -33,7 +36,8 @@ class ShuffleWriteNode : public facebook::velox::core::PlanNode {
   static std::shared_ptr<const ShuffleWriteNode> fromPartitionedOutput(
       const facebook::velox::core::PartitionedOutputNode& output,
       int32_t shuffleId,
-      int32_t numPartitions);
+      int32_t numPartitions,
+      ShuffleTarget target);
 
   int32_t shuffleId() const {
     return shuffleId_;
@@ -60,6 +64,10 @@ class ShuffleWriteNode : public facebook::velox::core::PlanNode {
     return serdeKind_;
   }
 
+  const ShuffleTarget& target() const {
+    return target_;
+  }
+
   const facebook::velox::RowTypePtr& outputType() const override {
     return outputType_;
   }
@@ -80,6 +88,9 @@ class ShuffleWriteNode : public facebook::velox::core::PlanNode {
   std::shared_ptr<const ShuffleWriteNode> withPartitionFunction(
       facebook::velox::core::PartitionFunctionSpecPtr spec) const;
 
+  /// A copy of this node that writes to Kiln bucket 'bucket'.
+  std::shared_ptr<const ShuffleWriteNode> withKilnBucket(uint64_t bucket) const;
+
   folly::dynamic serialize() const override;
 
   static facebook::velox::core::PlanNodePtr create(
@@ -96,6 +107,7 @@ class ShuffleWriteNode : public facebook::velox::core::PlanNode {
   const facebook::velox::core::PartitionFunctionSpecPtr partitionFunctionSpec_;
   const facebook::velox::RowTypePtr outputType_;
   const std::string serdeKind_;
+  const ShuffleTarget target_;
   const std::vector<facebook::velox::core::PlanNodePtr> sources_;
 };
 

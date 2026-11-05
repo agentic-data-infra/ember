@@ -142,7 +142,7 @@ class StageHasher {
     // Parameters, renamed after the sources so that names first used
     // upstream keep their numbers whatever comes downstream.
     auto params = node->serialize();
-    for (const auto* key : {"id", "sources", "shuffleId"}) {
+    for (const auto* key : {"id", "sources", "shuffleId", "target"}) {
       params.erase(key);
     }
     const auto* input = shuffleInput(node->id());

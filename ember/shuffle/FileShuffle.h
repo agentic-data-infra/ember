@@ -70,14 +70,6 @@ class ShuffleBlockStore : public std::enable_shared_from_this<ShuffleBlockStore>
   std::string dataFile(int32_t shuffleId, int32_t mapId) const;
   std::string indexFile(int32_t shuffleId, int32_t mapId) const;
 
-  /// Stores by location, so a transport in the same process can serve blocks
-  /// without going through the network.
-  static void registerStore(std::shared_ptr<ShuffleBlockStore> store);
-  static void unregisterStore(const std::string& location);
-  static std::shared_ptr<ShuffleBlockStore> lookup(const std::string& location);
-  /// lookup(), or null if no store is registered at 'location'.
-  static std::shared_ptr<ShuffleBlockStore> find(const std::string& location);
-
   /// Used by writers: renames the temporary files into place unless an
   /// earlier attempt committed. Returns false if one did.
   bool commitFiles(
@@ -193,12 +185,21 @@ class PartitionedPageWriter : public ShuffleWriter {
   bool done_{false};
 };
 
-/// Serves blocks from stores registered in this process.
+/// Serves the blocks of 'store', and hands others to 'remote', if any.
 class LocalBlockTransport : public BlockTransport {
  public:
+  explicit LocalBlockTransport(
+      std::shared_ptr<ShuffleBlockStore> store,
+      std::shared_ptr<BlockTransport> remote = nullptr)
+      : store_{std::move(store)}, remote_{std::move(remote)} {}
+
   folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
       std::string location,
       BlockId id) override;
+
+ private:
+  const std::shared_ptr<ShuffleBlockStore> store_;
+  const std::shared_ptr<BlockTransport> remote_;
 };
 
 /// The partition lengths of numPartitions + 1 partition offsets.

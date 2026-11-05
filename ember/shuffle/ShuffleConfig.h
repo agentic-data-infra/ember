@@ -1,14 +1,16 @@
-// Query config keys read by the shuffle operators.
+// The session's shuffle settings. The driver reads these config keys, once,
+// into a ShuffleTarget, which travels on each ShuffleWriteNode.
 
 #pragma once
 
+#include <cstdint>
+#include <map>
+#include <string>
 #include <string_view>
 
-namespace ember::shuffle {
+#include <folly/dynamic.h>
 
-/// Location of the executor running the task; ShuffleWrite writes to the
-/// shuffle store registered under it.
-inline constexpr std::string_view kExecutorLocation = "ember.executor_location";
+namespace ember::shuffle {
 
 /// Bytes a map task buffers before spilling a run to disk.
 inline constexpr std::string_view kSpillThreshold =
@@ -35,9 +37,30 @@ inline constexpr std::string_view kKilnMetadata = "ember.shuffle.kiln.metadata";
 /// disk, so that shuffles bigger than Kiln's DRAM neither fail nor evict.
 inline constexpr std::string_view kKilnTier = "ember.shuffle.kiln.tier";
 
-/// The Kiln bucket the "kiln" store commits a map task's output to. The
-/// driver creates one per shuffle, sets it in the task's config, and deletes
-/// it with the shuffle, which removes the shuffle's chunks from Kiln.
-inline constexpr std::string_view kKilnBucket = "ember.shuffle.kiln.bucket";
+/// Where and how a map task writes its output.
+struct ShuffleTarget {
+  /// kShuffleStore.
+  std::string store{"file"};
+  /// kShuffleSpill.
+  bool spill{true};
+  /// kSpillThreshold.
+  int64_t spillThreshold;
+  /// kKilnMetadata, for the "kiln" store.
+  std::string kilnMetadata;
+  /// kKilnTier.
+  std::string kilnTier{"dram"};
+  /// The Kiln bucket of the shuffle. The driver creates one per shuffle and
+  /// deletes it with the shuffle, which removes the shuffle's chunks from Kiln.
+  uint64_t kilnBucket{0};
+
+  ShuffleTarget();
+
+  /// The target that session config 'config' asks for.
+  static ShuffleTarget fromConfig(
+      const std::map<std::string, std::string>& config);
+
+  folly::dynamic serialize() const;
+  static ShuffleTarget create(const folly::dynamic& obj);
+};
 
 } // namespace ember::shuffle

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "ember/driver/StagePlan.h"
+#include "ember/shuffle/ShuffleWrite.h"
 #include "velox/vector/ComplexVector.h"
 
 namespace ember::driver {
@@ -35,8 +36,8 @@ std::vector<std::string> rangeBounds(
     const std::vector<facebook::velox::RowVectorPtr>& samples,
     int32_t numRanges);
 
-/// The fragment of 'stage' with split points 'bounds'.
-folly::dynamic withBounds(
+/// The write of 'stage' with split points 'bounds'.
+std::shared_ptr<const shuffle::ShuffleWriteNode> withBounds(
     const Stage& stage,
     const std::vector<std::string>& bounds);
 

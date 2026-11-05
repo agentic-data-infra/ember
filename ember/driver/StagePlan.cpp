@@ -83,7 +83,7 @@ void visit(
 // Makes the last stage of 'plan' write its output to a shuffle, one partition
 // per task. A last stage that only gathers its input is dropped, and the
 // stage before it, which writes one partition per task already, is last.
-void materializeOutput(StagePlan& plan) {
+void materializeOutput(StagePlan& plan, const shuffle::ShuffleTarget& target) {
   auto& last = plan.stages.back();
   if (last.plan->is<core::ExchangeNode>() &&
       !last.plan->is<core::MergeExchangeNode>() &&
@@ -102,6 +102,7 @@ void materializeOutput(StagePlan& plan) {
       std::make_shared<core::GatherPartitionFunctionSpec>(),
       last.plan->outputType(),
       "Presto",
+      target,
       last.plan);
   last.fragment = write->serialize();
   last.plan = std::move(write);
@@ -114,7 +115,8 @@ StagePlan planStages(
     velox::memory::MemoryPool* pool,
     const std::map<std::string, std::string>& keyConfig,
     const CachedKeyResolver& cachedKey,
-    bool materialize) {
+    bool materialize,
+    const shuffle::ShuffleTarget& target) {
   const auto& fragments = plan.fragments();
   VELOX_CHECK(!fragments.empty());
 
@@ -190,7 +192,7 @@ StagePlan planStages(
       }
       stage.shuffleId = fragment->fragmentId;
       plan = shuffle::ShuffleWriteNode::fromPartitionedOutput(
-          *output, *stage.shuffleId, numPartitions);
+          *output, *stage.shuffleId, numPartitions, target);
     } else {
       VELOX_USER_CHECK(
           fragment == order.back(),
@@ -208,7 +210,7 @@ StagePlan planStages(
       result.resultStage().numTasks.has_value(),
       "The result stage must have a fixed task count");
   if (materialize) {
-    materializeOutput(result);
+    materializeOutput(result, target);
   }
   computeStageKeys(result, keyConfig);
   return result;

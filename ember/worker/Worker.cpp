@@ -67,17 +67,10 @@ Worker::~Worker() {
   if (blockReaders_ != nullptr) {
     blockReaders_->join();
   }
-  if (shuffle::BlockTransport::instance() == transport_) {
-    shuffle::BlockTransport::setInstance(
-        std::make_shared<shuffle::LocalBlockTransport>());
-  }
 }
 
 std::string Worker::start() {
-  transport_ = std::make_shared<NetworkBlockTransport>(
-      /*fetchLocalBlocks=*/!options_.fetchLocalBlocksOverNetwork,
-      options_.fetchTimeout);
-  shuffle::BlockTransport::setInstance(transport_);
+  transport_ = std::make_shared<NetworkBlockTransport>(options_.fetchTimeout);
   blockReaders_ = std::make_unique<folly::CPUThreadPoolExecutor>(4);
 
   server_.start(
@@ -112,14 +105,19 @@ void Worker::shutdown() {
 
 folly::coro::Task<std::unique_ptr<folly::IOBuf>> Worker::co_fetchBlock(
     shuffle::BlockId id) {
-  auto read = [](std::string address, shuffle::BlockId id)
+  std::shared_ptr<Executor> executor;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    executor = executor_;
+  }
+  VELOX_CHECK_NOT_NULL(executor, "No executor serves shuffle blocks here");
+  auto read = [](std::shared_ptr<Executor> executor, shuffle::BlockId id)
       -> folly::coro::Task<std::unique_ptr<folly::IOBuf>> {
-    auto store = shuffle::ShuffleBlockStore::find(address);
-    VELOX_CHECK_NOT_NULL(store, "No executor serves shuffle blocks here");
-    co_return store->readBlock(id);
+    co_return executor->blockStore().readBlock(id);
   };
   co_return co_await folly::coro::co_withExecutor(
-      folly::getKeepAliveToken(blockReaders_.get()), read(address_, id));
+      folly::getKeepAliveToken(blockReaders_.get()),
+      read(std::move(executor), id));
 }
 
 void Worker::stop() {
@@ -226,7 +224,9 @@ void Worker::startExecutor() {
   auto executor = std::make_shared<Executor>(ExecutorOptions{
       .location = address_,
       .shuffleDirectory = std::move(directory),
-      .numThreads = numThreads_});
+      .numThreads = numThreads_,
+      .remoteTransport = transport_,
+      .fetchOwnBlocksRemotely = options_.fetchLocalBlocksOverNetwork});
   auto slots = std::make_shared<folly::CPUThreadPoolExecutor>(options_.slots);
   std::lock_guard<std::mutex> l(mutex_);
   executor_ = std::move(executor);
