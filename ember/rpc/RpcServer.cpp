@@ -80,12 +80,14 @@ class WorkerService
   }
 
   folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
-      std::unique_ptr<thrift::BlockId> block) override {
+      std::unique_ptr<thrift::BlockId> block,
+      int64_t offset,
+      int64_t length) override {
     const BlockId id{
         .shuffleId = *block->shuffleId(),
         .mapId = *block->mapId(),
         .reduceId = *block->reduceId()};
-    co_return co_await handler_->co_fetchBlock(id);
+    co_return co_await handler_->co_fetchBlock(id, offset, length);
   }
 
  private:

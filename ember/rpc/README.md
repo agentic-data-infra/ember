@@ -31,7 +31,7 @@ workers.
 | | `removeShuffle` | driver → worker | shuffle id |
 | | `shutdown` | driver → worker | |
 | | `listFiles` | driver → worker | file format, path → the data files there, with sizes |
-| `ShuffleBlockService` | `fetchBlock` | worker → worker | shuffle, map, reduce id → the block's bytes, as an IOBuf |
+| `ShuffleBlockService` | `fetchBlock` | worker → worker | shuffle, map, reduce id, offset, length → those bytes of the map output file, as an IOBuf |
 
 `WorkerService` extends `ShuffleBlockService`, so a worker serves both on one
 port.

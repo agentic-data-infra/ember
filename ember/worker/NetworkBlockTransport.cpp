@@ -9,14 +9,17 @@ namespace ember {
 folly::coro::Task<std::unique_ptr<folly::IOBuf>>
 NetworkBlockTransport::co_fetchBlock(
     std::string location,
-    shuffle::BlockId id) {
+    shuffle::BlockId id,
+    int64_t offset,
+    int64_t length) {
   ++remoteFetches_;
   auto connection = client(location);
   const rpc::BlockId block{
       .shuffleId = id.shuffleId, .mapId = id.mapId, .reduceId = id.reduceId};
   // A fetch that times out is cancelled.
   auto result = co_await folly::coro::co_awaitTry(
-      folly::coro::timeout(connection->co_fetchBlock(block), fetchTimeout_));
+      folly::coro::timeout(
+          connection->co_fetchBlock(block, offset, length), fetchTimeout_));
   if (result.hasException<folly::FutureTimeout>()) {
     throw std::runtime_error(fmt::format(
         "No reply from {} within {} ms", location, fetchTimeout_.count()));

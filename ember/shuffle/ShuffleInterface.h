@@ -83,17 +83,48 @@ class BlockTransport {
  public:
   virtual ~BlockTransport() = default;
 
-  /// Returns the bytes of block 'id' held by the executor at 'location': a
-  /// sequence of framed pages (see FileShuffle.h). An empty block has no bytes.
+  /// Returns 'length' bytes at 'offset' of the map output file of block 'id',
+  /// held by the executor at 'location': part of a sequence of framed pages
+  /// (see FileShuffle.h).
   virtual folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
       std::string location,
-      BlockId id) = 0;
+      BlockId id,
+      int64_t offset,
+      int64_t length) = 0;
+};
+
+/// The size of the pieces a block in an executor's files is read in.
+inline constexpr int64_t kBlockPieceBytes = 1 << 20;
+
+/// Reads one block piece by piece, so that a reader holds little of it at a
+/// time. Not thread safe.
+class BlockReader {
+ public:
+  virtual ~BlockReader() = default;
+
+  /// Whether all pieces have been returned.
+  virtual bool atEnd() const = 0;
+
+  /// The bytes of the next piece, 0 at the end.
+  virtual int64_t nextLength() const = 0;
+
+  /// May start reading the next piece in the background.
+  virtual void prefetch() {}
+
+  /// The next piece.
+  virtual folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_next() = 0;
+
+  /// Bytes returned so far that were copied through the Kiln staging pool.
+  virtual int64_t copiedBytes() const {
+    return 0;
+  }
 };
 
 /// Remote split id of a shuffle block, as read by ShuffleBlockSource:
-/// "ember-shuffle://<location>/<shuffleId>/<mapId>/<reduceId>". For a block
-/// in Kiln, the block's byte ranges of the chunk ('ranges', see
-/// MapStatus::blockRanges()):
+/// "ember-shuffle://<location>/<offset>,.../<length>,.../<shuffleId>/<mapId>/<reduceId>",
+/// with the block's byte ranges of the map output ('ranges', see
+/// MapStatus::blockRanges()): one range in a data file, one per segment in a
+/// Kiln chunk, where the URL starts with the Kiln location instead:
 /// "<kiln location>/<offset>,.../<length>,.../<shuffleId>/<mapId>/<reduceId>".
 std::string blockUrl(
     const std::string& location,
@@ -115,8 +146,8 @@ std::string kilnLocation(const std::string& metadata, const std::string& chunk);
 
 bool isKilnLocation(const std::string& location);
 
-/// The (offset, length) byte ranges of a Kiln block URL.
-std::vector<std::pair<int64_t, int64_t>> kilnBlockRanges(const std::string& url);
+/// The (offset, length) byte ranges of a blockUrl().
+std::vector<std::pair<int64_t, int64_t>> blockUrlRanges(const std::string& url);
 
 /// A reduce task could not fetch a block: its map output is lost, e.g. the
 /// executor that holds it died. The driver then recomputes the output rather

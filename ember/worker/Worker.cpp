@@ -42,9 +42,13 @@ class Worker::Handler : public rpc::WorkerHandler {
   }
 
   folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
-      rpc::BlockId block) override {
-    return worker_.co_fetchBlock(shuffle::BlockId{
-        block.shuffleId, block.mapId, block.reduceId});
+      rpc::BlockId block,
+      int64_t offset,
+      int64_t length) override {
+    return worker_.co_fetchBlock(
+        shuffle::BlockId{block.shuffleId, block.mapId, block.reduceId},
+        offset,
+        length);
   }
 
  private:
@@ -104,20 +108,25 @@ void Worker::shutdown() {
 }
 
 folly::coro::Task<std::unique_ptr<folly::IOBuf>> Worker::co_fetchBlock(
-    shuffle::BlockId id) {
+    shuffle::BlockId id,
+    int64_t offset,
+    int64_t length) {
   std::shared_ptr<Executor> executor;
   {
     std::lock_guard<std::mutex> l(mutex_);
     executor = executor_;
   }
   VELOX_CHECK_NOT_NULL(executor, "No executor serves shuffle blocks here");
-  auto read = [](std::shared_ptr<Executor> executor, shuffle::BlockId id)
+  auto read = [](std::shared_ptr<Executor> executor,
+                 shuffle::BlockId id,
+                 int64_t offset,
+                 int64_t length)
       -> folly::coro::Task<std::unique_ptr<folly::IOBuf>> {
-    co_return executor->blockStore().readBlock(id);
+    co_return executor->blockStore().readBlock(id, offset, length);
   };
   co_return co_await folly::coro::co_withExecutor(
       folly::getKeepAliveToken(blockReaders_.get()),
-      read(std::move(executor), id));
+      read(std::move(executor), id, offset, length));
 }
 
 void Worker::stop() {

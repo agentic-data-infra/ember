@@ -302,26 +302,18 @@ std::string blockUrl(
     const std::string& location,
     const BlockId& id,
     const std::vector<std::pair<int64_t, int64_t>>& ranges) {
-  if (isKilnLocation(location)) {
-    std::vector<int64_t> offsets;
-    std::vector<int64_t> lengths;
-    for (const auto& [offset, length] : ranges) {
-      offsets.push_back(offset);
-      lengths.push_back(length);
-    }
-    return fmt::format(
-        "{}/{}/{}/{}/{}/{}",
-        location,
-        folly::join(',', offsets),
-        folly::join(',', lengths),
-        id.shuffleId,
-        id.mapId,
-        id.reduceId);
+  std::vector<int64_t> offsets;
+  std::vector<int64_t> lengths;
+  for (const auto& [offset, length] : ranges) {
+    offsets.push_back(offset);
+    lengths.push_back(length);
   }
   return fmt::format(
-      "{}{}/{}/{}/{}",
-      kBlockScheme,
+      "{}{}/{}/{}/{}/{}/{}",
+      isKilnLocation(location) ? "" : kBlockScheme,
       location,
+      folly::join(',', offsets),
+      folly::join(',', lengths),
       id.shuffleId,
       id.mapId,
       id.reduceId);
@@ -344,14 +336,15 @@ std::pair<std::string, BlockId> parseBlockUrl(const std::string& url) {
             folly::to<int32_t>(parts[5]),
             folly::to<int32_t>(parts[6])}};
   }
+  // ember-shuffle://<location>/<offsets>/<lengths>/<shuffle>/<map>/<reduce>
   auto parts = urlParts(url, kBlockScheme.size());
-  VELOX_CHECK_EQ(parts.size(), 4, "Malformed shuffle block: {}", url);
+  VELOX_CHECK_EQ(parts.size(), 6, "Malformed shuffle block: {}", url);
   return {
       parts[0],
       BlockId{
-          folly::to<int32_t>(parts[1]),
-          folly::to<int32_t>(parts[2]),
-          folly::to<int32_t>(parts[3])}};
+          folly::to<int32_t>(parts[3]),
+          folly::to<int32_t>(parts[4]),
+          folly::to<int32_t>(parts[5])}};
 }
 
 std::string kilnLocation(const std::string& metadata, const std::string& chunk) {
@@ -372,25 +365,30 @@ bool isKilnLocation(const std::string& location) {
   return location.starts_with(kKilnScheme);
 }
 
-std::vector<std::pair<int64_t, int64_t>> kilnBlockRanges(
+std::vector<std::pair<int64_t, int64_t>> blockUrlRanges(
     const std::string& url) {
-  auto parts = urlParts(url, kKilnScheme.size());
-  VELOX_CHECK_EQ(parts.size(), 7, "Malformed Kiln shuffle block: {}", url);
+  VELOX_CHECK(isBlockUrl(url), "Not a shuffle block: {}", url);
+  const auto kiln = isKilnLocation(url);
+  const auto parts =
+      urlParts(url, kiln ? kKilnScheme.size() : kBlockScheme.size());
+  // The location takes two parts in Kiln.
+  const size_t ranges = kiln ? 2 : 1;
+  VELOX_CHECK_EQ(parts.size(), ranges + 5, "Malformed shuffle block: {}", url);
   std::vector<int64_t> offsets;
   std::vector<int64_t> lengths;
-  if (!parts[2].empty()) {
-    folly::split(',', parts[2], offsets);
+  if (!parts[ranges].empty()) {
+    folly::split(',', parts[ranges], offsets);
   }
-  if (!parts[3].empty()) {
-    folly::split(',', parts[3], lengths);
+  if (!parts[ranges + 1].empty()) {
+    folly::split(',', parts[ranges + 1], lengths);
   }
   VELOX_CHECK_EQ(
-      offsets.size(), lengths.size(), "Malformed Kiln shuffle block: {}", url);
-  std::vector<std::pair<int64_t, int64_t>> ranges;
+      offsets.size(), lengths.size(), "Malformed shuffle block: {}", url);
+  std::vector<std::pair<int64_t, int64_t>> result;
   for (size_t i = 0; i < offsets.size(); ++i) {
-    ranges.emplace_back(offsets[i], lengths[i]);
+    result.emplace_back(offsets[i], lengths[i]);
   }
-  return ranges;
+  return result;
 }
 
 ShuffleBlockStore::ShuffleBlockStore(std::string location, std::string directory)
@@ -487,21 +485,11 @@ MapStatus ShuffleBlockStore::mapStatus(int32_t shuffleId, int32_t mapId) const {
 }
 
 std::unique_ptr<folly::IOBuf> ShuffleBlockStore::readBlock(
-    const BlockId& id) const {
-  auto offsets = readOffsets(id.shuffleId, id.mapId);
-  VELOX_CHECK_LT(
-      id.reduceId + 1,
-      static_cast<int32_t>(offsets.size()),
-      "No partition {} in {}",
-      id.reduceId,
-      id.toString());
-  const auto start = offsets[id.reduceId];
-  const auto length = offsets[id.reduceId + 1] - start;
-  if (length == 0) {
-    return folly::IOBuf::create(0);
-  }
-  auto data = readRange(dataFile(id.shuffleId, id.mapId), start, length);
-  return folly::IOBuf::fromString(std::move(data));
+    const BlockId& id,
+    int64_t offset,
+    int64_t length) const {
+  return folly::IOBuf::fromString(
+      readRange(dataFile(id.shuffleId, id.mapId), offset, length));
 }
 
 void ShuffleBlockStore::removeShuffle(int32_t shuffleId) {
@@ -522,12 +510,17 @@ void ShuffleBlockStore::removeShuffle(int32_t shuffleId) {
 }
 
 folly::coro::Task<std::unique_ptr<folly::IOBuf>>
-LocalBlockTransport::co_fetchBlock(std::string location, BlockId id) {
+LocalBlockTransport::co_fetchBlock(
+    std::string location,
+    BlockId id,
+    int64_t offset,
+    int64_t length) {
   if (location == store_->location()) {
-    co_return store_->readBlock(id);
+    co_return store_->readBlock(id, offset, length);
   }
   VELOX_CHECK_NOT_NULL(remote_, "No shuffle store at {}", location);
-  co_return co_await remote_->co_fetchBlock(std::move(location), id);
+  co_return co_await remote_->co_fetchBlock(
+      std::move(location), id, offset, length);
 }
 
 std::vector<int64_t> partitionLengths(const std::vector<int64_t>& offsets) {
@@ -536,22 +529,6 @@ std::vector<int64_t> partitionLengths(const std::vector<int64_t>& offsets) {
     lengths.push_back(offsets[i] - offsets[i - 1]);
   }
   return lengths;
-}
-
-std::vector<std::unique_ptr<folly::IOBuf>> splitFrames(
-    std::unique_ptr<folly::IOBuf> block) {
-  std::vector<std::unique_ptr<folly::IOBuf>> pages;
-  if (block == nullptr) {
-    return pages;
-  }
-  folly::io::Cursor cursor(block.get());
-  while (!cursor.isAtEnd()) {
-    const auto length = cursor.readLE<uint32_t>();
-    std::unique_ptr<folly::IOBuf> page;
-    cursor.clone(page, length);
-    pages.push_back(std::move(page));
-  }
-  return pages;
 }
 
 std::vector<std::unique_ptr<folly::IOBuf>> takeFrames(folly::IOBufQueue& queue) {

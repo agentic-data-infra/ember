@@ -139,26 +139,22 @@ folly::coro::Task<void> co_readKiln(
 /// else it is copied through the staging pool. Never waits for a read
 /// buffer, as those may be held by pages that wait for this block, e.g. in
 /// a merge. Not thread safe.
-class KilnBlockReader {
+class KilnBlockReader : public BlockReader {
  public:
   explicit KilnBlockReader(const std::string& url);
-  ~KilnBlockReader();
+  ~KilnBlockReader() override;
 
-  /// Whether all pieces have been returned.
-  bool atEnd() const;
+  bool atEnd() const override;
 
-  /// The bytes of the next piece, 0 at the end.
-  int64_t nextLength() const;
+  int64_t nextLength() const override;
 
-  /// Starts reading the next piece in the background, if not yet started
-  /// and a read buffer is free.
-  void prefetch();
+  /// Does nothing if no read buffer is free.
+  void prefetch() override;
 
-  /// The next piece; then prefetches the one after.
-  folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_next();
+  /// Then prefetches the piece after.
+  folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_next() override;
 
-  /// Bytes returned so far that were copied through the staging pool.
-  int64_t copiedBytes() const {
+  int64_t copiedBytes() const override {
     return copiedBytes_;
   }
 

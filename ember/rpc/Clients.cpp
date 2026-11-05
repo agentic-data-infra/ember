@@ -145,13 +145,16 @@ std::shared_ptr<ShuffleBlockClient> ShuffleBlockClient::connect(
 }
 
 folly::coro::Task<std::unique_ptr<folly::IOBuf>>
-ShuffleBlockClient::co_fetchBlock(BlockId block) {
+ShuffleBlockClient::co_fetchBlock(
+    BlockId block,
+    int64_t offset,
+    int64_t length) {
   thrift::BlockId message;
   message.shuffleId() = block.shuffleId;
   message.mapId() = block.mapId;
   message.reduceId() = block.reduceId;
   auto bytes = co_await detail::call(
-      *connection_, stub_->client->co_fetchBlock(message));
+      *connection_, stub_->client->co_fetchBlock(message, offset, length));
   co_return std::make_unique<folly::IOBuf>(std::move(bytes));
 }
 

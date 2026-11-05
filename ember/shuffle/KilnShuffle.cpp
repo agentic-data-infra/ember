@@ -561,7 +561,7 @@ KilnBlockReader::KilnBlockReader(const std::string& url) {
   state->metadata = metadata;
   state->cluster = kilnCluster(metadata, Pool::kReads);
   state->id = kiln::ChunkId::parse(chunk);
-  state->pieces = pieces(kilnBlockRanges(url), kKilnReadPieceBytes);
+  state->pieces = pieces(blockUrlRanges(url), kKilnReadPieceBytes);
   state_ = std::move(state);
 }
 
