@@ -13,7 +13,7 @@ The interfaces follow Presto C++'s `ShuffleInterface`.
 | `FileShuffle` | `ShuffleBlockStore`, the per-executor store of shuffle files, `PartitionedPageWriter`, the buffering and spilling that all writers share, the file writer and the local `BlockTransport`. |
 | `KilnShuffle` | The Kiln writer, which commits a map output as one Kiln chunk, and `co_fetchKilnBlock`, which reads a block's byte ranges of it. Both use a small pool of Kiln buffers per cluster. |
 | `ShuffleWrite` | `ShuffleWriteNode` and operator: partitions its input (hash, round robin, range or single), serializes it to Presto pages and hands them to a `ShuffleWriter`; commits at end of input. |
-| `ShuffleBlockSource` | The `ExchangeSource` behind Velox's `Exchange` and `MergeExchange`: fetches blocks through the `BlockTransport`. Splits are block URLs. A failed fetch fails the task with a `FetchFailure`. |
+| `ShuffleBlockSource` | The `ExchangeSource` behind Velox's `Exchange` and `MergeExchange`: reads a block as a stream of pieces, through the `BlockTransport` or from Kiln, as much as Velox asks for. Splits are block URLs. A failed fetch fails the task with a `FetchFailure`. |
 | `RangePartitionFunction` | Range partitioning for a global sort: split points the driver sampled on a VARCHAR or VARBINARY key or, with `ember.sort.sample=false`, fixed slices of its first 8 bytes, in the sort's direction, nulls first or last. |
 | `Shuffle` | `registerShuffle()`: plan node and partition function serde, operator translators and the exchange source factory. |
 
@@ -78,6 +78,8 @@ handed to Velox as an IOBuf that returns the buffer to the pool when freed.
 Larger blocks, and reads while all buffers are in use, read into a fresh
 IOBuf registered for that read.
 
-The worker never reads files directly in a reduce task: it fetches whole
-blocks through `BlockTransport`: read in process by the local backend, over
-RPC (`fetchBlock`) between worker processes.
+The worker never reads files directly in a reduce task: it fetches pieces of
+a block, 1 MiB at a time and as many as Velox asks for, through
+`BlockTransport`: read in process by the local backend, over RPC
+(`fetchBlock`) between worker processes. A block URL carries the block's byte
+ranges, so Velox learns the sizes without a fetch.

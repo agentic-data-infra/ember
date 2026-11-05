@@ -51,7 +51,9 @@ class WorkerHandler {
 
   /// The bytes of one shuffle block this worker's executor wrote.
   virtual folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
-      BlockId block) = 0;
+      BlockId block,
+      int64_t offset,
+      int64_t length) = 0;
 };
 
 } // namespace ember::rpc

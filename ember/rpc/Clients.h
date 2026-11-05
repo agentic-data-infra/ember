@@ -113,7 +113,9 @@ class ShuffleBlockClient : public Client {
   ~ShuffleBlockClient() override;
 
   folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
-      BlockId block);
+      BlockId block,
+      int64_t offset,
+      int64_t length);
 
  private:
   struct Stub;

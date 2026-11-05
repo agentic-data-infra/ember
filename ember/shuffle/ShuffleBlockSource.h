@@ -1,8 +1,8 @@
 // Reads shuffles through Velox's own Exchange and MergeExchange. A stage keeps
 // the exchanges Axiom planned, and each task's splits are the shuffle block URLs
 // of its reduce partition (see ShuffleInterface.h), one per non-empty block.
-// This source fetches a block through the BlockTransport. BlockPageReader reads
-// a block the same way for a reader outside an exchange.
+// This source reads a block as a stream of pieces, as much as Velox asks for.
+// BlockPageReader reads a block the same way for a reader outside an exchange.
 
 #pragma once
 
@@ -13,8 +13,6 @@
 
 namespace ember::shuffle {
 
-class KilnBlockReader;
-
 /// Velox ExchangeSource factory for shuffle block URLs.
 std::shared_ptr<facebook::velox::exec::ExchangeSource> createShuffleBlockSource(
     const std::string& url,
@@ -23,8 +21,8 @@ std::shared_ptr<facebook::velox::exec::ExchangeSource> createShuffleBlockSource(
     facebook::velox::memory::MemoryPool* pool);
 
 /// Reads the pages of one stored block, blocking the caller, which runs it off
-/// the driver thread (BackgroundWork.h). A block read
-/// from Kiln comes in pieces, so that it holds a few read buffers at a time.
+/// the driver thread (BackgroundWork.h). The block comes in pieces, so that it
+/// holds little memory at a time.
 class BlockPageReader {
  public:
   /// 'pool' is a pool of the task that reads.
@@ -40,12 +38,11 @@ class BlockPageReader {
  private:
   const std::string url_;
   const std::shared_ptr<ShuffleContext> context_;
+  const std::unique_ptr<BlockReader> reader_;
   std::string location_;
   BlockId block_;
-  std::unique_ptr<KilnBlockReader> kiln_;
-  // Bytes read from Kiln but not yet whole pages.
+  // Bytes read but not yet whole pages.
   folly::IOBufQueue pending_{folly::IOBufQueue::cacheChainLength()};
-  bool fetched_{false};
 };
 
 } // namespace ember::shuffle

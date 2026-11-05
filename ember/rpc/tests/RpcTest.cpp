@@ -73,8 +73,10 @@ class TestHandler : public WorkerHandler {
   }
 
   folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
-      BlockId block) override {
-    std::string bytes(block.reduceId, '\0');
+      BlockId /*block*/,
+      int64_t /*offset*/,
+      int64_t length) override {
+    std::string bytes(length, '\0');
     for (size_t i = 0; i < bytes.size(); ++i) {
       bytes[i] = static_cast<char>(i * 7);
     }
@@ -142,7 +144,7 @@ TEST_F(RpcTest, roundTrip) {
 
   auto blocks = ShuffleBlockClient::connect(address());
   auto bytes = folly::coro::blockingWait(
-      blocks->co_fetchBlock(BlockId{.reduceId = 16 << 20}));
+      blocks->co_fetchBlock(BlockId{}, 0, 16 << 20));
   EXPECT_EQ(bytes->computeChainDataLength(), big.size());
   EXPECT_EQ(bytes->to<std::string>(), big);
 

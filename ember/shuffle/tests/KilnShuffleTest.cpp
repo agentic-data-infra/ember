@@ -32,6 +32,14 @@ namespace {
 
 namespace fs = std::filesystem;
 
+// The pages of a whole block.
+std::vector<std::unique_ptr<folly::IOBuf>> splitFrames(
+    std::unique_ptr<folly::IOBuf> block) {
+  folly::IOBufQueue queue(folly::IOBufQueue::cacheChainLength());
+  queue.append(std::move(block));
+  return takeFrames(queue);
+}
+
 class KilnShuffleTest : public testing::Test {
  protected:
   static void SetUpTestSuite() {
@@ -677,7 +685,7 @@ TEST(KilnBlockUrlTest, roundTrip) {
   EXPECT_EQ(parsedLocation, location);
   EXPECT_EQ(parsed, id);
   EXPECT_EQ(
-      kilnBlockRanges(url),
+      blockUrlRanges(url),
       (std::vector<std::pair<int64_t, int64_t>>{{100, 42}}));
 
   // A block of several segments has one range in each.
@@ -685,7 +693,7 @@ TEST(KilnBlockUrlTest, roundTrip) {
   EXPECT_EQ(ranged, "kiln://meta:7000/abc123/0,50/10,20/7/12/3");
   EXPECT_EQ(parseBlockUrl(ranged).second, id);
   EXPECT_EQ(
-      kilnBlockRanges(ranged),
+      blockUrlRanges(ranged),
       (std::vector<std::pair<int64_t, int64_t>>{{0, 10}, {50, 20}}));
 
   // Kiln's URL lists keep their '/'s escaped inside the location.
@@ -699,7 +707,7 @@ TEST(KilnBlockUrlTest, roundTrip) {
   const auto listedUrl = blockUrl(listed, id, {{100, 42}, {200, 1}});
   EXPECT_EQ(parseBlockUrl(listedUrl).first, listed);
   EXPECT_EQ(
-      kilnBlockRanges(listedUrl),
+      blockUrlRanges(listedUrl),
       (std::vector<std::pair<int64_t, int64_t>>{{100, 42}, {200, 1}}));
   EXPECT_EQ(
       parseKilnLocation(kilnLocation("odd%name/x:1", "")).first,

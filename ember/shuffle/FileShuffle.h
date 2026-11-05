@@ -57,7 +57,10 @@ class ShuffleBlockStore : public std::enable_shared_from_this<ShuffleBlockStore>
       int64_t spillThreshold = kDefaultSpillThreshold);
 
   /// Bytes of a committed block.
-  std::unique_ptr<folly::IOBuf> readBlock(const BlockId& id) const;
+  std::unique_ptr<folly::IOBuf> readBlock(
+      const BlockId& id,
+      int64_t offset,
+      int64_t length) const;
 
   /// The status of a committed map output, read from its index file.
   MapStatus mapStatus(int32_t shuffleId, int32_t mapId) const;
@@ -195,7 +198,9 @@ class LocalBlockTransport : public BlockTransport {
 
   folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
       std::string location,
-      BlockId id) override;
+      BlockId id,
+      int64_t offset,
+      int64_t length) override;
 
  private:
   const std::shared_ptr<ShuffleBlockStore> store_;
@@ -204,10 +209,6 @@ class LocalBlockTransport : public BlockTransport {
 
 /// The partition lengths of numPartitions + 1 partition offsets.
 std::vector<int64_t> partitionLengths(const std::vector<int64_t>& offsets);
-
-/// Splits a block into its pages.
-std::vector<std::unique_ptr<folly::IOBuf>> splitFrames(
-    std::unique_ptr<folly::IOBuf> block);
 
 /// Takes the whole pages off the front of 'queue', a block read so far,
 /// without copying; a page cut short stays.

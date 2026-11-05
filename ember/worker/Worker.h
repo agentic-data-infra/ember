@@ -95,7 +95,9 @@ class Worker {
 
   folly::coro::Task<std::string> co_launchTask(std::string task);
   folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
-      shuffle::BlockId id);
+      shuffle::BlockId id,
+      int64_t offset,
+      int64_t length);
   void removeShuffle(int32_t shuffleId);
   void shutdown();
 

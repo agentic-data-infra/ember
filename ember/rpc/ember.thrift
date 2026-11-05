@@ -64,7 +64,8 @@ service DriverService {
 
 /// Served by every worker: the shuffle blocks its executor wrote.
 service ShuffleBlockService {
-  IOBuf fetchBlock(1: BlockId block);
+  /// 'length' bytes at 'offset' of the block's map output file.
+  IOBuf fetchBlock(1: BlockId block, 2: i64 offset, 3: i64 length);
 }
 
 /// Served by every worker, to the driver it registered with.

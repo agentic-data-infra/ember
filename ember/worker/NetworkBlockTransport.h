@@ -26,7 +26,9 @@ class NetworkBlockTransport : public shuffle::BlockTransport {
 
   folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchBlock(
       std::string location,
-      shuffle::BlockId id) override;
+      shuffle::BlockId id,
+      int64_t offset,
+      int64_t length) override;
 
   /// Fetches that went over the network.
   int64_t remoteFetches() const {
