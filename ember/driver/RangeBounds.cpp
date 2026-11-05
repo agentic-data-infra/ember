@@ -165,13 +165,13 @@ std::vector<std::string> rangeBounds(
   return bounds;
 }
 
-folly::dynamic withBounds(
+std::shared_ptr<const shuffle::ShuffleWriteNode> withBounds(
     const Stage& stage,
     const std::vector<std::string>& bounds) {
   const auto& write = rangeWrite(stage);
   const auto& spec = *std::dynamic_pointer_cast<
       const shuffle::RangePartitionFunctionSpec>(write.partitionFunctionSpec());
-  return write.withPartitionFunction(spec.withBounds(bounds))->serialize();
+  return write.withPartitionFunction(spec.withBounds(bounds));
 }
 
 } // namespace ember::driver

@@ -6,7 +6,9 @@ The interfaces follow Presto C++'s `ShuffleInterface`.
 
 | File | Contents |
 |------|----------|
-| `ShuffleInterface` | `BlockId` (shuffle, map, reduce), `MapStatus` (location, bytes per partition of each segment), `ShuffleWriter` (`collect`, `commit`, `abort`) and `BlockTransport` (`fetchBlock(location, block)`). Block URLs: `ember-shuffle://<location>/<shuffle>/<map>/<reduce>`. `FetchFailure` names a block that could not be fetched; a reader records it in its task's `FetchFailureSlot`, found by the task's root memory pool, because Velox passes exchange errors on as text. |
+| `ShuffleInterface` | `BlockId` (shuffle, map, reduce), `MapStatus` (location, bytes per partition of each segment), `ShuffleWriter` (`collect`, `commit`, `abort`) and `BlockTransport` (`fetchBlock(location, block)`). Block URLs: `ember-shuffle://<location>/<shuffle>/<map>/<reduce>`. `FetchFailure` names a block that could not be fetched; a reader records it in its task's `ShuffleContext`, because Velox passes exchange errors on as text. |
+| `ShuffleConfig` | The `ember.shuffle.*` keys and `ShuffleTarget`, the store, spilling and Kiln settings that the driver reads from them and puts on each `ShuffleWriteNode`. |
+| `ShuffleContext` | What a running task gets from its executor: the block store, the block transport and the fetch failure slot, registered under the task's root memory pool. |
 | `FileShuffle` | `ShuffleBlockStore`, the per-executor store of shuffle files, `PartitionedPageWriter`, the buffering and spilling that all writers share, the file writer and the local `BlockTransport`. |
 | `KilnShuffle` | The Kiln writer, which commits a map output as one Kiln chunk, and `co_fetchKilnBlock`, which reads a block's byte ranges of it. Both use a small pool of Kiln buffers per cluster. |
 | `ShuffleWrite` | `ShuffleWriteNode` and operator: partitions its input (hash, round robin, range or single), serializes it to Presto pages and hands them to a `ShuffleWriter`; commits at end of input. |
@@ -58,7 +60,7 @@ blocks. So the outputs outlive the executor that wrote them: losing it loses
 none of them. A chunk Kiln has evicted fails the read with a `FetchFailure`,
 and the driver recomputes that map output as it would a lost one. Writers
 spill to the executor's directory either way. Each shuffle's chunks go into
-a Kiln bucket of its own (`ember.shuffle.kiln.bucket`, set by the driver),
+a Kiln bucket of its own (`ShuffleTarget::kilnBucket`, set by the driver),
 which the driver deletes with the shuffle: after its job, or for kept
 outputs, when they are replaced or uncached or the session ends. Outputs
 stored in Kiln's catalog (`ember.reuse.kiln`) stay until Kiln evicts them, as

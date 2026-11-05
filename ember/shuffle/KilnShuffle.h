@@ -21,7 +21,7 @@
 // asks for more, with the next piece read ahead (KilnBlockReader).
 //
 // Each shuffle's chunks go into a Kiln bucket of its own
-// (ember.shuffle.kiln.bucket), which the driver deletes with the shuffle.
+// (ShuffleTarget::kilnBucket), which the driver deletes with the shuffle.
 // Chunks of outputs stored in Kiln's catalog stay until Kiln evicts them.
 
 #pragma once

@@ -10,10 +10,6 @@ folly::coro::Task<std::unique_ptr<folly::IOBuf>>
 NetworkBlockTransport::co_fetchBlock(
     std::string location,
     shuffle::BlockId id) {
-  if (fetchLocalBlocks_ && shuffle::ShuffleBlockStore::find(location)) {
-    shuffle::LocalBlockTransport local;
-    co_return co_await local.co_fetchBlock(std::move(location), id);
-  }
   ++remoteFetches_;
   auto connection = client(location);
   const rpc::BlockId block{

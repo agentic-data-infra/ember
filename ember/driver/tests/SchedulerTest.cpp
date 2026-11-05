@@ -995,12 +995,8 @@ TEST_F(SchedulerTest, kilnStoreSpills) {
 }
 
 TEST_F(SchedulerTest, noSpillNeedsTheKilnStore) {
-  auto path = writeCorpus(1, 10);
-  auto df = wordCount(path);
-  auto [dag, backend] =
-      scheduler({{std::string(shuffle::kShuffleSpill), "false"}});
   VELOX_ASSERT_THROW(
-      dag->runJob(*df.physicalPlan(), pool_.get()),
+      scheduler({{std::string(shuffle::kShuffleSpill), "false"}}),
       "ember.shuffle.spill=false needs ember.shuffle.store=kiln");
 }
 

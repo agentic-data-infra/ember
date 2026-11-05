@@ -118,6 +118,7 @@ DagScheduler::DagScheduler(
     std::shared_ptr<SchedulerBackend> backend,
     DagSchedulerOptions options)
     : options_{std::move(options)},
+      shuffleTarget_{shuffle::ShuffleTarget::fromConfig(options_.config)},
       reuseOutputs_{
           !options_.config.contains(kReuseOutputs) ||
           folly::to<bool>(options_.config.at(kReuseOutputs))},
@@ -129,16 +130,8 @@ DagScheduler::DagScheduler(
           folly::to<bool>(options_.config.at(kNodeLocalFiles))},
       taskScheduler_{std::move(backend), options_.maxTaskAttempts},
       kilnMemo_{KilnMemo::fromConfig(options_.config)} {
-  if (auto store = options_.config.find(std::string(shuffle::kShuffleStore));
-      store != options_.config.end() && store->second == "kiln") {
-    auto metadata =
-        options_.config.find(std::string(shuffle::kKilnMetadata));
-    VELOX_USER_CHECK(
-        metadata != options_.config.end(),
-        "{}=kiln needs config {}",
-        shuffle::kShuffleStore,
-        shuffle::kKilnMetadata);
-    kiln_ = shuffle::kilnClient(metadata->second);
+  if (shuffleTarget_.store == "kiln") {
+    kiln_ = shuffle::kilnClient(shuffleTarget_.kilnMetadata);
   }
   for (const auto& [key, value] : options_.config) {
     if (!key.starts_with("ember.") || key == kMaxSplitBytes ||
@@ -209,7 +202,9 @@ StagePlan DagScheduler::stagePlan(const optimizer::MultiFragmentPlan& plan) {
       plan,
       planPool_.get(),
       keyConfig_,
-      [this](const auto& id) { return cachedStagePlan(id).stages.back().key; });
+      [this](const auto& id) { return cachedStagePlan(id).stages.back().key; },
+      /*materialize=*/false,
+      shuffleTarget_);
 }
 
 StagePlan DagScheduler::cachedStagePlan(const std::string& id) {
@@ -220,7 +215,8 @@ StagePlan DagScheduler::cachedStagePlan(const std::string& id) {
       planPool_.get(),
       keyConfig_,
       [this](const auto& id) { return cachedStagePlan(id).stages.back().key; },
-      /*materialize=*/true);
+      /*materialize=*/true,
+      shuffleTarget_);
 }
 
 std::optional<int32_t> DagScheduler::storedShuffle(
@@ -759,14 +755,6 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
       }
       task.resultTask = resultTask;
       task.config = options_.config;
-      if (stage.shuffleId.has_value()) {
-        std::lock_guard<std::mutex> l(bucketsMutex_);
-        if (auto it = kilnBuckets_.find(*stage.shuffleId);
-            it != kilnBuckets_.end()) {
-          task.config[std::string(shuffle::kKilnBucket)] =
-              std::to_string(it->second);
-        }
-      }
     }
     return tasks;
   };
@@ -845,7 +833,8 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
 
     // A range shuffle keeps its split points when tasks run again, so that
     // the partitions of old and new map outputs match.
-    std::optional<folly::dynamic> rangeFragment;
+    auto write = std::dynamic_pointer_cast<const shuffle::ShuffleWriteNode>(
+        stage.plan);
     if (sampleRanges_ && writesRanges(stage)) {
       auto bounds = storedRangeBounds(*stage.shuffleId);
       if (!bounds.has_value()) {
@@ -864,7 +853,7 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
         std::lock_guard<std::mutex> l(rangeBoundsMutex_);
         rangeBounds_[*stage.shuffleId] = *bounds;
       }
-      rangeFragment = withBounds(stage, *bounds);
+      write = withBounds(stage, *bounds);
     }
 
     const auto attempt = state.attempts++;
@@ -875,8 +864,17 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
                    << " partitions";
     }
 
+    // Each shuffle has its own Kiln bucket.
+    if (write != nullptr) {
+      std::lock_guard<std::mutex> l(bucketsMutex_);
+      if (auto it = kilnBuckets_.find(*stage.shuffleId);
+          it != kilnBuckets_.end()) {
+        write = write->withKilnBucket(it->second);
+      }
+    }
+
     auto tasks = makeTasks(
-        rangeFragment.has_value() ? *rangeFragment : stage.fragment,
+        write != nullptr ? write->serialize() : stage.fragment,
         job.jobId,
         attempt,
         state.isResult,

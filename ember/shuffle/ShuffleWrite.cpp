@@ -2,7 +2,7 @@
 
 #include "ember/shuffle/FileShuffle.h"
 #include "ember/shuffle/KilnShuffle.h"
-#include "ember/shuffle/ShuffleConfig.h"
+#include "ember/shuffle/ShuffleContext.h"
 #include "velox/common/memory/ByteStream.h"
 #include "velox/exec/OperatorUtils.h"
 #include "velox/exec/Task.h"
@@ -23,6 +23,7 @@ ShuffleWriteNode::ShuffleWriteNode(
     core::PartitionFunctionSpecPtr partitionFunctionSpec,
     velox::RowTypePtr outputType,
     std::string serdeKind,
+    ShuffleTarget target,
     core::PlanNodePtr source)
     : PlanNode(id),
       shuffleId_{shuffleId},
@@ -32,6 +33,7 @@ ShuffleWriteNode::ShuffleWriteNode(
       partitionFunctionSpec_{std::move(partitionFunctionSpec)},
       outputType_{std::move(outputType)},
       serdeKind_{std::move(serdeKind)},
+      target_{std::move(target)},
       sources_{std::move(source)} {
   VELOX_USER_CHECK_GT(numPartitions_, 0);
   VELOX_USER_CHECK_EQ(
@@ -47,7 +49,8 @@ ShuffleWriteNode::ShuffleWriteNode(
 std::shared_ptr<const ShuffleWriteNode> ShuffleWriteNode::fromPartitionedOutput(
     const core::PartitionedOutputNode& output,
     int32_t shuffleId,
-    int32_t numPartitions) {
+    int32_t numPartitions,
+    ShuffleTarget target) {
   VELOX_USER_CHECK(
       !output.isReplicateNullsAndAny(),
       "Shuffle does not support replicating nulls: {}",
@@ -61,6 +64,7 @@ std::shared_ptr<const ShuffleWriteNode> ShuffleWriteNode::fromPartitionedOutput(
       output.partitionFunctionSpecPtr(),
       output.outputType(),
       output.serdeKind(),
+      std::move(target),
       output.sources()[0]);
 }
 
@@ -75,6 +79,7 @@ std::shared_ptr<const ShuffleWriteNode> ShuffleWriteNode::withShuffleId(
       partitionFunctionSpec_,
       outputType_,
       serdeKind_,
+      target_,
       sources_[0]);
 }
 
@@ -89,6 +94,24 @@ std::shared_ptr<const ShuffleWriteNode> ShuffleWriteNode::withPartitionFunction(
       std::move(spec),
       outputType_,
       serdeKind_,
+      target_,
+      sources_[0]);
+}
+
+std::shared_ptr<const ShuffleWriteNode> ShuffleWriteNode::withKilnBucket(
+    uint64_t bucket) const {
+  auto target = target_;
+  target.kilnBucket = bucket;
+  return std::make_shared<const ShuffleWriteNode>(
+      id(),
+      shuffleId_,
+      kind_,
+      keys_,
+      numPartitions_,
+      partitionFunctionSpec_,
+      outputType_,
+      serdeKind_,
+      std::move(target),
       sources_[0]);
 }
 
@@ -103,6 +126,7 @@ folly::dynamic ShuffleWriteNode::serialize() const {
   }
   obj["outputType"] = outputType_->serialize();
   obj["serdeKind"] = serdeKind_;
+  obj["target"] = target_.serialize();
   return obj;
 }
 
@@ -127,6 +151,7 @@ core::PlanNodePtr ShuffleWriteNode::create(
       std::move(spec),
       velox::ISerializable::deserialize<velox::RowType>(obj["outputType"]),
       obj["serdeKind"].asString(),
+      ShuffleTarget::create(obj["target"]),
       sources[0]);
 }
 
@@ -177,48 +202,28 @@ class ShuffleWrite : public exec::Operator {
 
   void initialize() override {
     Operator::initialize();
-    const auto& config = operatorCtx_->driverCtx()->queryConfig();
-    auto location = config.get<std::string>(std::string(kExecutorLocation));
-    VELOX_CHECK(
-        location.has_value(),
-        "ShuffleWrite needs config {}",
-        kExecutorLocation);
     auto* task = operatorCtx_->task().get();
-    auto store = ShuffleBlockStore::lookup(*location);
-    const auto spillThreshold = config.get<int64_t>(
-        std::string(kSpillThreshold),
-        ShuffleBlockStore::kDefaultSpillThreshold);
-    const auto kind =
-        config.get<std::string>(std::string(kShuffleStore), "file");
-    const auto spill = config.get<bool>(std::string(kShuffleSpill), true);
-    if (kind == "kiln") {
-      auto metadata = config.get<std::string>(std::string(kKilnMetadata));
-      VELOX_USER_CHECK(
-          metadata.has_value(),
-          "{}=kiln needs config {}",
-          kShuffleStore,
-          kKilnMetadata);
+    auto store = ShuffleContext::of(*pool())->store;
+    const auto& target = node_->target();
+    if (target.store == "kiln") {
       writer_ = createKilnWriter(
           std::move(store),
-          std::move(*metadata),
-          config.get<std::string>(std::string(kKilnTier), "dram"),
-          config.get<uint64_t>(std::string(kKilnBucket), 0),
+          target.kilnMetadata,
+          target.kilnTier,
+          target.kilnBucket,
           node_->shuffleId(),
           task->destination(),
           node_->numPartitions(),
           attemptTag(task->taskId()),
-          spillThreshold,
-          spill);
+          target.spillThreshold,
+          target.spill);
     } else {
-      VELOX_USER_CHECK_EQ(kind, "file", "Unknown {}", kShuffleStore);
-      VELOX_USER_CHECK(
-          spill, "{}=false needs {}=kiln", kShuffleSpill, kShuffleStore);
       writer_ = store->createWriter(
           node_->shuffleId(),
           task->destination(),
           node_->numPartitions(),
           attemptTag(task->taskId()),
-          spillThreshold);
+          target.spillThreshold);
     }
   }
 

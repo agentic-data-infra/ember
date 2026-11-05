@@ -209,6 +209,7 @@ class DagScheduler {
   void deleteKilnBucket(uint64_t bucket);
 
   const DagSchedulerOptions options_;
+  const shuffle::ShuffleTarget shuffleTarget_;
   const bool reuseOutputs_;
   const bool sampleRanges_;
   const bool nodeLocalFiles_;

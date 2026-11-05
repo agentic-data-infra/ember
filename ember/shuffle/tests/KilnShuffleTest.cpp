@@ -350,6 +350,7 @@ TEST_F(KilnShuffleTest, sourceStreamsBlockInPieces) {
       queue->addSourceLocked();
     }
     queue->noMoreSources();
+    const ShuffleContextScope scope(*pool, nullptr, nullptr);
     auto source = createShuffleBlockSource(url, 0, queue, pool.get());
     auto request = [&](auto future) {
       {
@@ -714,17 +715,17 @@ TEST_F(KilnShuffleTest, fetchFailureReachesItsTask) {
   const BlockId first{1, 2, 3};
   const BlockId second{4, 5, 6};
   {
-    const FetchFailureScope scope(*task);
-    auto slot = FetchFailureSlot::of(*reader);
-    EXPECT_FALSE(scope.slot().failure().has_value());
-    EXPECT_THROW(slot->fail({"a", first}, "gone"), std::exception);
-    EXPECT_THROW(slot->fail({"b", second}, "gone"), std::exception);
-    ASSERT_TRUE(scope.slot().failure().has_value());
-    EXPECT_EQ(scope.slot().failure()->location, "a");
-    EXPECT_EQ(scope.slot().failure()->block, first);
-    EXPECT_FALSE(FetchFailureSlot::of(*other)->failure().has_value());
+    const ShuffleContextScope scope(*task, nullptr, nullptr);
+    auto context = ShuffleContext::of(*reader);
+    EXPECT_FALSE(scope.context().fetchFailures.failure().has_value());
+    EXPECT_THROW(context->fetchFailures.fail({"a", first}, "gone"), std::exception);
+    EXPECT_THROW(context->fetchFailures.fail({"b", second}, "gone"), std::exception);
+    ASSERT_TRUE(scope.context().fetchFailures.failure().has_value());
+    EXPECT_EQ(scope.context().fetchFailures.failure()->location, "a");
+    EXPECT_EQ(scope.context().fetchFailures.failure()->block, first);
+    EXPECT_THROW(ShuffleContext::of(*other), std::exception);
   }
-  EXPECT_FALSE(FetchFailureSlot::of(*reader)->failure().has_value());
+  EXPECT_THROW(ShuffleContext::of(*reader), std::exception);
 }
 
 } // namespace

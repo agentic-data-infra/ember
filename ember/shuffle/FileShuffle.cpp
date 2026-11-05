@@ -5,7 +5,6 @@
 #include <unistd.h>
 
 #include <filesystem>
-#include <map>
 #include <numeric>
 
 #include <folly/File.h>
@@ -15,7 +14,6 @@
 #include <folly/lang/Bits.h>
 
 #include "velox/common/base/Exceptions.h"
-#include "velox/common/memory/MemoryPool.h"
 
 namespace ember::shuffle {
 
@@ -119,19 +117,6 @@ class FileShuffleWriter : public PartitionedPageWriter {
     return store().mapStatus(shuffleId(), mapId());
   }
 };
-
-std::mutex storesMutex;
-std::map<std::string, std::shared_ptr<ShuffleBlockStore>>& stores() {
-  static std::map<std::string, std::shared_ptr<ShuffleBlockStore>> instance;
-  return instance;
-}
-
-std::mutex transportMutex;
-std::shared_ptr<BlockTransport>& transportInstance() {
-  static std::shared_ptr<BlockTransport> instance =
-      std::make_shared<LocalBlockTransport>();
-  return instance;
-}
 
 } // namespace
 
@@ -295,16 +280,6 @@ std::vector<std::pair<int64_t, int64_t>> MapStatus::blockRanges(
   return ranges;
 }
 
-void BlockTransport::setInstance(std::shared_ptr<BlockTransport> transport) {
-  std::lock_guard<std::mutex> l(transportMutex);
-  transportInstance() = std::move(transport);
-}
-
-std::shared_ptr<BlockTransport> BlockTransport::instance() {
-  std::lock_guard<std::mutex> l(transportMutex);
-  return transportInstance();
-}
-
 namespace {
 constexpr std::string_view kBlockScheme = "ember-shuffle://";
 constexpr std::string_view kKilnScheme = "kiln://";
@@ -410,47 +385,6 @@ std::vector<std::pair<int64_t, int64_t>> kilnBlockRanges(
     ranges.emplace_back(offsets[i], lengths[i]);
   }
   return ranges;
-}
-
-namespace {
-
-// The slots of running tasks, by root pool.
-folly::Synchronized<std::map<
-    const facebook::velox::memory::MemoryPool*,
-    std::shared_ptr<FetchFailureSlot>>>
-    fetchFailureSlots;
-
-} // namespace
-
-std::shared_ptr<FetchFailureSlot> FetchFailureSlot::of(
-    const facebook::velox::memory::MemoryPool& pool) {
-  auto slots = fetchFailureSlots.rlock();
-  auto it = slots->find(pool.root());
-  return it != slots->end() ? it->second : std::make_shared<FetchFailureSlot>();
-}
-
-void FetchFailureSlot::fail(FetchFailure failure, const std::string& cause) {
-  const auto url = blockUrl(failure.location, failure.block);
-  failure_.withWLock([&](auto& first) {
-    if (!first.has_value()) {
-      first = std::move(failure);
-    }
-  });
-  VELOX_FAIL("Cannot fetch {}: {}", url, cause);
-}
-
-std::optional<FetchFailure> FetchFailureSlot::failure() const {
-  return *failure_.rlock();
-}
-
-FetchFailureScope::FetchFailureScope(
-    const facebook::velox::memory::MemoryPool& pool)
-    : root_{*pool.root()}, slot_{std::make_shared<FetchFailureSlot>()} {
-  fetchFailureSlots.wlock()->emplace(&root_, slot_);
-}
-
-FetchFailureScope::~FetchFailureScope() {
-  fetchFailureSlots.wlock()->erase(&root_);
 }
 
 ShuffleBlockStore::ShuffleBlockStore(std::string location, std::string directory)
@@ -581,34 +515,13 @@ void ShuffleBlockStore::removeShuffle(int32_t shuffleId) {
   }
 }
 
-void ShuffleBlockStore::registerStore(std::shared_ptr<ShuffleBlockStore> store) {
-  std::lock_guard<std::mutex> l(storesMutex);
-  stores()[store->location()] = std::move(store);
-}
-
-void ShuffleBlockStore::unregisterStore(const std::string& location) {
-  std::lock_guard<std::mutex> l(storesMutex);
-  stores().erase(location);
-}
-
-std::shared_ptr<ShuffleBlockStore> ShuffleBlockStore::lookup(
-    const std::string& location) {
-  std::lock_guard<std::mutex> l(storesMutex);
-  auto it = stores().find(location);
-  VELOX_CHECK(it != stores().end(), "No shuffle store at {}", location);
-  return it->second;
-}
-
-std::shared_ptr<ShuffleBlockStore> ShuffleBlockStore::find(
-    const std::string& location) {
-  std::lock_guard<std::mutex> l(storesMutex);
-  auto it = stores().find(location);
-  return it == stores().end() ? nullptr : it->second;
-}
-
 folly::coro::Task<std::unique_ptr<folly::IOBuf>>
 LocalBlockTransport::co_fetchBlock(std::string location, BlockId id) {
-  co_return ShuffleBlockStore::lookup(location)->readBlock(id);
+  if (location == store_->location()) {
+    co_return store_->readBlock(id);
+  }
+  VELOX_CHECK_NOT_NULL(remote_, "No shuffle store at {}", location);
+  co_return co_await remote_->co_fetchBlock(std::move(location), id);
 }
 
 std::vector<int64_t> partitionLengths(const std::vector<int64_t>& offsets) {

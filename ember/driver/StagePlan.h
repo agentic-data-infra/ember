@@ -32,6 +32,7 @@
 #include <folly/dynamic.h>
 
 #include "axiom/optimizer/MultiFragmentPlan.h"
+#include "ember/shuffle/ShuffleConfig.h"
 
 namespace ember::driver {
 
@@ -109,12 +110,13 @@ using CachedKeyResolver =
 /// stage keys. 'cachedKey' resolves scans of cached tables. With
 /// 'materialize', the plan's output is written to a shuffle with one partition
 /// per map output: the last stage is the map stage that writes it, and there
-/// is no result stage.
+/// is no result stage. 'target' is where the stages' shuffles go.
 StagePlan planStages(
     const facebook::axiom::optimizer::MultiFragmentPlan& plan,
     facebook::velox::memory::MemoryPool* pool,
     const std::map<std::string, std::string>& keyConfig = {},
     const CachedKeyResolver& cachedKey = nullptr,
-    bool materialize = false);
+    bool materialize = false,
+    const shuffle::ShuffleTarget& target = {});
 
 } // namespace ember::driver

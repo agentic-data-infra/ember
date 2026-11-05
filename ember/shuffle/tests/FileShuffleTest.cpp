@@ -21,11 +21,10 @@ class FileShuffleTest : public testing::Test {
         fmt::format("ember_file_shuffle_{}", ::getpid());
     fs::remove_all(dir_);
     store_ = std::make_shared<ShuffleBlockStore>("test-executor", dir_.string());
-    ShuffleBlockStore::registerStore(store_);
+    transport_ = std::make_shared<LocalBlockTransport>(store_);
   }
 
   void TearDown() override {
-    ShuffleBlockStore::unregisterStore("test-executor");
     fs::remove_all(dir_);
   }
 
@@ -43,7 +42,7 @@ class FileShuffleTest : public testing::Test {
 
   std::vector<std::string> readBlock(int32_t shuffleId, int32_t mapId, int32_t reduceId) {
     return pages(folly::coro::blockingWait(
-        BlockTransport::instance()->co_fetchBlock(
+        transport_->co_fetchBlock(
             "test-executor", {shuffleId, mapId, reduceId})));
   }
 
@@ -74,6 +73,7 @@ class FileShuffleTest : public testing::Test {
 
   fs::path dir_;
   std::shared_ptr<ShuffleBlockStore> store_;
+  std::shared_ptr<LocalBlockTransport> transport_;
 };
 
 TEST_F(FileShuffleTest, partitionsAreContiguousAndInOrder) {
@@ -149,12 +149,12 @@ TEST_F(FileShuffleTest, removeShuffle) {
 
 TEST_F(FileShuffleTest, missingBlockFailsTheFetch) {
   EXPECT_THROW(
-      folly::coro::blockingWait(BlockTransport::instance()->co_fetchBlock(
+      folly::coro::blockingWait(transport_->co_fetchBlock(
           "test-executor", {9, 0, 0})),
       std::exception);
   EXPECT_THROW(
       folly::coro::blockingWait(
-          BlockTransport::instance()->co_fetchBlock("nowhere", {0, 0, 0})),
+          transport_->co_fetchBlock("nowhere", {0, 0, 0})),
       std::exception);
 }
 
