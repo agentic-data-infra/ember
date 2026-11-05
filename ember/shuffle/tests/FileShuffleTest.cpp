@@ -6,7 +6,9 @@
 #include <filesystem>
 
 #include <folly/coro/BlockingWait.h>
+#include <folly/executors/CPUThreadPoolExecutor.h>
 
+#include "ember/shuffle/BackgroundWork.h"
 #include "ember/shuffle/FileShuffle.h"
 
 namespace ember::shuffle {
@@ -145,6 +147,38 @@ TEST_F(FileShuffleTest, removeShuffle) {
   store_->removeShuffle(4);
   EXPECT_FALSE(store_->hasMapOutput(4, 0));
   EXPECT_TRUE(store_->hasMapOutput(5, 0));
+}
+
+TEST_F(FileShuffleTest, backgroundWorkBlocksUntilDone) {
+  auto executor = std::make_shared<folly::CPUThreadPoolExecutor>(1);
+  BackgroundWork work(executor);
+  auto future = facebook::velox::ContinueFuture::makeEmpty();
+  EXPECT_FALSE(work.blocked(&future));
+
+  folly::Baton<> release;
+  bool ran = false;
+  work.start([&] {
+    release.wait();
+    ran = true;
+  });
+  EXPECT_TRUE(work.blocked(&future));
+  EXPECT_FALSE(ran);
+  release.post();
+  std::move(future).via(executor.get()).get();
+  EXPECT_FALSE(work.blocked(&future));
+  EXPECT_TRUE(ran);
+
+  // A failure comes out where the owner looks, once.
+  folly::Baton<> fail;
+  work.start([&] {
+    fail.wait();
+    throw std::runtime_error("failed");
+  });
+  EXPECT_TRUE(work.blocked(&future));
+  fail.post();
+  std::move(future).via(executor.get()).get();
+  EXPECT_THROW(work.blocked(&future), std::runtime_error);
+  EXPECT_FALSE(work.blocked(&future));
 }
 
 TEST_F(FileShuffleTest, missingBlockFailsTheFetch) {

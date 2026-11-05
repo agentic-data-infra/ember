@@ -16,3 +16,12 @@ Code shared by the api, driver and worker. Headers are included as `ember/<File>
 | `KilnWriteFile` | A Velox `WriteFile` over a new Kiln chunk: appends go through a write-pool buffer, `close()` commits the chunk. |
 | `TaskId` | Format and parse of Ember task ids (`ember://<job>/<stage>.<attempt>/<partition>.<attempt>`), so a data sink knows its partition. |
 | `RowPages` | `serializeRows`/`deserializeRows`: result rows as Presto pages. |
+
+## Waiting on driver threads
+
+`ShuffleWrite` and the cached data source run their writes and reads that may
+wait off the driver thread (`shuffle/BackgroundWork.h`). Sinks cannot: Velox's
+`DataSink::appendData` and `WriteFile` are blocking by contract, so the output
+sink, `KilnWriteFile` and the stoke sink's puts hold their driver thread while
+they wait. The stoke sink's `finish()` can yield, and gives the thread back
+between short waits for its drain.

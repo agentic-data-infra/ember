@@ -1,5 +1,5 @@
 // What a running task's shuffle operators get from their executor: its block
-// store, its block transport and the slot for fetch failures.
+// store, its block transport, its IO threads and the slot for fetch failures.
 //
 // Velox gives an operator or exchange source no way to reach its executor, so
 // the executor registers a context under the task's root memory pool while
@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 
+#include <folly/Executor.h>
 #include <folly/Synchronized.h>
 
 #include "ember/shuffle/ShuffleInterface.h"
@@ -41,6 +42,8 @@ class FetchFailureSlot {
 struct ShuffleContext {
   std::shared_ptr<ShuffleBlockStore> store;
   std::shared_ptr<BlockTransport> transport;
+  /// Runs a task's work that may wait (BackgroundWork.h).
+  std::shared_ptr<folly::Executor> ioExecutor;
   FetchFailureSlot fetchFailures;
 
   /// The context of the task that owns 'pool'. Throws if there is none.
@@ -54,7 +57,8 @@ class ShuffleContextScope {
   ShuffleContextScope(
       const facebook::velox::memory::MemoryPool& pool,
       std::shared_ptr<ShuffleBlockStore> store,
-      std::shared_ptr<BlockTransport> transport);
+      std::shared_ptr<BlockTransport> transport,
+      std::shared_ptr<folly::Executor> ioExecutor);
   ~ShuffleContextScope();
 
   ShuffleContextScope(const ShuffleContextScope&) = delete;
