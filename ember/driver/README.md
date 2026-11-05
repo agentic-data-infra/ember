@@ -70,6 +70,12 @@ inputs. Then the stage runs a new attempt for only the partitions it still
 lacks. A stage that ends `maxStageAttempts` (4) attempts with partitions
 missing fails the job.
 
+A range shuffle's outputs must all use the same split points, so the scheduler
+keeps them per shuffle, and rerun map tasks reuse them. They last as long as
+the session and are not saved in Kiln's catalog. A later session that reuses a
+range shuffle from Kiln and loses part of it therefore fails the job with an
+error. Saving the split points in the catalog would let it recompute that part.
+
 ## Reusing stage outputs
 
 The scheduler keeps the shuffle output of each map stage that has a key
