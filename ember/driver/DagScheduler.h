@@ -19,11 +19,12 @@
 // or for kept outputs, when they are replaced, uncached, or the session ends.
 // Outputs stored in Kiln's catalog keep their chunks until Kiln evicts them.
 //
-// Cached Dataframes: a stage that reads a cached table (CachedTable.h) first
-// materializes it, as a job of its own over the cached plan whose last stage
-// writes one shuffle partition per task. That output stays in the memo, under
-// its stage key (or the table's id, if it has none), whether or not other
-// outputs are kept; later jobs, and lost outputs, rerun only what is missing.
+// Cached Dataframes: a stage that reads a cached table (CachedConnector.h)
+// first materializes it, as a job of its own over the cached plan whose last
+// stage writes one shuffle partition per task. That output stays in the memo,
+// under its stage key (or the table's id, if it has none), whether or not
+// other outputs are kept; later jobs, and lost outputs, rerun only what is
+// missing.
 
 #pragma once
 
@@ -170,8 +171,6 @@ class DagScheduler {
 
   // The stages of cached table 'id', planned to store its output.
   StagePlan cachedStagePlan(const std::string& id);
-
-  CachedOutput cachedOutput(const std::string& id);
 
   // The memo key of a cached table's output.
   static std::string cacheMemoKey(

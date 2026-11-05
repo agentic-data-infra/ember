@@ -90,7 +90,7 @@ class BlockTransport {
   static std::shared_ptr<BlockTransport> instance();
 };
 
-/// Remote split id of a shuffle block, as read by ShuffleRead:
+/// Remote split id of a shuffle block, as read by ShuffleBlockSource:
 /// "ember-shuffle://<location>/<shuffleId>/<mapId>/<reduceId>". For a block
 /// in Kiln, the block's byte ranges of the chunk ('ranges', see
 /// MapStatus::blockRanges()):

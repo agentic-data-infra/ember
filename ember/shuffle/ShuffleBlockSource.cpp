@@ -1,102 +1,17 @@
-#include "ember/shuffle/ShuffleRead.h"
+#include "ember/shuffle/ShuffleBlockSource.h"
 
+#include <folly/coro/BlockingWait.h>
 #include <folly/coro/Invoke.h>
 
 #include "ember/shuffle/FileShuffle.h"
 #include "ember/shuffle/KilnShuffle.h"
-#include "velox/exec/Exchange.h"
 #include "velox/exec/ExchangeSource.h"
-#include "velox/exec/Merge.h"
 #include "velox/exec/SerializedPage.h"
 
 namespace ember::shuffle {
 
-namespace core = facebook::velox::core;
 namespace exec = facebook::velox::exec;
 namespace velox = facebook::velox;
-
-ShuffleReadNode::ShuffleReadNode(
-    int32_t shuffleId,
-    std::shared_ptr<const core::ExchangeNode> exchange)
-    : PlanNode(exchange->id()),
-      shuffleId_{shuffleId},
-      exchange_{std::move(exchange)} {}
-
-bool ShuffleReadNode::isMerge() const {
-  return exchange_->is<core::MergeExchangeNode>();
-}
-
-const std::vector<core::PlanNodePtr>& ShuffleReadNode::sources() const {
-  static const std::vector<core::PlanNodePtr> kNoSources;
-  return kNoSources;
-}
-
-folly::dynamic ShuffleReadNode::serialize() const {
-  auto obj = PlanNode::serialize();
-  obj["shuffleId"] = shuffleId_;
-  obj["exchange"] = exchange_->serialize();
-  return obj;
-}
-
-core::PlanNodePtr ShuffleReadNode::create(
-    const folly::dynamic& obj,
-    void* context) {
-  auto exchange = std::dynamic_pointer_cast<const core::ExchangeNode>(
-      velox::ISerializable::deserialize<core::PlanNode>(
-          obj["exchange"], context));
-  VELOX_CHECK_NOT_NULL(exchange);
-  return std::make_shared<const ShuffleReadNode>(
-      obj["shuffleId"].asInt(), std::move(exchange));
-}
-
-void ShuffleReadNode::addDetails(std::stringstream& stream) const {
-  stream << "shuffle " << shuffleId_;
-  if (const auto* merge = exchange_->as<core::MergeExchangeNode>()) {
-    stream << ", merge on ";
-    for (size_t i = 0; i < merge->sortingKeys().size(); ++i) {
-      stream << (i > 0 ? ", " : "") << merge->sortingKeys()[i]->toString()
-             << " " << merge->sortingOrders()[i].toString();
-    }
-  }
-}
-
-std::unique_ptr<exec::Operator> ShuffleReadTranslator::toOperator(
-    exec::DriverCtx* ctx,
-    int32_t id,
-    const core::PlanNodePtr& node) {
-  auto read = std::dynamic_pointer_cast<const ShuffleReadNode>(node);
-  if (read == nullptr || !read->isMerge()) {
-    return nullptr;
-  }
-  return std::make_unique<exec::MergeExchange>(
-      id,
-      ctx,
-      std::dynamic_pointer_cast<const core::MergeExchangeNode>(
-          read->exchange()));
-}
-
-std::unique_ptr<exec::Operator> ShuffleReadTranslator::toOperator(
-    exec::DriverCtx* ctx,
-    int32_t id,
-    const core::PlanNodePtr& node,
-    std::shared_ptr<exec::InMemoryExchangeClient> exchangeClient) {
-  auto read = std::dynamic_pointer_cast<const ShuffleReadNode>(node);
-  if (read == nullptr) {
-    return nullptr;
-  }
-  VELOX_CHECK(!read->isMerge());
-  return std::make_unique<exec::Exchange>(
-      id, ctx, read->exchange(), std::move(exchangeClient), "ShuffleRead");
-}
-
-std::optional<uint32_t> ShuffleReadTranslator::maxDrivers(
-    const core::PlanNodePtr& node) {
-  auto read = std::dynamic_pointer_cast<const ShuffleReadNode>(node);
-  if (read != nullptr && read->isMerge()) {
-    return 1;
-  }
-  return std::nullopt;
-}
 
 namespace {
 
@@ -304,6 +219,41 @@ std::shared_ptr<exec::ExchangeSource> createShuffleBlockSource(
   }
   return std::make_shared<ShuffleBlockSource>(
       url, destination, std::move(queue), pool);
+}
+
+BlockPageReader::BlockPageReader(const std::string& url) : url_{url} {
+  std::tie(location_, block_) = parseBlockUrl(url);
+  if (isKilnLocation(location_)) {
+    kiln_ = std::make_unique<KilnBlockReader>(url);
+  }
+}
+
+BlockPageReader::~BlockPageReader() = default;
+
+std::vector<std::unique_ptr<folly::IOBuf>> BlockPageReader::nextPages() {
+  try {
+    if (kiln_ == nullptr) {
+      if (fetched_) {
+        return {};
+      }
+      fetched_ = true;
+      auto transport = BlockTransport::instance();
+      return splitFrames(folly::coro::blockingWait(
+          transport->co_fetchBlock(location_, block_)));
+    }
+    while (!kiln_->atEnd()) {
+      pending_.append(folly::coro::blockingWait(kiln_->co_next()));
+      auto pages = takeFrames(pending_);
+      if (!pages.empty()) {
+        return pages;
+      }
+    }
+  } catch (const std::exception& e) {
+    const FetchFailure failure{location_, block_};
+    VELOX_FAIL(failure.message(e.what()));
+  }
+  VELOX_CHECK(pending_.empty(), "{} ends in a cut page", url_);
+  return {};
 }
 
 } // namespace ember::shuffle

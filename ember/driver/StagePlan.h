@@ -2,18 +2,18 @@
 //
 // Each Axiom fragment becomes one stage. A fragment that feeds another ends
 // in a PartitionedOutput; it becomes a map stage whose root is a ShuffleWrite.
-// Each Exchange or MergeExchange reading another fragment becomes a
-// ShuffleRead. The fragment of the final stage returns rows to the driver.
+// An Exchange or MergeExchange reading another fragment stays as it is: its
+// splits are the shuffle's block URLs. The fragment of the final stage returns
+// rows to the driver.
 //
 // A stage's plan is serialized once, with Velox serde, and sent with each of
-// its tasks: the task binary. File scans are rewritten to serializable
-// handles on the way. Each stage gets a content key (StageKey.h).
+// its tasks: the task binary. Each stage gets a content key (StageKey.h).
 //
-// A scan of a cached table (CachedTable.h) becomes a ShuffleRead of the
-// shuffle that stores the cached plan's output, as a cached input: task p of
-// the stage reads every block of map outputs p, p + numTasks, ... A cached
-// plan itself is planned with 'materialize' set, so that its last stage
-// writes that shuffle instead of returning rows.
+// A scan of a cached table (CachedConnector.h) stays too, as a cached input
+// reading the shuffle that stores the cached plan's output: task p of the
+// stage reads every block of map outputs p, p + numTasks, ... A cached plan
+// itself is planned with 'materialize' set, so that its last stage writes
+// that shuffle instead of returning rows.
 //
 // A global sort without a limit runs as one merge task by default: the stage
 // before it sorts its partitions, the result stage merges them. With
@@ -43,7 +43,7 @@ struct Stage {
   /// comes from its splits.
   std::optional<int32_t> numTasks;
 
-  /// Rewritten plan: the task binary, and its deserialized form.
+  /// The plan: the task binary, and its deserialized form.
   folly::dynamic fragment;
   facebook::velox::core::PlanNodePtr plan;
 
@@ -58,8 +58,8 @@ struct Stage {
   /// Scans of the original fragment, which the driver enumerates splits for.
   std::vector<facebook::velox::core::TableScanNodePtr> scans;
 
-  /// ShuffleRead node ids and the shuffle each reads. 'broadcast' reads take
-  /// partition 0 of every map output.
+  /// Ids of exchanges and cached scans, and the shuffle each reads.
+  /// 'broadcast' reads take partition 0 of every map output.
   struct ShuffleInput {
     facebook::velox::core::PlanNodeId nodeId;
     int32_t shuffleId;
@@ -97,27 +97,16 @@ struct StagePlan {
 
   /// Changes shuffle ids, in the stages' fields and their task binaries, per
   /// 'newIds' (old id to new id; ids not in it stay).
-  void renumberShuffles(
-      const std::map<int32_t, int32_t>& newIds,
-      facebook::velox::memory::MemoryPool* pool);
+  void renumberShuffles(const std::map<int32_t, int32_t>& newIds);
 };
 
-/// What a scan of a cached table reads: the stored output of its plan.
-struct CachedOutput {
-  /// The cached Dataframe's schema; the stored rows have the same columns by
-  /// position, under the names in 'type'.
-  facebook::velox::RowTypePtr schema;
-  facebook::velox::RowTypePtr type;
-  std::string serdeKind;
-  std::optional<std::string> key;
-};
-
-/// The output of the cached table with the given id.
-using CachedOutputResolver = std::function<CachedOutput(const std::string&)>;
+/// The key of the stored output of the cached table with the given id.
+using CachedKeyResolver =
+    std::function<std::optional<std::string>(const std::string&)>;
 
 /// Cuts 'plan' into stages. 'pool' holds constants of the deserialized plans.
 /// 'keyConfig' is the query config that can change results; it goes into the
-/// stage keys. 'cachedOutput' resolves scans of cached tables. With
+/// stage keys. 'cachedKey' resolves scans of cached tables. With
 /// 'materialize', the plan's output is written to a shuffle with one partition
 /// per map output: the last stage is the map stage that writes it, and there
 /// is no result stage.
@@ -125,7 +114,7 @@ StagePlan planStages(
     const facebook::axiom::optimizer::MultiFragmentPlan& plan,
     facebook::velox::memory::MemoryPool* pool,
     const std::map<std::string, std::string>& keyConfig = {},
-    const CachedOutputResolver& cachedOutput = nullptr,
+    const CachedKeyResolver& cachedKey = nullptr,
     bool materialize = false);
 
 } // namespace ember::driver

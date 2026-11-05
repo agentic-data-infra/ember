@@ -73,6 +73,13 @@ class ShuffleWriteNode : public facebook::velox::core::PlanNode {
     return "ShuffleWrite";
   }
 
+  /// This node, writing shuffle 'shuffleId'.
+  std::shared_ptr<const ShuffleWriteNode> withShuffleId(int32_t shuffleId) const;
+
+  /// A copy of this node that partitions with 'spec'.
+  std::shared_ptr<const ShuffleWriteNode> withPartitionFunction(
+      facebook::velox::core::PartitionFunctionSpecPtr spec) const;
+
   folly::dynamic serialize() const override;
 
   static facebook::velox::core::PlanNodePtr create(

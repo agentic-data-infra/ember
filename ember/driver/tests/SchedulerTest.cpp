@@ -22,7 +22,7 @@
 #include "ember/functions.h"
 #include "ember/shuffle/KilnShuffle.h"
 #include "ember/shuffle/ShuffleConfig.h"
-#include "ember/shuffle/ShuffleRead.h"
+#include "ember/shuffle/ShuffleBlockSource.h"
 #include "ember/shuffle/ShuffleWrite.h"
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/common/file/FileSystems.h"
@@ -412,9 +412,8 @@ TEST_F(SchedulerTest, wordCountStages) {
   // Result stage: merges the sorted reduce outputs.
   const auto& result = stages.resultStage();
   EXPECT_EQ(result.numTasks, 1);
-  auto read = std::dynamic_pointer_cast<const shuffle::ShuffleReadNode>(result.plan);
-  ASSERT_NE(read, nullptr) << result.plan->toString(true, true);
-  EXPECT_TRUE(read->isMerge());
+  EXPECT_TRUE(result.plan->is<core::MergeExchangeNode>())
+      << result.plan->toString(true, true);
 
   // The task binary deserializes to the same plan, again.
   for (const auto& stage : stages.stages) {
@@ -902,6 +901,28 @@ TEST_F(SchedulerTest, recomputesLostCachedOutput) {
   EXPECT_EQ(ranTasks[*cutKey], 6);
 }
 
+// Stored pages are read with the query's shuffle compression, and a read of no
+// columns still counts the rows.
+TEST_F(SchedulerTest, readsCompressedCachedOutput) {
+  auto path = writeCorpus(3, 100);
+  auto cached = ember_->read()
+                    .text(path)
+                    .select(upper(col("value")).as("upper"))
+                    .cache();
+  auto df = cached.groupBy("upper").count();
+  auto rows = cached.agg({countAll().as("n")});
+
+  auto [dag, backend] = scheduler(
+      {{"shuffle_compression_codec", "zstd"},
+       {"min_shuffle_compression_page_size_bytes", "0"}});
+  EXPECT_EQ(
+      sorted(toStrings(dag->runJob(*df.physicalPlan(), pool_.get()))),
+      sorted(toStrings(df.collectBatches())));
+  EXPECT_EQ(
+      toStrings(dag->runJob(*rows.physicalPlan(), pool_.get())),
+      toStrings(rows.collectBatches()));
+}
+
 // Query config that can change results is part of the key; Ember's own config
 // is not.
 TEST_F(SchedulerTest, keysCoverQueryConfig) {
@@ -942,6 +963,20 @@ TEST_F(SchedulerTest, kilnStoreMatchesFileStore) {
       }
     }
   }
+}
+
+// A cached table stored in Kiln is read through its data source.
+TEST_F(SchedulerTest, readsCachedOutputFromKiln) {
+  auto path = writeCorpus(3, 300);
+  auto cached = ember_->read()
+                    .text(path)
+                    .select(upper(col("value")).as("upper"))
+                    .cache();
+  auto df = cached.groupBy("upper").count();
+  auto [dag, backend] = scheduler(kilnConfig());
+  EXPECT_EQ(
+      sorted(toStrings(dag->runJob(*df.physicalPlan(), pool_.get()))),
+      sorted(toStrings(df.collectBatches())));
 }
 
 TEST_F(SchedulerTest, kilnStoreSpills) {

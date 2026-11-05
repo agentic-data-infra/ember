@@ -1,5 +1,5 @@
-# Sort shuffle: ShuffleWrite/ShuffleRead operators, data and index files per
-# map task or one Kiln chunk per map task, and the block transport.
+# Sort shuffle: the ShuffleWrite operator, an exchange source, data and index
+# files per map task or one Kiln chunk per map task, and the block transport.
 
 cxx_library(
     name = "shuffle",
