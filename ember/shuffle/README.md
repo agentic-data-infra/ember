@@ -47,10 +47,10 @@ block URLs with byte ranges,
 part.
 With `ember.shuffle.spill=false` (Kiln store only; the default is `true`),
 a map task does not spill runs to the executor's directory: each time its
-buffered pages pass the spill threshold or the arbitrator asks, it copies them, partition by
-partition, into one registered buffer and starts appending it to its chunk
-without waiting, so Kiln moves the bytes (over RDMA, one-sided writes of
-all the blocks at once) while the map task goes on. The next append, and the
+buffered pages pass the spill threshold or the arbitrator asks, it copies
+them, partition by partition, into one registered buffer and starts appending
+it to its chunk without waiting, so Kiln moves the bytes (over RDMA, one-sided
+writes of all the blocks at once) while the map task goes on. The next append, and the
 commit, first wait for the one in flight. The chunk is then a sequence of
 segments, each laid out partition by partition; the map's `MapStatus` lists
 the partition lengths of each segment (an output written at commit is one
