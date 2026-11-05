@@ -134,14 +134,15 @@ TEST_F(WriteTest, writesRangePartitionsInOrder) {
 }
 
 TEST_F(WriteTest, spillsSortOverMemoryLimit) {
-  // Two map tasks sort 50MB each in 32MB of memory.
+  // Two tasks sort 50MB each in 64MB of memory. They also buffer shuffle
+  // reads, and merging their spilled runs back needs more than 32MB.
   auto expected = writeInput(2, 500'000);
   const auto spilledBefore =
       facebook::velox::exec::globalSpillStats().spilledBytes.load();
   auto records = session({{"ember.default.parallelism", "2"},
                           {"ember.sort.range_partitions", "2"},
                           {"spill_enabled", "true"},
-                          {"query_max_memory_per_node", "32MB"},
+                          {"query_max_memory_per_node", "64MB"},
                           {"ember.shuffle.spill_threshold_bytes", "1048576"}})
                      .read()
                      .gensort(input().string())

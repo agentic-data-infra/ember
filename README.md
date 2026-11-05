@@ -49,8 +49,9 @@ git submodule update --init
 # Build Velox's dependencies into /opt/deps-gcc12 (once; takes a while).
 scripts/build_deps_gcc12.sh
 
-# Build Axiom + Velox (uses ~/source/axiom and ~/source/velox by default) and
-# generate third-party/generated/deps.bzl.
+# Build Axiom + Velox (uses ~/source/axiom and ~/source/velox by default, which
+# must be at the versions pinned in the script) and generate
+# third-party/generated/deps.bzl.
 scripts/build_deps.sh
 
 buck2 build //...
@@ -61,7 +62,29 @@ buck2 test //...
 locations (`BUILD_DIR` defaults to `~/source/axiom/_build/release-gcc12`).
 Re-run `scripts/build_deps.sh` (or just `scripts/gen_third_party.py`) whenever
 Velox or Axiom change. `scripts/gen_third_party.py` also generates Kiln's
-deps file in `third-party/kiln`, which Buck builds as the cell `kiln//`.
+deps file in `third-party/kiln`, which Buck builds as the cell `kiln//`. Buck
+does not see that the Axiom and Velox libraries changed: run `buck2 clean` after
+rebuilding them.
+
+### Updating Axiom and Velox
+
+Ember builds with [our fork of Axiom](https://github.com/agentic-data-infra/axiom):
+upstream Axiom plus the commits of the branch `ember`, each a candidate upstream
+pull request, and Velox at the commit Axiom's `velox` submodule pins. The
+versions are set at the top of `scripts/build_deps.sh`. To update:
+
+```
+cd ~/source/axiom
+git fetch https://github.com/facebookincubator/axiom.git main
+git rebase FETCH_HEAD ember
+git tag ember-YYYYMMDD
+git push --force-with-lease origin ember ember-YYYYMMDD
+git ls-tree HEAD velox      # the Velox commit to pin
+```
+
+Then set `AXIOM_REF` and `VELOX_REF`, check out the Velox commit in
+`~/source/velox`, run `scripts/build_deps.sh` and `buck2 clean`, and run the
+tests. Old tags stay, so that older Ember commits still build.
 
 ## Running WordCount
 

@@ -6,6 +6,7 @@
 | `common/`  | Runtime setup, function registry, text file format, file split and handle serde, row pages (see [common/README.md](common/README.md)). |
 | `driver/`  | Cuts plans into stages and schedules stages and tasks onto a backend (see [driver/README.md](driver/README.md)). |
 | `worker/`  | Runs serialized tasks as Velox tasks (see [worker/README.md](worker/README.md)). |
+| `axiom-extension/` | Ember's implementations of Axiom extension points, such as the range partitioning of sorted writes (see [axiom-extension/README.md](axiom-extension/README.md)). |
 | `shuffle/` | Shuffle writer and block transport interfaces, the file-based shuffle and its Velox operators (see [shuffle/README.md](shuffle/README.md)). |
 | `rpc/`     | fbthrift services between driver and workers (see [rpc/README.md](rpc/README.md)). |
 | `tests/`   | Build-integration smoke tests. |

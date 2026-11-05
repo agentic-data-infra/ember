@@ -7,5 +7,6 @@ cxx_library(
     header_namespace = "ember",
     exported_headers = glob(["*.h"]),
     exported_deps = ["//ember/driver:driver"],
+    deps = ["//ember/axiom-extension:axiom-extension"],
     visibility = ["PUBLIC"],
 )
