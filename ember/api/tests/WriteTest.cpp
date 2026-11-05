@@ -196,6 +196,24 @@ TEST_F(WriteTest, spillsSortOverMemoryLimit) {
   EXPECT_EQ(readOutput().second, expected);
 }
 
+TEST_F(WriteTest, arbitratorReclaimsShuffleMemory) {
+  // Each map task's 80MB of shuffle pages do not fit into 64MB, and are under
+  // the spill threshold: only the arbitrator can get them out of memory.
+  auto expected = writeInput(2, 800'000);
+  auto records = session({{"ember.default.parallelism", "2"},
+                          {"ember.sort.range_partitions", "2"},
+                          {"spill_enabled", "true"},
+                          {"query_max_memory_per_node", "64MB"},
+                          {"ember.shuffle.spill_threshold_bytes", "1073741824"}})
+                     .read()
+                     .gensort(input().string())
+                     .orderBy(col("key"))
+                     .write()
+                     .gensort(output().string());
+  EXPECT_EQ(records, 1'600'000);
+  EXPECT_EQ(readOutput().second, expected);
+}
+
 TEST_F(WriteTest, rejectsRowsThatAreNotRecords) {
   writeInput(1, 10);
   try {

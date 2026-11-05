@@ -202,6 +202,27 @@ TEST_F(KilnShuffleTest, appendsSegmentsWithoutSpillFiles) {
   EXPECT_EQ(info.size, 63);
 }
 
+// Without spills, released pages go to the chunk as a segment of their own.
+TEST_F(KilnShuffleTest, releaseMemoryAppendsSegment) {
+  auto mapWriter = writer(
+      15,
+      0,
+      1,
+      "attempt0",
+      ShuffleBlockStore::kDefaultSpillThreshold,
+      "dram",
+      kiln::kDefaultBucket,
+      /*spill=*/false);
+  mapWriter->collect(0, folly::IOBuf::copyBuffer("first"));
+  mapWriter->releaseMemory();
+  mapWriter->releaseMemory();
+  mapWriter->collect(0, folly::IOBuf::copyBuffer("second"));
+  auto status = mapWriter->commit();
+  EXPECT_EQ(status.segments.size(), 2);
+  EXPECT_EQ(readBlock(status, 0), (std::vector<std::string>{"first", "second"}));
+  EXPECT_TRUE(fs::is_empty(dir_));
+}
+
 // Appends of several Kiln blocks each, with pages left in memory at commit:
 // those go last, as one more segment.
 TEST_F(KilnShuffleTest, largeAppendsWithoutSpills) {

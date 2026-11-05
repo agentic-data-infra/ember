@@ -63,6 +63,10 @@ class ShuffleWriter {
   /// Appends one serialized page to 'partition'.
   virtual void collect(int32_t partition, std::unique_ptr<folly::IOBuf> page) = 0;
 
+  /// Moves the collected pages out of memory, as when they pass the spill
+  /// threshold.
+  virtual void releaseMemory() = 0;
+
   /// Makes the output visible to readers. If another attempt of the same map
   /// task already committed, keeps that output and discards this one.
   virtual MapStatus commit() = 0;
