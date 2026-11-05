@@ -1,9 +1,6 @@
-// RangePartitionFunction: fixed key-space slices, sort direction, nulls and
-// serde.
+// RangePartitionFunction: split points, sort direction, nulls and serde.
 
 #include <gtest/gtest.h>
-
-#include <random>
 
 #include "ember/shuffle/RangePartitionFunction.h"
 #include "ember/shuffle/Shuffle.h"
@@ -62,67 +59,51 @@ class RangePartitionFunctionTest : public testing::Test {
   std::shared_ptr<velox::memory::MemoryPool> pool_;
 };
 
-TEST_F(RangePartitionFunctionTest, slicesTheKeySpace) {
+TEST_F(RangePartitionFunctionTest, splitsAtBounds) {
+  const std::vector<std::string> bounds{
+      "b", std::string("c\0", 2), std::string("\xf0", 1)};
   auto input = keys(
-      {std::string(10, '\0'),
-       std::string("\x3f\xff", 2),
-       std::string("\x40", 1),
-       std::string("\x80\x00\x00\x00\x00\x00\x00\x00\x01", 9),
-       std::string("\xbf", 1),
-       std::string(10, '\xff'),
+      {std::string("a"),
+       std::string("b"),
+       std::string("bb"),
+       std::string("c"),
+       std::string("c\0", 2),
+       std::string("d"),
+       std::string("\xf0", 1),
+       std::string("\xf1", 1),
        std::string(),
        std::nullopt});
   EXPECT_EQ(
-      partition(RangePartitionFunctionSpec(0, true, true), 4, input),
-      (std::vector<uint32_t>{0, 0, 1, 2, 2, 3, 0, 0}));
+      partition(RangePartitionFunctionSpec(0, true, true, bounds), 4, input),
+      (std::vector<uint32_t>{0, 0, 1, 1, 1, 2, 2, 3, 0, 0}));
   EXPECT_EQ(
-      partition(RangePartitionFunctionSpec(0, true, false), 4, input),
-      (std::vector<uint32_t>{0, 0, 1, 2, 2, 3, 0, 3}));
+      partition(RangePartitionFunctionSpec(0, true, false, bounds), 4, input),
+      (std::vector<uint32_t>{0, 0, 1, 1, 1, 2, 2, 3, 0, 3}));
   // Descending: the largest keys come first.
   EXPECT_EQ(
-      partition(RangePartitionFunctionSpec(0, false, false), 4, input),
-      (std::vector<uint32_t>{3, 3, 2, 1, 1, 0, 3, 3}));
+      partition(RangePartitionFunctionSpec(0, false, false, bounds), 4, input),
+      (std::vector<uint32_t>{3, 3, 2, 2, 2, 1, 1, 0, 3, 3}));
   EXPECT_EQ(
       partition(RangePartitionFunctionSpec(0, true, true), 1, input),
       std::vector<uint32_t>(input->size(), 0));
 }
 
-TEST_F(RangePartitionFunctionTest, keepsSortOrderAndBalancesRandomKeys) {
-  std::mt19937 rng(7);
-  std::vector<std::optional<std::string>> values;
-  for (int i = 0; i < 10'000; ++i) {
-    std::string key(10, '\0');
-    for (auto& c : key) {
-      c = static_cast<char>(rng());
-    }
-    values.push_back(key);
-  }
-  auto input = keys(values);
-  constexpr int kPartitions = 8;
-  auto partitions =
-      partition(RangePartitionFunctionSpec(0, true, true), kPartitions, input);
-
-  std::vector<int32_t> counts(kPartitions);
-  for (auto p : partitions) {
-    ++counts[p];
-  }
-  for (auto count : counts) {
-    EXPECT_NEAR(count, 10'000 / kPartitions, 200);
-  }
-  // A smaller key never lands in a later partition.
-  for (size_t i = 0; i < values.size(); ++i) {
-    for (size_t j = i + 1; j < std::min(values.size(), i + 50); ++j) {
-      if (*values[i] < *values[j]) {
-        EXPECT_LE(partitions[i], partitions[j]);
-      } else {
-        EXPECT_GE(partitions[i], partitions[j]);
-      }
-    }
-  }
+TEST_F(RangePartitionFunctionTest, fewerBoundsThanPartitions) {
+  auto input = keys({std::string("a"), std::string("z"), std::nullopt});
+  const std::vector<std::string> bounds{"m"};
+  EXPECT_EQ(
+      partition(RangePartitionFunctionSpec(0, true, false, bounds), 4, input),
+      (std::vector<uint32_t>{0, 1, 3}));
+  EXPECT_EQ(
+      partition(RangePartitionFunctionSpec(0, false, true, bounds), 4, input),
+      (std::vector<uint32_t>{3, 2, 0}));
+  EXPECT_EQ(
+      partition(RangePartitionFunctionSpec(0, true, true), 4, input),
+      (std::vector<uint32_t>{0, 0, 0}));
 }
 
 TEST_F(RangePartitionFunctionTest, serde) {
-  RangePartitionFunctionSpec spec(2, false, true);
+  RangePartitionFunctionSpec spec(2, false, true, {std::string("\0\xff", 2)});
   auto copy = velox::ISerializable::deserialize<
       facebook::velox::core::PartitionFunctionSpec>(spec.serialize(), nullptr);
   EXPECT_EQ(copy->toString(), "RANGE(2 DESC NULLS FIRST)");

@@ -18,6 +18,7 @@
 #include "ember/driver/DagScheduler.h"
 #include "ember/driver/LocalBackend.h"
 #include "ember/driver/MapOutputTracker.h"
+#include "ember/driver/RangeBounds.h"
 #include "ember/functions.h"
 #include "ember/shuffle/KilnShuffle.h"
 #include "ember/shuffle/ShuffleConfig.h"
@@ -30,6 +31,7 @@
 #include "velox/dwio/parquet/reader/ParquetReader.h"
 #include "velox/dwio/parquet/writer/Writer.h"
 #include "velox/exec/tests/utils/LocalExchangeSource.h"
+#include "velox/vector/tests/utils/VectorMaker.h"
 #include "kiln/client/Client.h"
 #include "kiln/local/LocalCluster.h"
 
@@ -1160,6 +1162,88 @@ TEST_F(SchedulerTest, rangeSortStages) {
     auto plan = dag->stagePlan(*df.physicalPlan());
     EXPECT_EQ(plan.resultStage().numTasks, 1) << plan.toString();
   }
+}
+
+TEST_F(SchedulerTest, rangeBoundsSplitSampledRows) {
+  velox::test::VectorMaker maker(pool_.get());
+  // What reservoir_sample returns: rows read, and a sample of their keys. A
+  // null row is a task that read no rows.
+  auto sample = [&](std::optional<int64_t> processed,
+                    const std::vector<std::string>& keys) {
+    auto row = maker.rowVector(
+        {"processed_count", "sample"},
+        {maker.flatVector<int64_t>({processed.value_or(0)}),
+         maker.arrayVector<std::string>({keys})});
+    row->setNull(0, !processed.has_value());
+    return maker.rowVector({"sample"}, {row});
+  };
+
+  EXPECT_EQ(
+      rangeBounds({sample(4, {"d", "b", "a", "c"})}, 2),
+      (std::vector<std::string>{"b"}));
+  EXPECT_EQ(
+      rangeBounds({sample(8, {"a", "b", "c", "d", "e", "f", "g", "h"})}, 4),
+      (std::vector<std::string>{"b", "d", "f"}));
+  // The first task read 100 times as many rows per sampled key.
+  EXPECT_EQ(
+      rangeBounds(
+          {sample(1'000, {"m", "n", "o", "p"}),
+           sample(10, {"a", "b", "c", "d"})},
+          2),
+      (std::vector<std::string>{"n"}));
+  // A key that repeats is one split point: later ranges stay empty.
+  EXPECT_EQ(
+      rangeBounds({sample(4, {"a", "a", "a", "a"})}, 3),
+      (std::vector<std::string>{"a"}));
+  EXPECT_TRUE(rangeBounds({sample(std::nullopt, {})}, 3).empty());
+  EXPECT_TRUE(rangeBounds({}, 3).empty());
+}
+
+TEST_F(SchedulerTest, rangeSortOfSkewedKeysMatchesMergeSort) {
+  std::mt19937 rng(13);
+  {
+    std::ofstream out(dir_ / "input" / "lines.txt");
+    for (int i = 0; i < 5000; ++i) {
+      out << "sharedprefix" << rng() % 1000 << "\n";
+    }
+  }
+  auto lines = ember_->read().text((dir_ / "input").string() + "/");
+  auto [merge, mergeBackend] = scheduler();
+  auto [ranges, rangesBackend] =
+      scheduler({{DagScheduler::kRangeSortPartitions, "4"}});
+  for (const auto& df :
+       {lines.orderBy(col("value")), lines.orderBy(col("value").desc())}) {
+    auto plan = df.physicalPlan();
+    EXPECT_EQ(
+        toStrings(ranges->runJob(*plan, pool_.get())),
+        toStrings(merge->runJob(*plan, pool_.get())));
+  }
+}
+
+// Map outputs written again must use the split points of those that survive,
+// so the keys are sampled once.
+TEST_F(SchedulerTest, rangeSortSamplesOnceWhenOutputsAreRecomputed) {
+  auto path = writeCorpus(2, 200);
+  auto df = ember_->read().text(path).orderBy(col("value"));
+  auto [merge, mergeBackend] = scheduler();
+  auto expected = toStrings(merge->runJob(*df.physicalPlan(), pool_.get()));
+
+  std::optional<int32_t> mapStage;
+  int32_t mapTasks = 0;
+  auto [dag, backend] = scheduler(
+      {{DagScheduler::kRangeSortPartitions, "4"}},
+      nullptr,
+      [&](const StageAttemptInfo& info, FlakyBackend& flaky) {
+        if (!mapStage.has_value()) {
+          mapStage = info.stageId;
+          mapTasks = info.partitions.size();
+          flaky.removeShuffle(*info.shuffleId);
+        }
+      });
+  EXPECT_EQ(toStrings(dag->runJob(*df.physicalPlan(), pool_.get())), expected);
+  // The sample, the first attempt and the second.
+  ASSERT_TRUE(mapStage.has_value());
+  EXPECT_EQ(backend->launches(*mapStage), mapTasks * 3);
 }
 
 TEST_F(SchedulerTest, rangeSortMatchesMergeSort) {

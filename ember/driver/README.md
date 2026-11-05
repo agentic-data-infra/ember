@@ -44,10 +44,12 @@ itself (`ember/axiom-extension`), with a sort and a writer in each of the N
 tasks and a last stage that merges their write stats. For query results, the
 driver concatenates their rows in partition order, which is sorted order. Row-
 wise nodes (project, filter) may sit above the merge; a limit keeps the single
-merge task. The ranges are fixed slices of the key's first 8 bytes, with no
-sampling, so they balance only uniformly random keys such as gensort's. Only
-VARCHAR and VARBINARY first keys are range-partitioned; other sorts keep the
-merge task.
+merge task. The plan has no split points: before a stage writes a range
+shuffle, `DagScheduler` runs its tasks once more with the write replaced by a
+`reservoir_sample` of the key (`RangeBounds`), as Spark's `RangePartitioner`
+does, and fills the split points into the write. This reads the stage's input
+one extra time. Only VARCHAR and VARBINARY first keys are range-partitioned;
+other sorts keep the merge task.
 
 ## Lost shuffle outputs
 

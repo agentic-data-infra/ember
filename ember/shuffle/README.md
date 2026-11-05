@@ -11,7 +11,7 @@ The interfaces follow Presto C++'s `ShuffleInterface`.
 | `KilnShuffle` | The Kiln writer, which commits a map output as one Kiln chunk, and `co_fetchKilnBlock`, which reads a block's byte ranges of it. Both use a small pool of Kiln buffers per cluster. |
 | `ShuffleWrite` | `ShuffleWriteNode` and operator: partitions its input (hash, round robin, range or single), serializes it to Presto pages and hands them to a `ShuffleWriter`; commits at end of input. |
 | `ShuffleRead` | `ShuffleReadNode`: Velox's `Exchange` or `MergeExchange` fed by an `ExchangeSource` that fetches blocks through the `BlockTransport`. Splits are block URLs. A failed fetch fails the task with a `FetchFailure`. |
-| `RangePartitionFunction` | Range partitioning for a global sort: fixed slices of a VARCHAR or VARBINARY key's first 8 bytes, in the sort's direction, nulls first or last. |
+| `RangePartitionFunction` | Range partitioning for a global sort: split points on a VARCHAR or VARBINARY key, sampled by the driver, in the sort's direction, nulls first or last. |
 | `Shuffle` | `registerShuffle()`: plan node and partition function serde, operator translators and the exchange source factory. |
 
 On disk, map task M of shuffle S writes `shuffle_S_M.data`, frames of
