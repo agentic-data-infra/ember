@@ -111,25 +111,12 @@ std::string Executor::runTask(const std::string& bytes) {
     config.try_emplace(
         std::string(core::QueryConfig::kMaxMergeExchangeBufferSize),
         std::to_string(kMergeExchangeBufferBytes));
-    // With a memory limit, the task's pool cannot grow past it: the
-    // arbitrator makes its operators spill, if spilling is enabled, or fails
-    // the task.
-    std::shared_ptr<velox::memory::MemoryPool> taskPool;
-    if (auto it = config.find(core::QueryConfig::kQueryMaxMemoryPerNode);
-        it != config.end()) {
-      const auto capacity = velox::config::toCapacity(
-          it->second, velox::config::CapacityUnit::BYTE);
-      if (capacity > 0) {
-        taskPool = velox::memory::memoryManager()->addRootPool(
-            core::QueryCtx::generatePoolName(result.taskId), capacity);
-      }
-    }
     auto queryCtx = core::QueryCtx::create(
         driverExecutor_.get(),
         core::QueryConfig(std::move(config)),
         /*connectorConfigs=*/{},
         velox::cache::AsyncDataCache::getInstance(),
-        std::move(taskPool),
+        /*pool=*/nullptr,
         spillExecutor_.get(),
         result.taskId);
     const shuffle::ShuffleContextScope shuffle(

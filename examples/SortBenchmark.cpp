@@ -18,10 +18,8 @@
 // With ember.files.node_local=true, each node's workers read the input
 // files on that node's own disks.
 //
-// To sort more than fits in memory, add "spill_enabled=true
-// query_max_memory_per_node=<bytes per task, e.g. 2GB>", and keep
-// ember.shuffle.spill_threshold_bytes (64MB by default) well below that
-// limit: a map task holds both its sort and its shuffle buffer. With the
+// To sort more than fits in memory, add "spill_enabled=true" and, to use less
+// than 80% of the machine's memory, ember.worker.memory_bytes=<bytes>. With the
 // shuffle in Kiln (ember.shuffle.store=kiln), add
 // ember.shuffle.kiln.tier=dram+localfs (or localfs) when it is bigger than
 // Kiln's DRAM.

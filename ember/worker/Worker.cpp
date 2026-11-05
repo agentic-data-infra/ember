@@ -7,6 +7,7 @@
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <glog/logging.h>
 
+#include "ember/Runtime.h"
 #include "ember/rpc/Clients.h"
 #include "ember/worker/Executor.h"
 #include "ember/worker/NetworkBlockTransport.h"
@@ -62,6 +63,7 @@ Worker::Worker(WorkerOptions options)
                                   : std::max(4, 2 * options_.slots)} {
   VELOX_CHECK_GT(options_.slots, 0);
   VELOX_CHECK(!options_.localDirectory.empty());
+  initializeRuntime(options_.memoryBytes);
 }
 
 Worker::~Worker() {

@@ -5,7 +5,7 @@
 // write their output to the executor's shuffle store; result tasks return
 // their rows, or write them to part files and return only counts. Velox's
 // spill_enabled lets tasks spill into the shuffle directory; spilling starts
-// when a task reaches query_max_memory_per_node. In local mode the driver
+// when the tasks together reach the process's memory capacity. In local mode the driver
 // calls an executor in the same process; an ember-worker process wraps one
 // behind RPC.
 

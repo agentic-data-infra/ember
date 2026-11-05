@@ -49,6 +49,8 @@ struct WorkerOptions {
   uint16_t port{0};
   /// Tasks run at once.
   int32_t slots{1};
+  /// Bytes this process may use; see initializeRuntime().
+  int64_t memoryBytes{0};
   /// Threads running Velox drivers; 0 for max(4, 2 * slots).
   int32_t numThreads{0};
   /// Parent of the shuffle directories.

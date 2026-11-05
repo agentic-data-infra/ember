@@ -75,6 +75,9 @@ void setKilnBufferPools(
     size_t writeBuffers,
     size_t stagingBuffers = kDefaultKilnStagingBuffers);
 
+/// The bytes of the pools of one Kiln cluster.
+int64_t kilnPoolBytes();
+
 /// The process's pools of buffers for moving data from and to the Kiln
 /// cluster of metadata server 'metadata', each allocated (with RDMA,
 /// registered with the NIC) at its first use, so that no read or append

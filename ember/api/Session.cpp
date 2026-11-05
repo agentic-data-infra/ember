@@ -91,7 +91,16 @@ SessionState::SessionState(
       eagerAnalysis_{
           config_.contains("ember.eager_analysis") &&
           config_.at("ember.eager_analysis") == "true"} {
-  initializeRuntime();
+  const auto memoryBytes = config_.find(kWorkerMemoryBytes);
+  initializeRuntime(
+      memoryBytes != config_.end() ? folly::to<int64_t>(memoryBytes->second)
+                                   : 0);
+  VELOX_USER_CHECK(
+      !config_.contains(
+          std::string(velox::core::QueryConfig::kQueryMaxMemoryPerNode)),
+      "Tasks share the process's memory: set {} instead of {}",
+      kWorkerMemoryBytes,
+      velox::core::QueryConfig::kQueryMaxMemoryPerNode);
   std::string localDirectory;
   if (auto it = config_.find(kLocalDirectory); it != config_.end()) {
     localDirectory = it->second;
