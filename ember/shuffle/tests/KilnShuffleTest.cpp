@@ -704,12 +704,27 @@ TEST(KilnBlockUrlTest, roundTrip) {
       parseKilnLocation(kilnLocation("odd%name/x:1", "")).first,
       "odd%name/x:1");
 
-  // A fetch failure names the map output's location, as the driver knows it.
-  const FetchFailure failure{location, id};
-  auto found = FetchFailure::find("Error: " + failure.message("not found"));
-  ASSERT_TRUE(found.has_value());
-  EXPECT_EQ(found->location, location);
-  EXPECT_EQ(found->block, id);
+}
+
+// A reader's failure reaches the task it belongs to, and only that task.
+TEST_F(KilnShuffleTest, fetchFailureReachesItsTask) {
+  auto task = facebook::velox::memory::memoryManager()->addRootPool("task");
+  auto reader = task->addLeafChild("reader");
+  auto other = facebook::velox::memory::memoryManager()->addRootPool("other");
+  const BlockId first{1, 2, 3};
+  const BlockId second{4, 5, 6};
+  {
+    const FetchFailureScope scope(*task);
+    auto slot = FetchFailureSlot::of(*reader);
+    EXPECT_FALSE(scope.slot().failure().has_value());
+    EXPECT_THROW(slot->fail({"a", first}, "gone"), std::exception);
+    EXPECT_THROW(slot->fail({"b", second}, "gone"), std::exception);
+    ASSERT_TRUE(scope.slot().failure().has_value());
+    EXPECT_EQ(scope.slot().failure()->location, "a");
+    EXPECT_EQ(scope.slot().failure()->block, first);
+    EXPECT_FALSE(FetchFailureSlot::of(*other)->failure().has_value());
+  }
+  EXPECT_FALSE(FetchFailureSlot::of(*reader)->failure().has_value());
 }
 
 } // namespace

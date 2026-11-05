@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <filesystem>
+#include <map>
 #include <numeric>
 
 #include <folly/File.h>
@@ -14,6 +15,7 @@
 #include <folly/lang/Bits.h>
 
 #include "velox/common/base/Exceptions.h"
+#include "velox/common/memory/MemoryPool.h"
 
 namespace ember::shuffle {
 
@@ -411,33 +413,44 @@ std::vector<std::pair<int64_t, int64_t>> kilnBlockRanges(
 }
 
 namespace {
-constexpr std::string_view kFetchFailedTag = "[fetch-failed ";
+
+// The slots of running tasks, by root pool.
+folly::Synchronized<std::map<
+    const facebook::velox::memory::MemoryPool*,
+    std::shared_ptr<FetchFailureSlot>>>
+    fetchFailureSlots;
+
 } // namespace
 
-std::string FetchFailure::message(const std::string& cause) const {
-  return fmt::format("{}{}] {}", kFetchFailedTag, blockUrl(location, block), cause);
+std::shared_ptr<FetchFailureSlot> FetchFailureSlot::of(
+    const facebook::velox::memory::MemoryPool& pool) {
+  auto slots = fetchFailureSlots.rlock();
+  auto it = slots->find(pool.root());
+  return it != slots->end() ? it->second : std::make_shared<FetchFailureSlot>();
 }
 
-std::optional<FetchFailure> FetchFailure::find(const std::string& error) {
-  const auto start = error.find(kFetchFailedTag);
-  if (start == std::string::npos) {
-    return std::nullopt;
-  }
-  const auto urlStart = start + kFetchFailedTag.size();
-  const auto end = error.find(']', urlStart);
-  if (end == std::string::npos) {
-    return std::nullopt;
-  }
-  const auto url = error.substr(urlStart, end - urlStart);
-  if (!isBlockUrl(url)) {
-    return std::nullopt;
-  }
-  try {
-    auto [location, block] = parseBlockUrl(url);
-    return FetchFailure{std::move(location), block};
-  } catch (const std::exception&) {
-    return std::nullopt;
-  }
+void FetchFailureSlot::fail(FetchFailure failure, const std::string& cause) {
+  const auto url = blockUrl(failure.location, failure.block);
+  failure_.withWLock([&](auto& first) {
+    if (!first.has_value()) {
+      first = std::move(failure);
+    }
+  });
+  VELOX_FAIL("Cannot fetch {}: {}", url, cause);
+}
+
+std::optional<FetchFailure> FetchFailureSlot::failure() const {
+  return *failure_.rlock();
+}
+
+FetchFailureScope::FetchFailureScope(
+    const facebook::velox::memory::MemoryPool& pool)
+    : root_{*pool.root()}, slot_{std::make_shared<FetchFailureSlot>()} {
+  fetchFailureSlots.wlock()->emplace(&root_, slot_);
+}
+
+FetchFailureScope::~FetchFailureScope() {
+  fetchFailureSlots.wlock()->erase(&root_);
 }
 
 ShuffleBlockStore::ShuffleBlockStore(std::string location, std::string directory)

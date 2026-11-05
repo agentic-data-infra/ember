@@ -128,6 +128,7 @@ std::string Executor::runTask(const std::string& bytes) {
         std::move(taskPool),
         spillExecutor_.get(),
         result.taskId);
+    const shuffle::FetchFailureScope fetchFailures(*queryCtx->pool());
     // Created on the first spill, removed with the task.
     const auto spillDirectory = fmt::format(
         "{}/spill/{}_{}.{}_{}.{}",
@@ -207,7 +208,7 @@ std::string Executor::runTask(const std::string& bytes) {
         result.error = fmt::format(
             "Task ended as {}", exec::taskStateString(task->state()));
       }
-      result.fetchFailure = shuffle::FetchFailure::find(result.error);
+      result.fetchFailure = fetchFailures.slot().failure();
       if (result.fetchFailure.has_value()) {
         result.userError = false;
       }

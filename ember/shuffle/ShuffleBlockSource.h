@@ -26,15 +26,19 @@ std::shared_ptr<facebook::velox::exec::ExchangeSource> createShuffleBlockSource(
 /// from Kiln comes in pieces, so that it holds a few read buffers at a time.
 class BlockPageReader {
  public:
-  explicit BlockPageReader(const std::string& url);
+  /// 'pool' is a pool of the task that reads.
+  BlockPageReader(
+      const std::string& url,
+      const facebook::velox::memory::MemoryPool& pool);
   ~BlockPageReader();
 
-  /// The next pages, in order; none at the end of the block. Throws a
-  /// FetchFailure message if the block is gone.
+  /// The next pages, in order; none at the end of the block. Records a
+  /// FetchFailure and throws if the block is gone.
   std::vector<std::unique_ptr<folly::IOBuf>> nextPages();
 
  private:
   const std::string url_;
+  const std::shared_ptr<FetchFailureSlot> fetchFailures_;
   std::string location_;
   BlockId block_;
   std::unique_ptr<KilnBlockReader> kiln_;

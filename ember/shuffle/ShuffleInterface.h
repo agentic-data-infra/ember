@@ -17,8 +17,13 @@
 #include <utility>
 #include <vector>
 
+#include <folly/Synchronized.h>
 #include <folly/coro/Task.h>
 #include <folly/io/IOBuf.h>
+
+namespace facebook::velox::memory {
+class MemoryPool;
+}
 
 namespace ember::shuffle {
 
@@ -121,18 +126,47 @@ std::vector<std::pair<int64_t, int64_t>> kilnBlockRanges(const std::string& url)
 /// A reduce task could not fetch a block: its map output is lost, e.g. the
 /// executor that holds it died. The driver then recomputes the output rather
 /// than retrying the reduce task.
-///
-/// Velox passes an exchange source's error on to the task as a message only,
-/// so the failure travels inside the message (see message() and find()).
 struct FetchFailure {
   std::string location;
   BlockId block;
+};
 
-  /// "[fetch-failed <block url>] <cause>".
-  std::string message(const std::string& cause) const;
+/// Where a task's block readers leave a FetchFailure for the executor. Velox
+/// passes an exchange source's error on to the task as text only, so a reader
+/// records the failure here before it fails.
+class FetchFailureSlot {
+ public:
+  /// The slot of the task that owns 'pool', which FetchFailureScope registered,
+  /// or a slot of its own for a reader outside a task.
+  static std::shared_ptr<FetchFailureSlot> of(
+      const facebook::velox::memory::MemoryPool& pool);
 
-  /// The fetch failure in an error message, if any.
-  static std::optional<FetchFailure> find(const std::string& error);
+  /// Records 'failure', unless the task already has one, and throws.
+  [[noreturn]] void fail(FetchFailure failure, const std::string& cause);
+
+  /// The first failure recorded.
+  std::optional<FetchFailure> failure() const;
+
+ private:
+  folly::Synchronized<std::optional<FetchFailure>> failure_;
+};
+
+/// Gives the task with query pool 'pool' a FetchFailureSlot while it runs.
+class FetchFailureScope {
+ public:
+  explicit FetchFailureScope(const facebook::velox::memory::MemoryPool& pool);
+  ~FetchFailureScope();
+
+  FetchFailureScope(const FetchFailureScope&) = delete;
+  FetchFailureScope& operator=(const FetchFailureScope&) = delete;
+
+  const FetchFailureSlot& slot() const {
+    return *slot_;
+  }
+
+ private:
+  const facebook::velox::memory::MemoryPool& root_;
+  const std::shared_ptr<FetchFailureSlot> slot_;
 };
 
 } // namespace ember::shuffle
