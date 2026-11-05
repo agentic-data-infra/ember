@@ -4,8 +4,8 @@
 #include <set>
 #include <sstream>
 
-#include "ember/CachedTable.h"
-#include "ember/FileSerde.h"
+#include "axiom/connectors/file/core/FileTable.h"
+#include "ember/CachedConnector.h"
 #include "ember/ParquetConnector.h"
 #include "ember/driver/StageKey.h"
 #include "ember/shuffle/ShuffleWrite.h"
@@ -24,92 +24,46 @@ struct ReadInfo {
   bool broadcast;
 };
 
-core::TableScanNodePtr serializableScan(const core::TableScanNodePtr& scan) {
-  if (scan->tableHandle()->connectorId() == kParquetConnectorId) {
-    return scan;
-  }
-  const auto* handle =
-      dynamic_cast<const file::FileTableHandle*>(scan->tableHandle().get());
-  VELOX_USER_CHECK_NOT_NULL(
-      handle,
-      "Only file scans can be scheduled, not {}",
-      scan->tableHandle()->toString());
-  velox::connector::ColumnHandleMap assignments;
-  for (const auto& [name, column] : scan->assignments()) {
-    assignments[name] =
-        std::make_shared<SerializableFileColumnHandle>(column->name());
-  }
-  return std::make_shared<core::TableScanNode>(
-      scan->id(),
-      scan->outputType(),
-      SerializableFileTableHandle::from(*handle),
-      assignments);
-}
-
-// A scan of a cached table: a read of its stored output, projected to the
-// scan's columns.
-folly::dynamic cachedRead(
-    const core::TableScanNode& scan,
-    const std::string& id,
-    const CachedOutputResolver& cachedOutput,
-    int32_t& lastPlaceholder,
-    Stage& stage) {
-  VELOX_CHECK_NOT_NULL(cachedOutput, "No resolver for cached table {}", id);
-  const auto output = cachedOutput(id);
-  const auto shuffleId = --lastPlaceholder;
-  stage.shuffleInputs.push_back(
-      {scan.id(), shuffleId, false, id, output.key});
-  auto read = std::make_shared<core::ExchangeNode>(
-      scan.id(), output.type, output.serdeKind);
-  std::vector<std::string> names;
-  std::vector<core::TypedExprPtr> columns;
-  for (const auto& name : scan.outputType()->names()) {
-    const auto index =
-        output.schema->getChildIdx(scan.assignments().at(name)->name());
-    names.push_back(name);
-    columns.push_back(std::make_shared<core::FieldAccessTypedExpr>(
-        output.type->childAt(index), output.type->nameOf(index)));
-  }
-  return core::ProjectNode(
-             scan.id() + "_cached", std::move(names), std::move(columns), read)
-      .serialize();
-}
-
-// Serializes 'node', noting which shuffle each exchange reads and replacing
-// file handles with serializable ones. Node types serialize their sources under "sources"
-// in the order of sources(), so rewritten children are patched in there.
-folly::dynamic rewrite(
+// Notes what 'node' and its sources read: the shuffle of each exchange, the
+// stored output of each cached table and the files of each other scan.
+void collectInputs(
     const core::PlanNodePtr& node,
     const std::map<core::PlanNodeId, ReadInfo>& reads,
-    const CachedOutputResolver& cachedOutput,
+    const CachedKeyResolver& cachedKey,
     int32_t& lastPlaceholder,
     Stage& stage) {
-  if (auto exchange = std::dynamic_pointer_cast<const core::ExchangeNode>(node)) {
+  if (node->is<core::ExchangeNode>()) {
     auto it = reads.find(node->id());
     VELOX_CHECK(
         it != reads.end(), "Exchange {} reads no fragment", node->id());
     stage.shuffleInputs.push_back(
         {node->id(), it->second.shuffleId, it->second.broadcast});
-    return exchange->serialize();
+    return;
   }
   if (auto scan = std::dynamic_pointer_cast<const core::TableScanNode>(node)) {
-    if (const auto* handle = dynamic_cast<const file::FileTableHandle*>(
-            scan->tableHandle().get());
-        handle != nullptr &&
-        handle->schemaTableName().schema == kCachedSchema) {
-      return cachedRead(
-          *scan, handle->filePath(), cachedOutput, lastPlaceholder, stage);
+    const auto& handle = scan->tableHandle();
+    if (handle->connectorId() == kCachedConnectorId) {
+      VELOX_CHECK_NOT_NULL(
+          cachedKey, "No resolver for cached table {}", handle->name());
+      stage.shuffleInputs.push_back(
+          {scan->id(),
+           --lastPlaceholder,
+           false,
+           handle->name(),
+           cachedKey(handle->name())});
+      return;
     }
-    stage.scans.push_back(scan);
-    return serializableScan(scan)->serialize();
+    VELOX_USER_CHECK(
+        handle->connectorId() == kParquetConnectorId ||
+            dynamic_cast<const file::FileTableHandle*>(handle.get()) != nullptr,
+        "Only file scans can be scheduled, not {}",
+        handle->toString());
+    stage.scans.push_back(std::move(scan));
+    return;
   }
-  auto json = node->serialize();
-  const auto& sources = node->sources();
-  for (size_t i = 0; i < sources.size(); ++i) {
-    json["sources"][i] =
-        rewrite(sources[i], reads, cachedOutput, lastPlaceholder, stage);
+  for (const auto& source : node->sources()) {
+    collectInputs(source, reads, cachedKey, lastPlaceholder, stage);
   }
-  return json;
 }
 
 void visit(
@@ -159,7 +113,7 @@ StagePlan planStages(
     const optimizer::MultiFragmentPlan& plan,
     velox::memory::MemoryPool* pool,
     const std::map<std::string, std::string>& keyConfig,
-    const CachedOutputResolver& cachedOutput,
+    const CachedKeyResolver& cachedKey,
     bool materialize) {
   const auto& fragments = plan.fragments();
   VELOX_CHECK(!fragments.empty());
@@ -219,8 +173,12 @@ StagePlan planStages(
     }
 
     const auto& root = fragment->fragment.planNode;
+    const auto* output = root->as<core::PartitionedOutputNode>();
+    // With remote output (a range-sorted result), the scheduler collects the
+    // rows of each task.
+    auto plan = output != nullptr ? output->sources()[0] : root;
+    collectInputs(plan, reads, cachedKey, lastPlaceholder, stage);
     if (auto it = consumers.find(fragment->fragmentId); it != consumers.end()) {
-      const auto* output = root->as<core::PartitionedOutputNode>();
       VELOX_CHECK_NOT_NULL(output);
       int32_t numPartitions = output->numPartitions();
       if (output->isArbitrary()) {
@@ -231,27 +189,16 @@ StagePlan planStages(
         numPartitions = *consumerTasks;
       }
       stage.shuffleId = fragment->fragmentId;
-      auto write = shuffle::ShuffleWriteNode::fromPartitionedOutput(
+      plan = shuffle::ShuffleWriteNode::fromPartitionedOutput(
           *output, *stage.shuffleId, numPartitions);
-      stage.fragment = write->serialize();
-      stage.fragment["sources"][0] = rewrite(
-          output->sources()[0], reads, cachedOutput, lastPlaceholder, stage);
     } else {
       VELOX_USER_CHECK(
           fragment == order.back(),
           "Fragment {} has no consumer",
           fragment->fragmentId);
-      // With remote output (a range-sorted result), the scheduler collects
-      // the rows of each task.
-      const auto* output = root->as<core::PartitionedOutputNode>();
-      stage.fragment = rewrite(
-          output != nullptr ? output->sources()[0] : root,
-          reads,
-          cachedOutput,
-          lastPlaceholder,
-          stage);
     }
 
+    stage.fragment = plan->serialize();
     // The executor's view of the plan; also checks that it round-trips.
     stage.plan =
         velox::ISerializable::deserialize<core::PlanNode>(stage.fragment, pool);

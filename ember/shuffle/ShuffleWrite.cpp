@@ -78,6 +78,20 @@ std::shared_ptr<const ShuffleWriteNode> ShuffleWriteNode::withShuffleId(
       sources_[0]);
 }
 
+std::shared_ptr<const ShuffleWriteNode> ShuffleWriteNode::withPartitionFunction(
+    core::PartitionFunctionSpecPtr spec) const {
+  return std::make_shared<const ShuffleWriteNode>(
+      id(),
+      shuffleId_,
+      kind_,
+      keys_,
+      numPartitions_,
+      std::move(spec),
+      outputType_,
+      serdeKind_,
+      sources_[0]);
+}
+
 folly::dynamic ShuffleWriteNode::serialize() const {
   auto obj = PlanNode::serialize();
   obj["shuffleId"] = shuffleId_;

@@ -145,6 +145,11 @@ class StageHasher {
     for (const auto* key : {"id", "sources", "shuffleId"}) {
       params.erase(key);
     }
+    const auto* input = shuffleInput(node->id());
+    if (input != nullptr && input->cacheId.has_value()) {
+      // The id of a cached table differs by process; its key stands for it.
+      params.erase("tableHandle");
+    }
     canonicalize(params);
 
     std::string data = fmt::format(
@@ -163,28 +168,25 @@ class StageHasher {
       reason_ = fmt::format("calls {}", *call);
       return std::nullopt;
     }
-    if (node->is<core::TableScanNode>()) {
+    if (input != nullptr && input->cacheId.has_value()) {
+      if (!input->cacheKey.has_value()) {
+        reason_ = fmt::format("reads {}, which has no key", *input->cacheId);
+        return std::nullopt;
+      }
+      data += "cached " + *input->cacheKey;
+    } else if (input != nullptr) {
+      const auto& parent = *byShuffle_.at(input->shuffleId);
+      if (!parent.key.has_value()) {
+        reason_ = fmt::format("reads stage {}", parent.stageId);
+        return std::nullopt;
+      }
+      data += *parent.key;
+    } else if (node->is<core::TableScanNode>()) {
       auto files = fileIdentity(params["tableHandle"]);
       if (!files.has_value()) {
         return std::nullopt;
       }
       data += *files;
-    } else if (node->is<core::ExchangeNode>()) {
-      const auto& input = shuffleInput(node->id());
-      if (input.cacheId.has_value()) {
-        if (!input.cacheKey.has_value()) {
-          reason_ = fmt::format("reads {}, which has no key", *input.cacheId);
-          return std::nullopt;
-        }
-        data += "cached " + *input.cacheKey;
-      } else {
-        const auto& parent = *byShuffle_.at(input.shuffleId);
-        if (!parent.key.has_value()) {
-          reason_ = fmt::format("reads stage {}", parent.stageId);
-          return std::nullopt;
-        }
-        data += *parent.key;
-      }
     }
     auto key = hashOf(data);
     stage_.nodeKeys[node->id()] = key;
@@ -205,13 +207,14 @@ class StageHasher {
     return opts;
   }
 
-  const Stage::ShuffleInput& shuffleInput(const core::PlanNodeId& nodeId) const {
+  // What the exchange or cached scan 'nodeId' reads; nullptr for other nodes.
+  const Stage::ShuffleInput* shuffleInput(const core::PlanNodeId& nodeId) const {
     for (const auto& input : stage_.shuffleInputs) {
       if (input.nodeId == nodeId) {
-        return input;
+        return &input;
       }
     }
-    VELOX_FAIL("Exchange {} reads no shuffle", nodeId);
+    return nullptr;
   }
 
   // Renames column names by first use.

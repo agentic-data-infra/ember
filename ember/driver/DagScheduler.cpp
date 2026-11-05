@@ -9,6 +9,7 @@
 
 #include "axiom/connectors/ConnectorMetadata.h"
 #include "axiom/runner/LocalRunner.h"
+#include "ember/CachedConnector.h"
 #include "ember/CachedTable.h"
 #include "ember/FileSerde.h"
 #include "ember/ParquetConnector.h"
@@ -208,7 +209,7 @@ StagePlan DagScheduler::stagePlan(const optimizer::MultiFragmentPlan& plan) {
       plan,
       planPool_.get(),
       keyConfig_,
-      [this](const auto& id) { return cachedOutput(id); });
+      [this](const auto& id) { return cachedStagePlan(id).stages.back().key; });
 }
 
 StagePlan DagScheduler::cachedStagePlan(const std::string& id) {
@@ -218,20 +219,8 @@ StagePlan DagScheduler::cachedStagePlan(const std::string& id) {
       *table->plan(),
       planPool_.get(),
       keyConfig_,
-      [this](const auto& id) { return cachedOutput(id); },
+      [this](const auto& id) { return cachedStagePlan(id).stages.back().key; },
       /*materialize=*/true);
-}
-
-CachedOutput DagScheduler::cachedOutput(const std::string& id) {
-  const auto stages = cachedStagePlan(id);
-  const auto& last = stages.stages.back();
-  const auto* write = last.plan->as<shuffle::ShuffleWriteNode>();
-  VELOX_CHECK_NOT_NULL(write);
-  return CachedOutput{
-      findCachedTable(id)->schema,
-      write->outputType(),
-      write->serdeKind(),
-      last.key};
 }
 
 std::optional<int32_t> DagScheduler::storedShuffle(
@@ -728,6 +717,10 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
                        bool resultTask,
                        const std::vector<int32_t>& partitions)
       -> std::optional<std::vector<TaskDescription>> {
+    const auto compression =
+        velox::core::QueryConfig(
+            {options_.config.begin(), options_.config.end()})
+            .shuffleCompressionKind();
     std::vector<TaskDescription> tasks(partitions.size());
     for (size_t i = 0; i < partitions.size(); ++i) {
       const auto p = partitions[i];
@@ -759,7 +752,9 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
         }
         for (const auto& url : urls) {
           nodeSplits.push_back(
-              velox::exec::RemoteConnectorSplit(url).serialize());
+              input.cacheId.has_value()
+                  ? CachedBlockSplit(url, compression).serialize()
+                  : velox::exec::RemoteConnectorSplit(url).serialize());
         }
       }
       task.resultTask = resultTask;

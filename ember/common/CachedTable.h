@@ -1,11 +1,9 @@
-// Cached tables: how a cached Dataframe appears in the plans that read it.
+// Cached tables: the registry of cached Dataframes.
 //
 // Dataframe::cache() registers a CachedTable and starts a new plan with a scan
-// of it: table <id> under the file connector schema kCachedSchema. The
-// optimizer plans that scan like a file scan, without crossing it, so nothing
-// downstream of cache() moves into the cached plan. The driver never runs
-// such a scan: it materializes the cached plan as a stored shuffle and reads
-// that instead (driver/StagePlan.h, driver/DagScheduler.h).
+// of it: table <id> under schema kCachedSchema of the ember_cached connector
+// (CachedConnector.h). The driver materializes the cached plan as a stored
+// shuffle and the scan reads its blocks (driver/DagScheduler.h).
 
 #pragma once
 
@@ -48,9 +46,5 @@ std::shared_ptr<const CachedTable> registerCachedTable(
 
 /// The table with 'id', or nullptr if it is gone.
 std::shared_ptr<const CachedTable> findCachedTable(const std::string& id);
-
-/// Registers the file connector handler that gives cached tables their
-/// schema. Safe to call more than once.
-void registerCachedTableHandler();
 
 } // namespace ember

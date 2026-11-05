@@ -4,8 +4,8 @@ Turns an optimized plan into stages and runs them.
 
 | File | Contents |
 |------|----------|
-| `StagePlan` | Cuts an Axiom `MultiFragmentPlan` into stages in dependency order. Rewrites each fragment's plan JSON: a producer's `PartitionedOutput` becomes a `ShuffleWrite`, each `Exchange`/`MergeExchange` stays and reads a shuffle, file scans use serializable handles, and scans of cached tables read the cached output (below). Shuffle ids start as the producing stage's id; the scheduler renumbers them to be unique in its session. |
-| `StageKey` | Gives each stage a content key: a Merkle hash over its rewritten plan (node kind, parameters without node and shuffle ids, column names renamed by first use, code version, child keys). Scans add their files' path, size and mtime; an exchange adds the key of the stage it reads, so a key covers all of a stage's upstream. Calls to nondeterministic functions (`rand`, `uuid`, `now`, ...) and non-local inputs leave the node, and everything downstream, without a key. The code version is the driver executable's identity, so a rebuild changes every key. Query config that is not Ember's own (e.g. `session_timezone`), `ember.files.max_split_bytes` and `ember.sort.sample=false` go into every key. `explain()` and `onStageCompleted` show the keys. |
+| `StagePlan` | Cuts an Axiom `MultiFragmentPlan` into stages in dependency order. A producer's `PartitionedOutput` becomes a `ShuffleWrite`; the rest of a fragment's plan stays as Axiom made it. Notes what each stage reads: each `Exchange`/`MergeExchange` reads a shuffle, and scans of cached tables read the cached output (below). Shuffle ids start as the producing stage's id; the scheduler renumbers them to be unique in its session. |
+| `StageKey` | Gives each stage a content key: a Merkle hash over its plan (node kind, parameters without node and shuffle ids, column names renamed by first use, code version, child keys). Scans add their files' path, size and mtime; an exchange adds the key of the stage it reads, so a key covers all of a stage's upstream. Calls to nondeterministic functions (`rand`, `uuid`, `now`, ...) and non-local inputs leave the node, and everything downstream, without a key. The code version is the driver executable's identity, so a rebuild changes every key. Query config that is not Ember's own (e.g. `session_timezone`), `ember.files.max_split_bytes` and `ember.sort.sample=false` go into every key. `explain()` and `onStageCompleted` show the keys. |
 | `DagScheduler` | Runs a job: for each stage, enumerates splits (files cut into byte ranges, `ember.files.max_split_bytes`; small files packed into one task), adds shuffle block URLs from the tracker, builds one `TaskDescription` per task and runs the set. Recomputes lost shuffle outputs (below). Collects the result stage's rows. At the end it keeps the outputs of keyed map stages for reuse (below) and removes the rest. `onStageCompleted` sees every stage attempt. |
 | `KilnMemo` | With `ember.reuse.kiln`: stored outputs in Kiln's catalog, by stage key, for later programs (below). |
 | `TaskScheduler` | Launches a stage's tasks on the backend and waits. Retries a failed task up to `maxTaskAttempts` (4) times; errors from the user's program fail at once. A task that cannot fetch its input is not retried: the task set returns its fetch failure. |
@@ -119,11 +119,13 @@ session.
 
 `Dataframe::cache()` registers the Dataframe as a cached table
 (`common/CachedTable.h`) and returns a Dataframe that scans it. The optimizer
-plans that scan like a file scan, so nothing moves across it: a filter after
-`cache()` is not pushed into the cached plan, which is the point of the cut.
+plans that scan like any other. The `ember_cached` connector
+(`common/CachedConnector.h`) takes no filters, so nothing moves across it: a
+filter after `cache()` is not pushed into the cached plan, which is the point
+of the cut.
 
-`StagePlan` turns the scan into an `Exchange` reading the cached output plus a
-projection to the scan's columns. Before such a stage runs, the scheduler
+The scan stays in the stage and reads the blocks of the cached output, which
+come as `CachedBlockSplit`s. Before such a stage runs, the scheduler
 materializes the cached table: it plans the cached Dataframe with its last
 stage writing one shuffle partition per task (the stage feeding a plain
 gather already does; any other last stage gets a one-partition

@@ -6,6 +6,7 @@
 
 #include "axiom/logical_plan/PlanPrinter.h"
 #include "axiom/optimizer/ToVelox.h"
+#include "ember/CachedConnector.h"
 #include "ember/CachedTable.h"
 #include "ember/DataframeWriter.h"
 #include "ember/Session.h"
@@ -450,7 +451,7 @@ Dataframe Dataframe::cache() const {
       std::make_shared<const PlanStep>(
           nullptr,
           [id = table->id](lp::PlanBuilder& builder, const auto& /*context*/) {
-            builder.tableScan(SessionState::fileConnectorId(), kCachedSchema, id);
+            builder.tableScan(std::string(kCachedConnectorId), kCachedSchema, id);
           },
           table));
 }

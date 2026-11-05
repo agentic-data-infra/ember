@@ -1,5 +1,6 @@
 #include "ember/shuffle/ShuffleBlockSource.h"
 
+#include <folly/coro/BlockingWait.h>
 #include <folly/coro/Invoke.h>
 
 #include "ember/shuffle/FileShuffle.h"
@@ -218,6 +219,41 @@ std::shared_ptr<exec::ExchangeSource> createShuffleBlockSource(
   }
   return std::make_shared<ShuffleBlockSource>(
       url, destination, std::move(queue), pool);
+}
+
+BlockPageReader::BlockPageReader(const std::string& url) : url_{url} {
+  std::tie(location_, block_) = parseBlockUrl(url);
+  if (isKilnLocation(location_)) {
+    kiln_ = std::make_unique<KilnBlockReader>(url);
+  }
+}
+
+BlockPageReader::~BlockPageReader() = default;
+
+std::vector<std::unique_ptr<folly::IOBuf>> BlockPageReader::nextPages() {
+  try {
+    if (kiln_ == nullptr) {
+      if (fetched_) {
+        return {};
+      }
+      fetched_ = true;
+      auto transport = BlockTransport::instance();
+      return splitFrames(folly::coro::blockingWait(
+          transport->co_fetchBlock(location_, block_)));
+    }
+    while (!kiln_->atEnd()) {
+      pending_.append(folly::coro::blockingWait(kiln_->co_next()));
+      auto pages = takeFrames(pending_);
+      if (!pages.empty()) {
+        return pages;
+      }
+    }
+  } catch (const std::exception& e) {
+    const FetchFailure failure{location_, block_};
+    VELOX_FAIL(failure.message(e.what()));
+  }
+  VELOX_CHECK(pending_.empty(), "{} ends in a cut page", url_);
+  return {};
 }
 
 } // namespace ember::shuffle

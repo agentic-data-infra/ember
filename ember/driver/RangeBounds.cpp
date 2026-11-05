@@ -108,9 +108,7 @@ folly::dynamic sampleFragment(const Stage& stage, int32_t numTasks) {
       /*ignoreNullKeys=*/false,
       /*noGroupsSpanBatches=*/false,
       keys);
-  auto fragment = node->serialize();
-  fragment["sources"][0]["sources"][0] = stage.fragment["sources"][0];
-  return fragment;
+  return node->serialize();
 }
 
 velox::RowTypePtr sampleRowType() {
@@ -170,12 +168,10 @@ std::vector<std::string> rangeBounds(
 folly::dynamic withBounds(
     const Stage& stage,
     const std::vector<std::string>& bounds) {
+  const auto& write = rangeWrite(stage);
   const auto& spec = *std::dynamic_pointer_cast<
-      const shuffle::RangePartitionFunctionSpec>(
-      rangeWrite(stage).partitionFunctionSpec());
-  auto fragment = stage.fragment;
-  fragment["partitionFunctionSpec"] = spec.withBounds(bounds)->serialize();
-  return fragment;
+      const shuffle::RangePartitionFunctionSpec>(write.partitionFunctionSpec());
+  return write.withPartitionFunction(spec.withBounds(bounds))->serialize();
 }
 
 } // namespace ember::driver
