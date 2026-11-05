@@ -336,6 +336,23 @@ TEST_F(KilnFilesTest, writesParquetDataset) {
       velox::VeloxUserError);
 }
 
+TEST_F(KilnFilesTest, filtersParquetDataset) {
+  auto& ember = session({{std::string(kKilnFilesTier), "localfs"}});
+  std::vector<std::vector<velox::Variant>> rows;
+  for (int64_t i = 0; i < 100; ++i) {
+    rows.push_back({i});
+  }
+  ember.createDataframe(velox::ROW({"n"}, {velox::BIGINT()}), rows)
+      .write()
+      .parquet("kiln:///data/pq-filter");
+  EXPECT_EQ(
+      ember.read()
+          .parquet("kiln:///data/pq-filter/")
+          .filter(col("n") >= lit(90L))
+          .count(),
+      10);
+}
+
 TEST_F(KilnFilesTest, failedParquetWritePublishesNothing) {
   publish("pq-bad-in", {{"a", std::string(150, 'x')}});
   EXPECT_ANY_THROW(session()

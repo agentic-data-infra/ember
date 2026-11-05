@@ -238,6 +238,28 @@ TEST_F(StageKeyTest, inputFilesKeyTheirScans) {
   expectChangedFrom(touched, keys(wordCount()), 0);
 }
 
+TEST_F(StageKeyTest, parquetFiltersKeyTheirScans) {
+  const auto path = writeDocs(100);
+  auto filtered = [&](int64_t minScore) {
+    return keys(ember_->read()
+                    .parquet(path)
+                    .filter(col("int_score") >= lit(minScore))
+                    .groupBy("int_score")
+                    .count());
+  };
+  EXPECT_EQ(filtered(3), filtered(3));
+  expectChangedFrom(filtered(3), filtered(4), 0);
+}
+
+TEST_F(StageKeyTest, nondeterministicParquetFiltersHaveNoKey) {
+  auto plan = stages(ember_->read()
+                         .parquet(writeDocs(100))
+                         .filter(call("rand") < lit(0.5))
+                         .groupBy("int_score")
+                         .count());
+  EXPECT_FALSE(plan.stages[0].key.has_value()) << plan.toString();
+}
+
 TEST_F(StageKeyTest, nondeterministicPlansHaveNoKey) {
   auto lines = ember_->read().text(textPath());
 

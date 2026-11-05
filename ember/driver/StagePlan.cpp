@@ -6,6 +6,7 @@
 
 #include "ember/CachedTable.h"
 #include "ember/FileSerde.h"
+#include "ember/ParquetConnector.h"
 #include "ember/driver/StageKey.h"
 #include "ember/shuffle/ShuffleRead.h"
 #include "ember/shuffle/ShuffleWrite.h"
@@ -24,21 +25,24 @@ struct ReadInfo {
   bool broadcast;
 };
 
-core::TableScanNodePtr serializableScan(const core::TableScanNode& scan) {
+core::TableScanNodePtr serializableScan(const core::TableScanNodePtr& scan) {
+  if (scan->tableHandle()->connectorId() == kParquetConnectorId) {
+    return scan;
+  }
   const auto* handle =
-      dynamic_cast<const file::FileTableHandle*>(scan.tableHandle().get());
+      dynamic_cast<const file::FileTableHandle*>(scan->tableHandle().get());
   VELOX_USER_CHECK_NOT_NULL(
       handle,
       "Only file scans can be scheduled, not {}",
-      scan.tableHandle()->toString());
+      scan->tableHandle()->toString());
   velox::connector::ColumnHandleMap assignments;
-  for (const auto& [name, column] : scan.assignments()) {
+  for (const auto& [name, column] : scan->assignments()) {
     assignments[name] =
         std::make_shared<SerializableFileColumnHandle>(column->name());
   }
   return std::make_shared<core::TableScanNode>(
-      scan.id(),
-      scan.outputType(),
+      scan->id(),
+      scan->outputType(),
       SerializableFileTableHandle::from(*handle),
       assignments);
 }
@@ -102,7 +106,7 @@ folly::dynamic rewrite(
           *scan, handle->filePath(), cachedOutput, lastPlaceholder, stage);
     }
     stage.scans.push_back(scan);
-    return serializableScan(*scan)->serialize();
+    return serializableScan(scan)->serialize();
   }
   auto json = node->serialize();
   const auto& sources = node->sources();

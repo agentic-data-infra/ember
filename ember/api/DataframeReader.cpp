@@ -5,6 +5,7 @@
 #include "ember/Dataframe.h"
 #include "ember/GensortFileHandler.h"
 #include "ember/KilnFiles.h"
+#include "ember/ParquetConnector.h"
 #include "ember/Session.h"
 #include "ember/TextFileHandler.h"
 
@@ -46,7 +47,10 @@ Dataframe scan(
           [format, table = tablePath(path, session->config())](
               lp::PlanBuilder& builder, const auto& /*context*/) {
             builder.tableScan(
-                SessionState::fileConnectorId(), format, table);
+                format == kParquetSchema ? kParquetConnectorId
+                                         : SessionState::fileConnectorId(),
+                format,
+                table);
           }));
 }
 
@@ -57,7 +61,7 @@ Dataframe DataframeReader::text(const std::string& path) const {
 }
 
 Dataframe DataframeReader::parquet(const std::string& path) const {
-  return scan(session_, "parquet", path);
+  return scan(session_, kParquetSchema, path);
 }
 
 Dataframe DataframeReader::gensort(const std::string& path) const {

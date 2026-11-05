@@ -290,8 +290,13 @@ class StageHasher {
   }
 
   // Path, size and mtime of every file the scan reads. A directory stands for
-  // its files, in sorted order.
+  // its files, in sorted order. The handle's filters are in the node's
+  // parameters, but a filter that became a sample rate no longer calls rand().
   std::optional<std::string> fileIdentity(const folly::dynamic& handle) {
+    if (handle.get_ptr("sampleRate") != nullptr) {
+      reason_ = "samples its input";
+      return std::nullopt;
+    }
     if (nodeLocalFiles_) {
       reason_ = "reads node-local files";
       return std::nullopt;
@@ -303,7 +308,9 @@ class StageHasher {
       }
     }
     if (paths.empty()) {
-      paths.push_back(handle["filePath"].asString());
+      // A Hive handle's table name is the path.
+      const auto* path = handle.get_ptr("filePath");
+      paths.push_back((path != nullptr ? *path : handle["tableName"]).asString());
     }
     std::vector<fs::path> files;
     for (auto path : paths) {
