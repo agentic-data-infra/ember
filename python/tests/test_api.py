@@ -2,13 +2,50 @@
 (with PYTHONPATH=python and the extension built, see python/README.md)."""
 
 import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 
 import pyarrow as pa
 
+import ember
 from ember import Session
 from ember.functions import col, countAll, explode, lit, lower, split, sum
+
+
+class CodeVersionTest(unittest.TestCase):
+    def test_rebuilt_extension_changes_stage_keys(self):
+        script = """
+import re, sys
+from ember import Session
+ember = Session.builder.appName("CodeVersion").master("local[1]").getOrCreate()
+plan = ember.read.text(sys.argv[1]).groupBy("value").count().explainString()
+print(re.findall(r"\\[key ([0-9a-f]+)", plan))
+ember.stop()
+"""
+        with tempfile.TemporaryDirectory() as dir:
+            package = os.path.join(dir, "ember")
+            shutil.copytree(os.path.dirname(ember.__file__), package)
+            data = os.path.join(dir, "data.txt")
+            with open(data, "w") as file:
+                file.write("a\nb\n")
+
+            def keys():
+                result = subprocess.run(
+                    [sys.executable, "-c", script, data],
+                    env={**os.environ, "PYTHONPATH": dir, "GLOG_minloglevel": "2"},
+                    capture_output=True, text=True, check=True)
+                return result.stdout.strip().splitlines()[-1]
+
+            before = keys()
+            self.assertNotEqual(before, "[]")
+            self.assertEqual(keys(), before)
+            extension = os.path.join(package, "_ember.so")
+            stat = os.stat(extension)
+            os.utime(extension, (stat.st_atime, stat.st_mtime + 10))
+            self.assertNotEqual(keys(), before)
 
 
 class ApiTest(unittest.TestCase):

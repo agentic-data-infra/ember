@@ -12,8 +12,9 @@
 // optimizer makes up (count4, __p3) do not change keys. File column names,
 // literals and function names are kept, as are the result's column names.
 //
-// The code version is the identity of the driver's executable, which links
-// Velox, Axiom and the program's functions: any rebuild changes every key.
+// The code version is the identity of the file holding the driver's code, the
+// executable or the Python extension, which links Velox, Axiom and the
+// program's functions: any rebuild changes every key.
 // Query config that can change results (e.g. the session time zone) goes into
 // every key too.
 //
@@ -23,6 +24,8 @@
 // since the driver does not see them.
 
 #pragma once
+
+#include <filesystem>
 
 #include "ember/driver/StagePlan.h"
 
@@ -35,6 +38,10 @@ void computeStageKeys(
     const std::map<std::string, std::string>& config = {});
 
 /// Short form of a key, as explain() shows it.
+/// The file holding Ember's code: the executable, or the Python extension
+/// loaded into the interpreter. Its identity is the code version.
+std::filesystem::path codeFile();
+
 std::string shortKey(const std::string& key);
 
 } // namespace ember::driver
