@@ -12,7 +12,9 @@
 //
 // The sort runs as one merge task writing part-00000, or, with
 // EMBER_CONF=ember.sort.range_partitions=N, as N range-sorted tasks writing
-// part-00000 to part-N-1. The rows do not pass through the driver.
+// part-00000 to part-N-1. The rows do not pass through the driver. Gensort keys
+// are uniform, so this sets ember.sort.sample=false: fixed ranges balance them
+// without an extra pass over the input.
 // With ember.files.node_local=true, each node's workers read the input
 // files on that node's own disks.
 //
@@ -45,7 +47,8 @@ int main(int argc, char** argv) {
   auto builder = Session::builder();
   builder.appName("SortBenchmark")
       .master(argc > 3 ? argv[3] : "local[*]")
-      .config("ember.cluster.workers", argc > 4 ? argv[4] : "1");
+      .config("ember.cluster.workers", argc > 4 ? argv[4] : "1")
+      .config("ember.sort.sample", "false");
   auto ember = examples::withEnvConfig(builder).getOrCreate();
 
   const auto start = std::chrono::steady_clock::now();

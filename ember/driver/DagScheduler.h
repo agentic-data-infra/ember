@@ -105,10 +105,13 @@ class DagScheduler {
   static constexpr const char* kReuseInKiln = "ember.reuse.kiln";
   /// Config key: run a global sort without a limit as this many range-sorted
   /// result tasks instead of one merge task (StagePlan.h; default 0, off).
-  /// The ranges are fixed splits of the first sort key's bytes, which suits
-  /// uniformly random keys.
   static constexpr const char* kRangeSortPartitions =
       "ember.sort.range_partitions";
+  /// Config key: split ranges on a sample of the first sort key (RangeBounds.h),
+  /// which balances any keys but reads the sort's input one extra time (default
+  /// true). False uses fixed splits of the key's bytes, which suits uniformly
+  /// random keys only.
+  static constexpr const char* kRangeSortSample = "ember.sort.sample";
 
   DagScheduler(
       std::shared_ptr<SchedulerBackend> backend,
@@ -162,6 +165,9 @@ class DagScheduler {
   // outputs of the stages it reads.
   void runStage(StageState& stage, JobContext& job);
 
+  // The split points of range shuffle 'shuffleId', once sampled.
+  std::optional<std::vector<std::string>> storedRangeBounds(int32_t shuffleId);
+
   // The stages of cached table 'id', planned to store its output.
   StagePlan cachedStagePlan(const std::string& id);
 
@@ -206,8 +212,10 @@ class DagScheduler {
   const DagSchedulerOptions options_;
   const bool reuseOutputs_;
   const int32_t rangeSortPartitions_;
+  const bool sampleRanges_;
   const bool nodeLocalFiles_;
-  // Config that goes into stage keys: what is not Ember's own, and splits.
+  // Config that goes into stage keys: what is not Ember's own, splits, and
+  // sampling, as outputs of a range shuffle must all use the same split points.
   std::map<std::string, std::string> keyConfig_;
   TaskScheduler taskScheduler_;
   MapOutputTracker mapOutputTracker_;
@@ -229,6 +237,10 @@ class DagScheduler {
   std::shared_ptr<kiln::client::Client> kiln_;
   std::mutex bucketsMutex_;
   std::map<int32_t, uint64_t> kilnBuckets_;
+
+  // The split points of each range shuffle not yet removed.
+  std::mutex rangeBoundsMutex_;
+  std::map<int32_t, std::vector<std::string>> rangeBounds_;
 };
 
 } // namespace ember::driver

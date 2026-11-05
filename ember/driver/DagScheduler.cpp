@@ -1,5 +1,6 @@
 #include "ember/driver/DagScheduler.h"
 
+#include <numeric>
 #include <set>
 
 #include <folly/ScopeGuard.h>
@@ -11,6 +12,7 @@
 #include "ember/CachedTable.h"
 #include "ember/FileSerde.h"
 #include "ember/RowPages.h"
+#include "ember/driver/RangeBounds.h"
 #include "ember/shuffle/KilnShuffle.h"
 #include "ember/shuffle/ShuffleConfig.h"
 #include "ember/shuffle/ShuffleWrite.h"
@@ -84,6 +86,9 @@ DagScheduler::DagScheduler(
           options_.config.contains(kRangeSortPartitions)
               ? folly::to<int32_t>(options_.config.at(kRangeSortPartitions))
               : 0},
+      sampleRanges_{
+          !options_.config.contains(kRangeSortSample) ||
+          folly::to<bool>(options_.config.at(kRangeSortSample))},
       nodeLocalFiles_{
           options_.config.contains(kNodeLocalFiles) &&
           folly::to<bool>(options_.config.at(kNodeLocalFiles))},
@@ -105,6 +110,9 @@ DagScheduler::DagScheduler(
         key == kNodeLocalFiles) {
       keyConfig_[key] = value;
     }
+  }
+  if (!sampleRanges_) {
+    keyConfig_[kRangeSortSample] = "false";
   }
   rootPool_ = velox::memory::memoryManager()->addRootPool(
       fmt::format("ember_driver_{}_{}", options_.appName, ++schedulerCounter));
@@ -135,6 +143,10 @@ DagScheduler::~DagScheduler() {
 void DagScheduler::removeShuffle(int32_t shuffleId) {
   backend().removeShuffle(shuffleId);
   mapOutputTracker_.unregisterShuffle(shuffleId);
+  {
+    std::lock_guard<std::mutex> l(rangeBoundsMutex_);
+    rangeBounds_.erase(shuffleId);
+  }
   std::optional<uint64_t> bucket;
   {
     std::lock_guard<std::mutex> l(bucketsMutex_);
@@ -659,6 +671,16 @@ DagScheduler::JobResult DagScheduler::runStages(
   return jobResult;
 }
 
+std::optional<std::vector<std::string>> DagScheduler::storedRangeBounds(
+    int32_t shuffleId) {
+  std::lock_guard<std::mutex> l(rangeBoundsMutex_);
+  auto it = rangeBounds_.find(shuffleId);
+  if (it == rangeBounds_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
 void DagScheduler::runStage(StageState& state, JobContext& job) {
   const auto& stage = *state.stage;
   auto missingPartitions = [&]() {
@@ -672,6 +694,106 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
       }
     }
     return missing;
+  };
+
+  // The tasks of 'partitions', or nothing if an input was lost.
+  auto makeTasks = [&](const folly::dynamic& fragment,
+                       const std::string& jobId,
+                       int32_t attempt,
+                       bool resultTask,
+                       const std::vector<int32_t>& partitions)
+      -> std::optional<std::vector<TaskDescription>> {
+    std::vector<TaskDescription> tasks(partitions.size());
+    for (size_t i = 0; i < partitions.size(); ++i) {
+      const auto p = partitions[i];
+      auto& task = tasks[i];
+      task.jobId = jobId;
+      task.stageId = stage.stageId;
+      task.stageAttempt = attempt;
+      task.partition = p;
+      task.fragment = fragment;
+      task.splits = state.splits[p];
+      task.node = state.nodes[p];
+      for (const auto& input : stage.shuffleInputs) {
+        // An executor may have been lost since the inputs were complete.
+        if (!mapOutputTracker_.isComplete(input.shuffleId)) {
+          return std::nullopt;
+        }
+        auto& nodeSplits = task.splits[input.nodeId];
+        std::vector<std::string> urls;
+        if (input.cacheId.has_value()) {
+          // Map outputs p, p + numTasks, ...
+          const auto numMaps = *mapOutputTracker_.numMaps(input.shuffleId);
+          for (int32_t m = p; m < numMaps; m += state.numTasks()) {
+            auto mapUrls = mapOutputTracker_.mapBlockUrls(input.shuffleId, m);
+            urls.insert(urls.end(), mapUrls.begin(), mapUrls.end());
+          }
+        } else {
+          urls = mapOutputTracker_.blockUrls(
+              input.shuffleId, input.broadcast ? 0 : p);
+        }
+        for (const auto& url : urls) {
+          nodeSplits.push_back(
+              velox::exec::RemoteConnectorSplit(url).serialize());
+        }
+      }
+      task.resultTask = resultTask;
+      task.config = options_.config;
+      if (stage.shuffleId.has_value()) {
+        std::lock_guard<std::mutex> l(bucketsMutex_);
+        if (auto it = kilnBuckets_.find(*stage.shuffleId);
+            it != kilnBuckets_.end()) {
+          task.config[std::string(shuffle::kKilnBucket)] =
+              std::to_string(it->second);
+        }
+      }
+    }
+    return tasks;
+  };
+
+  auto removeFailedOutputs = [&](const auto& failures) {
+    for (const auto& failure : failures) {
+      // The executor may be alive, but its outputs of this shuffle are not
+      // to be trusted. If it is dead, the backend reports it lost too.
+      const auto removed = mapOutputTracker_.removeOutputsAt(
+          failure.block.shuffleId, failure.location);
+      LOG(WARNING) << "Stage " << stage.stageId << " could not fetch "
+                   << failure.block.toString() << " from "
+                   << failure.location << "; " << removed
+                   << " map outputs there will be recomputed";
+    }
+  };
+
+  // Split points from a sample of the stage's input, or nothing if inputs
+  // were lost. The tasks use their own job id, so that they do not clash with
+  // the stage's.
+  auto sampleRangeBounds = [&]() -> std::optional<std::vector<std::string>> {
+    std::vector<int32_t> all(state.numTasks());
+    std::iota(all.begin(), all.end(), 0);
+    auto tasks = makeTasks(
+        sampleFragment(stage, state.numTasks()),
+        job.jobId + "_sample",
+        state.incompleteAttempts,
+        /*resultTask=*/true,
+        all);
+    if (!tasks.has_value()) {
+      return std::nullopt;
+    }
+    auto taskSet = taskScheduler_.runTaskSet(std::move(*tasks));
+    if (!taskSet.fetchFailures.empty()) {
+      removeFailedOutputs(taskSet.fetchFailures);
+      return std::nullopt;
+    }
+    const auto type = sampleRowType();
+    std::vector<velox::RowVectorPtr> samples;
+    for (const auto& result : taskSet.results) {
+      if (result.has_value()) {
+        for (const auto& page : result->resultPages) {
+          samples.push_back(deserializeRows(page, type, job.pool.get()));
+        }
+      }
+    }
+    return rangeBounds(samples, numRanges(stage));
   };
 
   for (auto partitions = missingPartitions(); !partitions.empty();
@@ -701,6 +823,30 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
       }
     }
 
+    // A range shuffle keeps its split points when tasks run again, so that
+    // the partitions of old and new map outputs match.
+    std::optional<folly::dynamic> rangeFragment;
+    if (sampleRanges_ && writesRanges(stage)) {
+      auto bounds = storedRangeBounds(*stage.shuffleId);
+      if (!bounds.has_value()) {
+        // Only a shuffle restored from Kiln's catalog has outputs and no
+        // split points, and they cannot be told from its outputs.
+        VELOX_CHECK_EQ(
+            partitions.size(),
+            state.numTasks(),
+            "Stage {} cannot recompute part of a range shuffle read from Kiln",
+            stage.stageId);
+        bounds = sampleRangeBounds();
+        if (!bounds.has_value()) {
+          ++state.incompleteAttempts;
+          continue;
+        }
+        std::lock_guard<std::mutex> l(rangeBoundsMutex_);
+        rangeBounds_[*stage.shuffleId] = *bounds;
+      }
+      rangeFragment = withBounds(stage, *bounds);
+    }
+
     const auto attempt = state.attempts++;
     if (attempt > 0) {
       LOG(WARNING) << "Resubmitting stage " << stage.stageId << " of job "
@@ -709,53 +855,12 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
                    << " partitions";
     }
 
-    std::vector<TaskDescription> tasks(partitions.size());
-    bool inputsLost = false;
-    for (size_t i = 0; i < partitions.size() && !inputsLost; ++i) {
-      const auto p = partitions[i];
-      auto& task = tasks[i];
-      task.jobId = job.jobId;
-      task.stageId = stage.stageId;
-      task.stageAttempt = attempt;
-      task.partition = p;
-      task.fragment = stage.fragment;
-      task.splits = state.splits[p];
-      task.node = state.nodes[p];
-      for (const auto& input : stage.shuffleInputs) {
-        // An executor may have been lost since the inputs were complete.
-        if (!mapOutputTracker_.isComplete(input.shuffleId)) {
-          inputsLost = true;
-          break;
-        }
-        auto& nodeSplits = task.splits[input.nodeId];
-        std::vector<std::string> urls;
-        if (input.cacheId.has_value()) {
-          // Map outputs p, p + numTasks, ...
-          const auto numMaps = *mapOutputTracker_.numMaps(input.shuffleId);
-          for (int32_t m = p; m < numMaps; m += state.numTasks()) {
-            auto mapUrls = mapOutputTracker_.mapBlockUrls(input.shuffleId, m);
-            urls.insert(urls.end(), mapUrls.begin(), mapUrls.end());
-          }
-        } else {
-          urls = mapOutputTracker_.blockUrls(
-              input.shuffleId, input.broadcast ? 0 : p);
-        }
-        for (const auto& url : urls) {
-          nodeSplits.push_back(
-              velox::exec::RemoteConnectorSplit(url).serialize());
-        }
-      }
-      task.resultTask = state.isResult;
-      task.config = options_.config;
-      if (stage.shuffleId.has_value()) {
-        std::lock_guard<std::mutex> l(bucketsMutex_);
-        if (auto it = kilnBuckets_.find(*stage.shuffleId);
-            it != kilnBuckets_.end()) {
-          task.config[std::string(shuffle::kKilnBucket)] =
-              std::to_string(it->second);
-        }
-      }
-    }
+    auto tasks = makeTasks(
+        rangeFragment.has_value() ? *rangeFragment : stage.fragment,
+        job.jobId,
+        attempt,
+        state.isResult,
+        partitions);
 
     StageAttemptInfo info{
         .jobId = job.jobId,
@@ -764,8 +869,8 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
         .stageKey = stage.key,
         .shuffleId = stage.shuffleId,
         .partitions = partitions};
-    if (!inputsLost) {
-      auto taskSet = taskScheduler_.runTaskSet(std::move(tasks));
+    if (tasks.has_value()) {
+      auto taskSet = taskScheduler_.runTaskSet(std::move(*tasks));
       for (size_t i = 0; i < partitions.size(); ++i) {
         auto& result = taskSet.results[i];
         if (!result.has_value()) {
@@ -787,16 +892,7 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
           state.resultRows[p] = result->outputRows;
         }
       }
-      for (const auto& failure : taskSet.fetchFailures) {
-        // The executor may be alive, but its outputs of this shuffle are not
-        // to be trusted. If it is dead, the backend reports it lost too.
-        const auto removed = mapOutputTracker_.removeOutputsAt(
-            failure.block.shuffleId, failure.location);
-        LOG(WARNING) << "Stage " << stage.stageId << " could not fetch "
-                     << failure.block.toString() << " from "
-                     << failure.location << "; " << removed
-                     << " map outputs there will be recomputed";
-      }
+      removeFailedOutputs(taskSet.fetchFailures);
       info.fetchFailures = std::move(taskSet.fetchFailures);
     }
     if (!missingPartitions().empty()) {

@@ -1,5 +1,5 @@
-// RangePartitionFunction: fixed key-space slices, sort direction, nulls and
-// serde.
+// RangePartitionFunction: fixed key-space slices, split points, sort direction,
+// nulls and serde.
 
 #include <gtest/gtest.h>
 
@@ -121,8 +121,48 @@ TEST_F(RangePartitionFunctionTest, keepsSortOrderAndBalancesRandomKeys) {
   }
 }
 
+TEST_F(RangePartitionFunctionTest, splitsAtBounds) {
+  const std::vector<std::string> bounds{
+      "b", std::string("c\0", 2), std::string("\xf0", 1)};
+  auto input = keys(
+      {std::string("a"),
+       std::string("b"),
+       std::string("bb"),
+       std::string("c"),
+       std::string("c\0", 2),
+       std::string("d"),
+       std::string("\xf0", 1),
+       std::string("\xf1", 1),
+       std::string(),
+       std::nullopt});
+  EXPECT_EQ(
+      partition(RangePartitionFunctionSpec(0, true, true, bounds), 4, input),
+      (std::vector<uint32_t>{0, 0, 1, 1, 1, 2, 2, 3, 0, 0}));
+  EXPECT_EQ(
+      partition(RangePartitionFunctionSpec(0, true, false, bounds), 4, input),
+      (std::vector<uint32_t>{0, 0, 1, 1, 1, 2, 2, 3, 0, 3}));
+  // Descending: the largest keys come first.
+  EXPECT_EQ(
+      partition(RangePartitionFunctionSpec(0, false, false, bounds), 4, input),
+      (std::vector<uint32_t>{3, 3, 2, 2, 2, 1, 1, 0, 3, 3}));
+  EXPECT_EQ(
+      partition(RangePartitionFunctionSpec(0, true, true), 1, input),
+      std::vector<uint32_t>(input->size(), 0));
+}
+
+TEST_F(RangePartitionFunctionTest, fewerBoundsThanPartitions) {
+  auto input = keys({std::string("a"), std::string("z"), std::nullopt});
+  const std::vector<std::string> bounds{"m"};
+  EXPECT_EQ(
+      partition(RangePartitionFunctionSpec(0, true, false, bounds), 4, input),
+      (std::vector<uint32_t>{0, 1, 3}));
+  EXPECT_EQ(
+      partition(RangePartitionFunctionSpec(0, false, true, bounds), 4, input),
+      (std::vector<uint32_t>{3, 2, 0}));
+}
+
 TEST_F(RangePartitionFunctionTest, serde) {
-  RangePartitionFunctionSpec spec(2, false, true);
+  RangePartitionFunctionSpec spec(2, false, true, {std::string("\0\xff", 2)});
   auto copy = velox::ISerializable::deserialize<
       facebook::velox::core::PartitionFunctionSpec>(spec.serialize(), nullptr);
   EXPECT_EQ(copy->toString(), "RANGE(2 DESC NULLS FIRST)");

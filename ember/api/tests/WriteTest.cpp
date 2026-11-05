@@ -51,11 +51,12 @@ class WriteTest : public testing::Test {
     return dir_ / "output";
   }
 
-  // Writes 'numFiles' files of 'recordsPerFile' random records; returns the
-  // records, sorted.
+  // Writes 'numFiles' files of 'recordsPerFile' random records, whose first
+  // 'sharedPrefix' bytes are all the same; returns the records, sorted.
   std::vector<std::string> writeInput(
       int32_t numFiles,
-      int32_t recordsPerFile) {
+      int32_t recordsPerFile,
+      int32_t sharedPrefix = 0) {
     std::mt19937 random(42);
     std::vector<std::string> records;
     for (int32_t f = 0; f < numFiles; ++f) {
@@ -65,6 +66,7 @@ class WriteTest : public testing::Test {
         for (auto& c : record) {
           c = static_cast<char>(random());
         }
+        std::fill_n(record.begin(), sharedPrefix, '\xff');
         out.write(record.data(), record.size());
         records.push_back(std::move(record));
       }
@@ -131,6 +133,44 @@ TEST_F(WriteTest, writesRangePartitionsInOrder) {
           "part-00004",
           "part-00005"}));
   EXPECT_EQ(rows, expected);
+}
+
+TEST_F(WriteTest, skewedKeysShareARangeWithoutSampling) {
+  // Fixed slices of the key's first 8 bytes, 6 of which are the same.
+  auto expected = writeInput(4, 2000, /*sharedPrefix=*/6);
+  auto records = session({{"ember.sort.range_partitions", "6"},
+                          {"ember.sort.sample", "false"}})
+                     .read()
+                     .gensort(input().string())
+                     .orderBy(col("key"))
+                     .write()
+                     .gensort(output().string());
+  EXPECT_EQ(records, 8000);
+  auto [names, rows] = readOutput();
+  EXPECT_EQ(rows, expected);
+  EXPECT_EQ(fs::file_size(output() / "part-00005"), 8000 * 100);
+}
+
+TEST_F(WriteTest, balancesSkewedKeys) {
+  // Keys of 10 bytes, of which only the last 4 differ. The shared bytes are not
+  // valid UTF-8: split points must keep them, or all rows land in one range.
+  auto expected = writeInput(4, 2000, /*sharedPrefix=*/6);
+  auto records = session({{"ember.sort.range_partitions", "6"}})
+                     .read()
+                     .gensort(input().string())
+                     .orderBy(col("key"))
+                     .write()
+                     .gensort(output().string());
+  EXPECT_EQ(records, 8000);
+  auto [names, rows] = readOutput();
+  EXPECT_EQ(rows, expected);
+  for (const auto& name : names) {
+    if (name != "_SUCCESS") {
+      const auto recordsInPart = fs::file_size(output() / name) / 100;
+      EXPECT_GT(recordsInPart, 8000 / 6 / 2) << name;
+      EXPECT_LT(recordsInPart, 8000 / 6 * 2) << name;
+    }
+  }
 }
 
 TEST_F(WriteTest, spillsSortOverMemoryLimit) {

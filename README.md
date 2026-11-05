@@ -256,7 +256,9 @@ buck2 run //examples:threshold_sweep -- docs/ cache     # or nocache
 (`read().gensort(path)`: binary `key` and `payload` columns) and writes them
 back as files, `write().gensort(path)`, without passing through the driver. It
 runs as one merge task, or as N range tasks with
-`ember.sort.range_partitions=N`. `scripts/gensort.sh`
+`ember.sort.range_partitions=N`. Range sorts sample the key to pick their split
+points, which reads the input one extra time; gensort's keys are uniform, so the
+benchmark sets `ember.sort.sample=false` and uses fixed ranges. `scripts/gensort.sh`
 downloads gensort and valsort, writes the input and checks the output:
 
 ```

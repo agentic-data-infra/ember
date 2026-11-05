@@ -46,6 +46,7 @@ spec:
               value: >-
                 ember.files.node_local=true
                 ember.sort.range_partitions=12
+                ember.sort.sample=false
                 ember.shuffle.store=kiln
                 ember.shuffle.kiln.metadata=kiln-meta.ember.svc.cluster.local:7470
           ports:
