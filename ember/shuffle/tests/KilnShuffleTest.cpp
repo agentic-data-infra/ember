@@ -707,7 +707,7 @@ TEST(KilnBlockUrlTest, roundTrip) {
 }
 
 // A reader's failure reaches the task it belongs to, and only that task.
-TEST(FetchFailureSlotTest, recordsTheFirstFailureOfATask) {
+TEST_F(KilnShuffleTest, fetchFailureReachesItsTask) {
   auto task = facebook::velox::memory::memoryManager()->addRootPool("task");
   auto reader = task->addLeafChild("reader");
   auto other = facebook::velox::memory::memoryManager()->addRootPool("other");
