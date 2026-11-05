@@ -200,6 +200,11 @@ TEST_F(StageKeyTest, shuffleTargetIsNotInTheKeys) {
   }
 }
 
+// The test links Ember statically; python/tests covers the extension.
+TEST_F(StageKeyTest, codeFileIsTheObjectHoldingEmber) {
+  EXPECT_EQ(codeFile(), fs::canonical("/proc/self/exe"));
+}
+
 TEST_F(StageKeyTest, changesKeyTheirStageAndDownstream) {
   // Stages: scan to partial count | final count and sort | merge.
   const auto base = keys(wordCount());

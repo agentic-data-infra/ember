@@ -1,5 +1,8 @@
 #include "ember/driver/StageKey.h"
 
+#include <dlfcn.h>
+#include <link.h>
+
 #include <filesystem>
 #include <map>
 #include <set>
@@ -62,15 +65,13 @@ std::string hashOf(const std::string& data) {
   return fmt::format("{:016x}{:016x}", h1, h2);
 }
 
-// The driver's executable, which statically links everything a plan runs.
+// The identity of the file that statically links everything a plan runs.
 const std::string& codeVersion() {
   static const std::string version = [] {
-    std::error_code ec;
-    const auto exe = fs::read_symlink("/proc/self/exe", ec);
-    VELOX_CHECK(!ec, "Cannot find the executable: {}", ec.message());
-    const auto size = fs::file_size(exe);
-    const auto mtime = fs::last_write_time(exe).time_since_epoch().count();
-    return hashOf(fmt::format("{}\n{}\n{}", exe.string(), size, mtime));
+    const auto file = codeFile();
+    const auto size = fs::file_size(file);
+    const auto mtime = fs::last_write_time(file).time_since_epoch().count();
+    return hashOf(fmt::format("{}\n{}\n{}", file.string(), size, mtime));
   }();
   return version;
 }
@@ -375,6 +376,23 @@ void computeStageKeys(
       byShuffle[*stage.shuffleId] = &stage;
     }
   }
+}
+
+std::filesystem::path codeFile() {
+  Dl_info info;
+  link_map* object = nullptr;
+  VELOX_CHECK_NE(
+      dladdr1(
+          reinterpret_cast<const void*>(&codeFile),
+          &info,
+          reinterpret_cast<void**>(&object),
+          RTLD_DL_LINKMAP),
+      0,
+      "Cannot find the object file of Ember's code");
+  // The main program has no name here.
+  return fs::canonical(
+      object->l_name[0] != '\0' ? fs::path(object->l_name)
+                                 : fs::path("/proc/self/exe"));
 }
 
 std::string shortKey(const std::string& key) {
