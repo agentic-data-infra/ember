@@ -159,6 +159,19 @@ class SchedulerTest : public testing::Test {
     kiln_ = nullptr;
   }
 
+  // Replaces the active session, until the end of the test, with one whose
+  // global sorts plan 4 ranges.
+  Session& rangeSession() {
+    ember_->stop();
+    ember_ = Session::builder()
+                 .appName("SchedulerRangeTest")
+                 .master("local[4]")
+                 .config(DagScheduler::kRangeSortPartitions, "4")
+                 .getOrCreate();
+    rangeSession_ = true;
+    return *ember_;
+  }
+
   // Config for map outputs in the test's Kiln cluster.
   static std::map<std::string, std::string> kilnConfig() {
     return {
@@ -182,6 +195,13 @@ class SchedulerTest : public testing::Test {
   }
 
   void TearDown() override {
+    if (rangeSession_) {
+      ember_->stop();
+      ember_ = Session::builder()
+                   .appName("SchedulerTest")
+                   .master("local[4]")
+                   .getOrCreate();
+    }
     fs::remove_all(dir_);
   }
 
@@ -361,6 +381,7 @@ class SchedulerTest : public testing::Test {
   static inline std::optional<Session> ember_;
   static inline kiln::local::LocalCluster* kiln_{nullptr};
   fs::path dir_;
+  bool rangeSession_{false};
   std::shared_ptr<velox::memory::MemoryPool> rootPool_;
   std::shared_ptr<velox::memory::MemoryPool> pool_;
   int32_t localRunnerQueries_{0};
@@ -1132,12 +1153,12 @@ TEST_F(SchedulerTest, kilnReuseNeedsTheKilnStore) {
 
 TEST_F(SchedulerTest, rangeSortStages) {
   auto path = writeCorpus(3, 100);
-  auto lines = ember_->read().text(path);
-  auto [dag, backend] =
-      scheduler({{DagScheduler::kRangeSortPartitions, "4"}});
+  auto& session = rangeSession();
+  auto lines = session.read().text(path);
+  auto [dag, backend] = scheduler();
 
-  // The sorting stage writes 4 ranges of its first key, and the result stage
-  // merges each range in its own task.
+  // The first stage writes 4 ranges of the first key, and the result stage
+  // sorts each range in its own task, with no merge.
   auto stages = dag->stagePlan(
       *lines.orderBy(col("value").desc())
            .select(length(col("value")).as("n"))
@@ -1150,6 +1171,11 @@ TEST_F(SchedulerTest, rangeSortStages) {
   EXPECT_EQ(
       write->partitionFunctionSpec()->toString(), "RANGE(0 DESC NULLS LAST)");
   EXPECT_EQ(stages.resultStage().numTasks, 4);
+  const auto resultPlan = stages.resultStage().plan->toString(true, true);
+  EXPECT_NE(resultPlan.find("OrderBy"), std::string::npos) << resultPlan;
+  EXPECT_EQ(resultPlan.find("PartitionedOutput"), std::string::npos)
+      << resultPlan;
+  ASSERT_EQ(stages.resultStage().shuffleInputs.size(), 1);
   for (const auto& stage : stages.stages) {
     auto copy = velox::ISerializable::deserialize<core::PlanNode>(
         folly::parseJson(folly::toJson(stage.fragment)), pool_.get());
@@ -1157,8 +1183,11 @@ TEST_F(SchedulerTest, rangeSortStages) {
   }
 
   // A limit, or a first key that is not a string, keeps the one merge task.
-  for (const auto& df :
-       {lines.orderBy(col("value")).limit(5), wordCount(path)}) {
+  auto counts = session.read()
+                    .text(path)
+                    .select(length(col("value")).as("n"))
+                    .orderBy(col("n"));
+  for (const auto& df : {lines.orderBy(col("value")).limit(5), counts}) {
     auto plan = dag->stagePlan(*df.physicalPlan());
     EXPECT_EQ(plan.resultStage().numTasks, 1) << plan.toString();
   }
@@ -1207,31 +1236,40 @@ TEST_F(SchedulerTest, rangeSortOfSkewedKeysMatchesMergeSort) {
       out << "sharedprefix" << rng() % 1000 << "\n";
     }
   }
-  auto lines = ember_->read().text((dir_ / "input").string() + "/");
+  auto lines = [&]() {
+    return ember_->read().text((dir_ / "input").string() + "/");
+  };
   auto [merge, mergeBackend] = scheduler();
-  auto [ranges, rangesBackend] =
-      scheduler({{DagScheduler::kRangeSortPartitions, "4"}});
-  for (const auto& df :
-       {lines.orderBy(col("value")), lines.orderBy(col("value").desc())}) {
-    auto plan = df.physicalPlan();
-    EXPECT_EQ(
-        toStrings(ranges->runJob(*plan, pool_.get())),
-        toStrings(merge->runJob(*plan, pool_.get())));
-  }
+  auto [ranges, rangesBackend] = scheduler();
+  const auto ascending = toStrings(merge->runJob(
+      *lines().orderBy(col("value")).physicalPlan(), pool_.get()));
+  const auto descending = toStrings(merge->runJob(
+      *lines().orderBy(col("value").desc()).physicalPlan(), pool_.get()));
+  rangeSession();
+  EXPECT_EQ(
+      toStrings(ranges->runJob(
+          *lines().orderBy(col("value")).physicalPlan(), pool_.get())),
+      ascending);
+  EXPECT_EQ(
+      toStrings(ranges->runJob(
+          *lines().orderBy(col("value").desc()).physicalPlan(), pool_.get())),
+      descending);
 }
 
 // Map outputs written again must use the split points of those that survive,
 // so the keys are sampled once.
 TEST_F(SchedulerTest, rangeSortSamplesOnceWhenOutputsAreRecomputed) {
   auto path = writeCorpus(2, 200);
-  auto df = ember_->read().text(path).orderBy(col("value"));
   auto [merge, mergeBackend] = scheduler();
-  auto expected = toStrings(merge->runJob(*df.physicalPlan(), pool_.get()));
+  auto expected = toStrings(merge->runJob(
+      *ember_->read().text(path).orderBy(col("value")).physicalPlan(),
+      pool_.get()));
 
+  auto df = rangeSession().read().text(path).orderBy(col("value"));
   std::optional<int32_t> mapStage;
   int32_t mapTasks = 0;
   auto [dag, backend] = scheduler(
-      {{DagScheduler::kRangeSortPartitions, "4"}},
+      {},
       nullptr,
       [&](const StageAttemptInfo& info, FlakyBackend& flaky) {
         if (!mapStage.has_value()) {
@@ -1248,7 +1286,8 @@ TEST_F(SchedulerTest, rangeSortSamplesOnceWhenOutputsAreRecomputed) {
 
 TEST_F(SchedulerTest, rangeSortSamplesUnlessTurnedOff) {
   auto path = writeCorpus(2, 200);
-  auto plan = ember_->read().text(path).orderBy(col("value")).physicalPlan();
+  auto plan =
+      rangeSession().read().text(path).orderBy(col("value")).physicalPlan();
   std::optional<int32_t> mapStage;
   int32_t mapTasks = 0;
   auto onStage = [&](const StageAttemptInfo& info, FlakyBackend&) {
@@ -1258,18 +1297,14 @@ TEST_F(SchedulerTest, rangeSortSamplesUnlessTurnedOff) {
     }
   };
 
-  auto [fixed, fixedBackend] = scheduler(
-      {{DagScheduler::kRangeSortPartitions, "4"},
-       {DagScheduler::kRangeSortSample, "false"}},
-      nullptr,
-      onStage);
+  auto [fixed, fixedBackend] =
+      scheduler({{DagScheduler::kRangeSortSample, "false"}}, nullptr, onStage);
   fixed->runJob(*plan, pool_.get());
   ASSERT_TRUE(mapStage.has_value());
   EXPECT_EQ(fixedBackend->launches(*mapStage), mapTasks);
 
   mapStage.reset();
-  auto [sampled, sampledBackend] = scheduler(
-      {{DagScheduler::kRangeSortPartitions, "4"}}, nullptr, onStage);
+  auto [sampled, sampledBackend] = scheduler({}, nullptr, onStage);
   sampled->runJob(*plan, pool_.get());
   ASSERT_TRUE(mapStage.has_value());
   EXPECT_EQ(sampledBackend->launches(*mapStage), mapTasks * 2);
@@ -1293,36 +1328,48 @@ TEST_F(SchedulerTest, rangeSortMatchesMergeSort) {
       out << line << "\n";
     }
   }
-  auto lines = ember_->read().text((dir_ / "input").string() + "/");
-  // About half the keys are null.
-  auto withNulls = lines.select(
-      expr("CASE WHEN value >= 'P' THEN value END").as("key"), col("value"));
-  std::vector<std::pair<std::string, Dataframe>> queries = {
-      {"ascending", lines.orderBy(col("value"))},
-      {"descending", lines.orderBy(col("value").desc())},
-      {"projected",
-       lines.orderBy(col("value"))
-           .select(col("value"), length(col("value")).as("n"))
-           .filter(col("n") > 3)},
-      {"nullsFirst", withNulls.orderBy(col("key"), col("value"))},
-      {"nullsLast", withNulls.orderBy(col("key").desc(), col("value"))},
+  auto queries = [&]() {
+    auto lines = ember_->read().text((dir_ / "input").string() + "/");
+    // About half the keys are null.
+    auto withNulls = lines.select(
+        expr("CASE WHEN value >= 'P' THEN value END").as("key"), col("value"));
+    return std::vector<std::pair<std::string, Dataframe>>{
+        {"ascending", lines.orderBy(col("value"))},
+        {"descending", lines.orderBy(col("value").desc())},
+        {"projected",
+         lines.orderBy(col("value"))
+             .select(col("value"), length(col("value")).as("n"))
+             .filter(col("n") > 3)},
+        {"nullsFirst", withNulls.orderBy(col("key"), col("value"))},
+        {"nullsLast", withNulls.orderBy(col("key").desc(), col("value"))},
+    };
   };
   auto [merge, mergeBackend] = scheduler();
-  auto [ranges, rangesBackend] =
-      scheduler({{DagScheduler::kRangeSortPartitions, "4"}});
-  for (const auto& [query, df] : queries) {
-    SCOPED_TRACE(query);
-    auto plan = df.physicalPlan();
-    auto expected = toStrings(merge->runJob(*plan, pool_.get()));
-    ASSERT_FALSE(expected.empty());
+  std::map<std::string, std::vector<std::string>> expected;
+  for (const auto& [query, df] : queries()) {
+    auto rows = toStrings(merge->runJob(*df.physicalPlan(), pool_.get()));
+    ASSERT_FALSE(rows.empty());
     if (query.starts_with("nulls")) {
-      EXPECT_EQ(expected.front().starts_with("{null"), query == "nullsFirst");
-      EXPECT_EQ(expected.back().starts_with("{null"), query == "nullsLast");
+      EXPECT_EQ(rows.front().starts_with("{null"), query == "nullsFirst");
+      EXPECT_EQ(rows.back().starts_with("{null"), query == "nullsLast");
     }
-    const auto resultStage = ranges->stagePlan(*plan).resultStage().stageId;
-    const auto launches = rangesBackend->launches(resultStage);
-    EXPECT_EQ(toStrings(ranges->runJob(*plan, pool_.get())), expected);
-    EXPECT_EQ(rangesBackend->launches(resultStage) - launches, 4);
+    expected[query] = std::move(rows);
+  }
+
+  rangeSession();
+  for (bool sample : {true, false}) {
+    auto [ranges, rangesBackend] = scheduler(
+        {{DagScheduler::kRangeSortSample, sample ? "true" : "false"}});
+    for (const auto& [query, df] : queries()) {
+      SCOPED_TRACE(query + (sample ? " sampled" : " fixed"));
+      auto plan = df.physicalPlan();
+      const auto stages = ranges->stagePlan(*plan);
+      EXPECT_EQ(stages.resultStage().numTasks, 4) << stages.toString();
+      const auto resultStage = stages.resultStage().stageId;
+      const auto launches = rangesBackend->launches(resultStage);
+      EXPECT_EQ(toStrings(ranges->runJob(*plan, pool_.get())), expected[query]);
+      EXPECT_EQ(rangesBackend->launches(resultStage) - launches, 4);
+    }
   }
 }
 

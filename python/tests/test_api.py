@@ -86,5 +86,26 @@ class ApiTest(unittest.TestCase):
             bool(col("a") > 1)
 
 
+class RangeSortTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.ember = (
+            Session.builder.appName("PythonRangeSortTest")
+            .master("local[2]")
+            .config("ember.sort.range_partitions", "4")
+            .getOrCreate()
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.ember.stop()
+
+    def test_order_by_collect(self):
+        names = [f"same-prefix-{i:04}" for i in range(1000)]
+        df = self.ember.createDataFrame(pa.table({"name": names[::-1]}))
+        self.assertEqual(df.orderBy("name").collect(), [(name,) for name in names])
+        self.assertEqual(df.orderBy(col("name").desc()).collect(), [(name,) for name in names[::-1]])
+
+
 if __name__ == "__main__":
     unittest.main()
