@@ -14,6 +14,7 @@
 
 namespace ember::driver {
 
+namespace core = facebook::velox::core;
 namespace fs = std::filesystem;
 namespace velox = facebook::velox;
 
@@ -74,12 +75,6 @@ const std::string& codeVersion() {
   return version;
 }
 
-bool isPlanNode(const folly::dynamic& obj) {
-  const auto* name = obj.get_ptr("name");
-  return name != nullptr && name->isString() &&
-      name->getString().ends_with("Node");
-}
-
 // Keys whose values are never column names.
 bool isOpaqueKey(const std::string& key) {
   return key == "name" || key == "type" || key == "functionName" ||
@@ -138,27 +133,23 @@ class StageHasher {
   }
 
   // The key of 'node' and its subtree, or std::nullopt; sets 'reason_'.
-  std::optional<std::string> hashNode(const folly::dynamic& node) {
+  std::optional<std::string> hashNode(const core::PlanNodePtr& node) {
     std::vector<std::optional<std::string>> children;
-    if (const auto* sources = node.get_ptr("sources")) {
-      for (const auto& source : *sources) {
-        children.push_back(hashNode(source));
-      }
+    for (const auto& source : node->sources()) {
+      children.push_back(hashNode(source));
     }
 
     // Parameters, renamed after the sources so that names first used
     // upstream keep their numbers whatever comes downstream.
-    folly::dynamic params = folly::dynamic::object;
-    for (const auto& [key, value] : node.items()) {
-      if (key != "sources" && key != "shuffleId") {
-        params[key] = value;
-      }
+    auto params = node->serialize();
+    for (const auto* key : {"id", "sources", "shuffleId"}) {
+      params.erase(key);
     }
     canonicalize(params);
 
     std::string data = fmt::format(
         "{}\n{}\n{}\n",
-        node["name"].asString(),
+        node->name(),
         folly::json::serialize(params, sortedKeys()),
         environment_);
     for (const auto& child : children) {
@@ -172,23 +163,22 @@ class StageHasher {
       reason_ = fmt::format("calls {}", *call);
       return std::nullopt;
     }
-    const auto& name = node["name"].getString();
-    if (name == "TableScanNode") {
-      auto files = fileIdentity(node["tableHandle"]);
+    if (node->is<core::TableScanNode>()) {
+      auto files = fileIdentity(params["tableHandle"]);
       if (!files.has_value()) {
         return std::nullopt;
       }
       data += *files;
-    } else if (name == "ShuffleReadNode") {
-      const auto shuffleId = node["shuffleId"].asInt();
-      if (const auto* input = cachedInput(shuffleId)) {
-        if (!input->cacheKey.has_value()) {
-          reason_ = fmt::format("reads {}, which has no key", *input->cacheId);
+    } else if (node->is<core::ExchangeNode>()) {
+      const auto& input = shuffleInput(node->id());
+      if (input.cacheId.has_value()) {
+        if (!input.cacheKey.has_value()) {
+          reason_ = fmt::format("reads {}, which has no key", *input.cacheId);
           return std::nullopt;
         }
-        data += "cached " + *input->cacheKey;
+        data += "cached " + *input.cacheKey;
       } else {
-        const auto& parent = *byShuffle_.at(shuffleId);
+        const auto& parent = *byShuffle_.at(input.shuffleId);
         if (!parent.key.has_value()) {
           reason_ = fmt::format("reads stage {}", parent.stageId);
           return std::nullopt;
@@ -197,7 +187,7 @@ class StageHasher {
       }
     }
     auto key = hashOf(data);
-    stage_.nodeKeys[node["id"].asString()] = key;
+    stage_.nodeKeys[node->id()] = key;
     return key;
   }
 
@@ -215,16 +205,16 @@ class StageHasher {
     return opts;
   }
 
-  const Stage::ShuffleInput* cachedInput(int32_t shuffleId) const {
+  const Stage::ShuffleInput& shuffleInput(const core::PlanNodeId& nodeId) const {
     for (const auto& input : stage_.shuffleInputs) {
-      if (input.shuffleId == shuffleId && input.cacheId.has_value()) {
-        return &input;
+      if (input.nodeId == nodeId) {
+        return input;
       }
     }
-    return nullptr;
+    VELOX_FAIL("Exchange {} reads no shuffle", nodeId);
   }
 
-  // Drops plan node ids and renames column names by first use.
+  // Renames column names by first use.
   void canonicalize(folly::dynamic& json) {
     if (json.isArray()) {
       for (auto& item : json) {
@@ -242,9 +232,6 @@ class StageHasher {
     }
     if (!json.isObject() || isConstant(json)) {
       return;
-    }
-    if (isPlanNode(json)) {
-      json.erase("id");
     }
     // Visit keys in order, so names are numbered the same way every time.
     std::vector<std::string> keys;
@@ -370,7 +357,7 @@ void computeStageKeys(
   std::map<int32_t, const Stage*> byShuffle;
   for (auto& stage : plan.stages) {
     StageHasher hasher(stage, byShuffle, environment, nodeLocalFiles);
-    stage.key = hasher.hashNode(stage.fragment);
+    stage.key = hasher.hashNode(stage.plan);
     if (stage.key.has_value() && !stage.shuffleId.has_value()) {
       // The result's column names are the user's.
       stage.key = hashOf(fmt::format(

@@ -2,14 +2,15 @@
 //
 // Each Axiom fragment becomes one stage. A fragment that feeds another ends
 // in a PartitionedOutput; it becomes a map stage whose root is a ShuffleWrite.
-// Each Exchange or MergeExchange reading another fragment becomes a
-// ShuffleRead. The fragment of the final stage returns rows to the driver.
+// An Exchange or MergeExchange reading another fragment stays as it is: its
+// splits are the shuffle's block URLs. The fragment of the final stage returns
+// rows to the driver.
 //
 // A stage's plan is serialized once, with Velox serde, and sent with each of
 // its tasks: the task binary. File scans are rewritten to serializable
 // handles on the way. Each stage gets a content key (StageKey.h).
 //
-// A scan of a cached table (CachedTable.h) becomes a ShuffleRead of the
+// A scan of a cached table (CachedTable.h) becomes an Exchange reading the
 // shuffle that stores the cached plan's output, as a cached input: task p of
 // the stage reads every block of map outputs p, p + numTasks, ... A cached
 // plan itself is planned with 'materialize' set, so that its last stage
@@ -58,7 +59,7 @@ struct Stage {
   /// Scans of the original fragment, which the driver enumerates splits for.
   std::vector<facebook::velox::core::TableScanNodePtr> scans;
 
-  /// ShuffleRead node ids and the shuffle each reads. 'broadcast' reads take
+  /// Exchange node ids and the shuffle each reads. 'broadcast' reads take
   /// partition 0 of every map output.
   struct ShuffleInput {
     facebook::velox::core::PlanNodeId nodeId;
@@ -97,9 +98,7 @@ struct StagePlan {
 
   /// Changes shuffle ids, in the stages' fields and their task binaries, per
   /// 'newIds' (old id to new id; ids not in it stay).
-  void renumberShuffles(
-      const std::map<int32_t, int32_t>& newIds,
-      facebook::velox::memory::MemoryPool* pool);
+  void renumberShuffles(const std::map<int32_t, int32_t>& newIds);
 };
 
 /// What a scan of a cached table reads: the stored output of its plan.

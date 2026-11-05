@@ -18,7 +18,7 @@
 #include <folly/executors/GlobalExecutor.h>
 
 #include "ember/shuffle/KilnShuffle.h"
-#include "ember/shuffle/ShuffleRead.h"
+#include "ember/shuffle/ShuffleBlockSource.h"
 #include "kiln/client/BufferPool.h"
 #include "kiln/client/Client.h"
 #include "kiln/local/LocalCluster.h"

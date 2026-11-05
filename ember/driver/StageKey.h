@@ -5,7 +5,7 @@
 // its kind, its parameters (its serde JSON without plan node ids, shuffle ids
 // and sources), the code version and its children's keys. A scan adds the
 // identity of the files it reads: path, size and modification time. A
-// ShuffleRead adds the key of the stage it reads, so a stage key covers the
+// exchange adds the key of the stage it reads, so a stage key covers the
 // stage's whole upstream lineage.
 //
 // Column names are renamed by first use within a stage, so names the

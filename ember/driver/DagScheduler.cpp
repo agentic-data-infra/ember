@@ -591,7 +591,7 @@ DagScheduler::JobResult DagScheduler::runStages(
     }
     newIds[*stage.shuffleId] = stored.value_or(++shuffleCounter_);
   }
-  stages.renumberShuffles(newIds, planPool_.get());
+  stages.renumberShuffles(newIds);
 
   // The job's own shuffles: kept for reuse if keyed, otherwise removed. A
   // cached table's output is always kept.

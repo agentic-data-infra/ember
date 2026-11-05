@@ -22,7 +22,7 @@
 #include "ember/functions.h"
 #include "ember/shuffle/KilnShuffle.h"
 #include "ember/shuffle/ShuffleConfig.h"
-#include "ember/shuffle/ShuffleRead.h"
+#include "ember/shuffle/ShuffleBlockSource.h"
 #include "ember/shuffle/ShuffleWrite.h"
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/common/file/FileSystems.h"
@@ -412,9 +412,8 @@ TEST_F(SchedulerTest, wordCountStages) {
   // Result stage: merges the sorted reduce outputs.
   const auto& result = stages.resultStage();
   EXPECT_EQ(result.numTasks, 1);
-  auto read = std::dynamic_pointer_cast<const shuffle::ShuffleReadNode>(result.plan);
-  ASSERT_NE(read, nullptr) << result.plan->toString(true, true);
-  EXPECT_TRUE(read->isMerge());
+  EXPECT_TRUE(result.plan->is<core::MergeExchangeNode>())
+      << result.plan->toString(true, true);
 
   // The task binary deserializes to the same plan, again.
   for (const auto& stage : stages.stages) {

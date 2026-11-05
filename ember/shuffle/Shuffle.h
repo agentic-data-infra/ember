@@ -4,10 +4,9 @@
 
 namespace ember::shuffle {
 
-/// Registers the ShuffleWrite and ShuffleRead plan nodes (serde and
-/// operators), the range partition function's serde and the exchange source
-/// for shuffle blocks. Safe to call more
-/// than once.
+/// Registers the ShuffleWrite plan node (serde and operator), the range
+/// partition function's serde and the exchange source for shuffle blocks. Safe
+/// to call more than once.
 void registerShuffle();
 
 } // namespace ember::shuffle

@@ -8,7 +8,6 @@
 #include "ember/FileSerde.h"
 #include "ember/ParquetConnector.h"
 #include "ember/driver/StageKey.h"
-#include "ember/shuffle/ShuffleRead.h"
 #include "ember/shuffle/ShuffleWrite.h"
 
 namespace ember::driver {
@@ -60,10 +59,8 @@ folly::dynamic cachedRead(
   const auto shuffleId = --lastPlaceholder;
   stage.shuffleInputs.push_back(
       {scan.id(), shuffleId, false, id, output.key});
-  auto read = std::make_shared<shuffle::ShuffleReadNode>(
-      shuffleId,
-      std::make_shared<core::ExchangeNode>(
-          scan.id(), output.type, output.serdeKind));
+  auto read = std::make_shared<core::ExchangeNode>(
+      scan.id(), output.type, output.serdeKind);
   std::vector<std::string> names;
   std::vector<core::TypedExprPtr> columns;
   for (const auto& name : scan.outputType()->names()) {
@@ -73,15 +70,13 @@ folly::dynamic cachedRead(
     columns.push_back(std::make_shared<core::FieldAccessTypedExpr>(
         output.type->childAt(index), output.type->nameOf(index)));
   }
-  auto json = core::ProjectNode(
-                  scan.id() + "_cached", std::move(names), std::move(columns), read)
-                  .serialize();
-  json["sources"][0] = read->serialize();
-  return json;
+  return core::ProjectNode(
+             scan.id() + "_cached", std::move(names), std::move(columns), read)
+      .serialize();
 }
 
-// Serializes 'node', replacing exchanges with shuffle reads and file handles
-// with serializable ones. Node types serialize their sources under "sources"
+// Serializes 'node', noting which shuffle each exchange reads and replacing
+// file handles with serializable ones. Node types serialize their sources under "sources"
 // in the order of sources(), so rewritten children are patched in there.
 folly::dynamic rewrite(
     const core::PlanNodePtr& node,
@@ -95,7 +90,7 @@ folly::dynamic rewrite(
         it != reads.end(), "Exchange {} reads no fragment", node->id());
     stage.shuffleInputs.push_back(
         {node->id(), it->second.shuffleId, it->second.broadcast});
-    return shuffle::ShuffleReadNode(it->second.shuffleId, exchange).serialize();
+    return exchange->serialize();
   }
   if (auto scan = std::dynamic_pointer_cast<const core::TableScanNode>(node)) {
     if (const auto* handle = dynamic_cast<const file::FileTableHandle*>(
@@ -134,10 +129,10 @@ void visit(
 // Makes the last stage of 'plan' write its output to a shuffle, one partition
 // per task. A last stage that only gathers its input is dropped, and the
 // stage before it, which writes one partition per task already, is last.
-void materializeOutput(StagePlan& plan, velox::memory::MemoryPool* pool) {
+void materializeOutput(StagePlan& plan) {
   auto& last = plan.stages.back();
-  const auto* gather = last.plan->as<shuffle::ShuffleReadNode>();
-  if (gather != nullptr && !gather->isMerge() &&
+  if (last.plan->is<core::ExchangeNode>() &&
+      !last.plan->is<core::MergeExchangeNode>() &&
       last.shuffleInputs.size() == 1 && !last.shuffleInputs[0].broadcast &&
       !last.shuffleInputs[0].cacheId.has_value()) {
     plan.stages.pop_back();
@@ -154,11 +149,8 @@ void materializeOutput(StagePlan& plan, velox::memory::MemoryPool* pool) {
       last.plan->outputType(),
       "Presto",
       last.plan);
-  auto fragment = write->serialize();
-  fragment["sources"][0] = std::move(last.fragment);
-  last.fragment = std::move(fragment);
-  last.plan =
-      velox::ISerializable::deserialize<core::PlanNode>(last.fragment, pool);
+  last.fragment = write->serialize();
+  last.plan = std::move(write);
 }
 
 } // namespace
@@ -269,7 +261,7 @@ StagePlan planStages(
       result.resultStage().numTasks.has_value(),
       "The result stage must have a fixed task count");
   if (materialize) {
-    materializeOutput(result, pool);
+    materializeOutput(result);
   }
   computeStageKeys(result, keyConfig);
   return result;
@@ -302,29 +294,7 @@ std::string StagePlan::toString(
   return out.str();
 }
 
-namespace {
-
-void renumberNode(
-    folly::dynamic& node,
-    const std::map<int32_t, int32_t>& newIds) {
-  const auto& name = node["name"].getString();
-  if (name == "ShuffleReadNode" || name == "ShuffleWriteNode") {
-    if (auto it = newIds.find(node["shuffleId"].asInt()); it != newIds.end()) {
-      node["shuffleId"] = it->second;
-    }
-  }
-  if (auto* sources = node.get_ptr("sources")) {
-    for (auto& source : *sources) {
-      renumberNode(source, newIds);
-    }
-  }
-}
-
-} // namespace
-
-void StagePlan::renumberShuffles(
-    const std::map<int32_t, int32_t>& newIds,
-    velox::memory::MemoryPool* pool) {
+void StagePlan::renumberShuffles(const std::map<int32_t, int32_t>& newIds) {
   auto renumber = [&](int32_t& id) {
     if (auto it = newIds.find(id); it != newIds.end()) {
       id = it->second;
@@ -333,13 +303,14 @@ void StagePlan::renumberShuffles(
   for (auto& stage : stages) {
     if (stage.shuffleId.has_value()) {
       renumber(*stage.shuffleId);
+      const auto* write = stage.plan->as<shuffle::ShuffleWriteNode>();
+      VELOX_CHECK_NOT_NULL(write);
+      stage.plan = write->withShuffleId(*stage.shuffleId);
+      stage.fragment = stage.plan->serialize();
     }
     for (auto& input : stage.shuffleInputs) {
       renumber(input.shuffleId);
     }
-    renumberNode(stage.fragment, newIds);
-    stage.plan =
-        velox::ISerializable::deserialize<core::PlanNode>(stage.fragment, pool);
   }
 }
 
