@@ -21,8 +21,10 @@ On disk, map task M of shuffle S writes `shuffle_S_M.data`, frames of
 `[uint32 length][Presto page]` grouped by reduce partition, and
 `shuffle_S_M.index`, numPartitions + 1 int64 offsets. A writer buffers pages
 per partition and spills a run, grouped by partition, when it holds more than
-`ember.shuffle.spill_threshold_bytes` (64MB); at commit it concatenates each
-partition's runs. Attempts write temp files and rename them; the first commit
+`ember.shuffle.spill_threshold_bytes` (64MB), or sooner if the memory
+arbitrator asks for the task's memory, which it does when the task reaches
+`query_max_memory_per_node`, with or without `spill_enabled`. At commit it
+concatenates each partition's runs. Attempts write temp files and rename them; the first commit
 wins, so a retried or duplicate task never corrupts a block.
 
 With `ember.shuffle.store=kiln` and `ember.shuffle.kiln.metadata` set to the
@@ -45,7 +47,7 @@ block URLs with byte ranges,
 part.
 With `ember.shuffle.spill=false` (Kiln store only; the default is `true`),
 a map task does not spill runs to the executor's directory: each time its
-buffered pages pass the spill threshold, it copies them, partition by
+buffered pages pass the spill threshold or the arbitrator asks, it copies them, partition by
 partition, into one registered buffer and starts appending it to its chunk
 without waiting, so Kiln moves the bytes (over RDMA, one-sided writes of
 all the blocks at once) while the map task goes on. The next append, and the

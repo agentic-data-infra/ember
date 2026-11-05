@@ -112,6 +112,8 @@ class PartitionedPageWriter : public ShuffleWriter {
 
   void collect(int32_t partition, std::unique_ptr<folly::IOBuf> page) override;
 
+  void releaseMemory() override;
+
   MapStatus commit() override;
 
   void abort() override;

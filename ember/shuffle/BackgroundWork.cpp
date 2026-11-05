@@ -45,4 +45,12 @@ void BackgroundWork::wait() {
   }
 }
 
+bool BackgroundWork::finish() {
+  if (state_ == nullptr) {
+    return true;
+  }
+  state_->done.wait();
+  return state_->error == nullptr;
+}
+
 } // namespace ember::shuffle

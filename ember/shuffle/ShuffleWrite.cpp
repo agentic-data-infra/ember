@@ -234,6 +234,30 @@ class ShuffleWrite : public exec::Operator {
     return !noMoreInput_;
   }
 
+  // Needs no spill_enabled: the writer's run files are not Velox spill files.
+  bool canReclaim() const override {
+    return true;
+  }
+
+  // Serializes into the spill pool: the operator's pool is the one out of
+  // memory.
+  void reclaim(
+      uint64_t /*targetBytes*/,
+      velox::memory::MemoryReclaimer::Stats& /*stats*/) override {
+    VELOX_CHECK(!nonReclaimableSection_);
+    // Arbitration can arrive after close(). A failed write is the driver's to
+    // report.
+    if (work_ == nullptr || partitions_.empty() || !work_->finish()) {
+      return;
+    }
+    for (int32_t p = 0; p < partitions_.size(); ++p) {
+      flush(p, *velox::memory::spillMemoryPool());
+    }
+    collectPages();
+    writer_->releaseMemory();
+    pool()->release();
+  }
+
   void addInput(velox::RowVectorPtr input) override {
     auto output = project(input);
     const auto numRows = output->size();
@@ -243,6 +267,8 @@ class ShuffleWrite : public exec::Operator {
     for (auto i = 0; i < output->childrenSize(); ++i) {
       output->childAt(i)->loadedVector();
     }
+    // Room for the input and for copying a finished page out.
+    reserve(output->estimateFlatSize() + kTargetPageBytes);
 
     const auto numPartitions = node_->numPartitions();
     for (auto& rows : rows_) {
@@ -283,8 +309,9 @@ class ShuffleWrite : public exec::Operator {
 
   void noMoreInput() override {
     Operator::noMoreInput();
+    reserve(kTargetPageBytes);
     for (int32_t p = 0; p < partitions_.size(); ++p) {
-      flush(p);
+      flush(p, *pool());
     }
     work_->start([this] {
       collectPages();
@@ -374,18 +401,28 @@ class ShuffleWrite : public exec::Operator {
     state.group->append(output, rows, scratch_);
     state.numRows += rows.size();
     if (state.group->size() >= kTargetPageBytes) {
-      flush(partition);
+      flush(partition, *pool());
     }
   }
 
-  void flush(int32_t partition) {
+  // The driver keeps its operators out of reclaim while it calls them, so this
+  // is where the arbitrator can make this operator give its memory back.
+  void reserve(int64_t bytes) {
+    if (pool()->availableReservation() < bytes) {
+      Operator::ReclaimableSectionGuard guard(this);
+      pool()->maybeReserve(bytes);
+    }
+  }
+
+  // Serializes the partition's rows into a page allocated from 'pagePool'.
+  void flush(int32_t partition, velox::memory::MemoryPool& pagePool) {
     auto& state = partitions_[partition];
     if (state.group == nullptr || state.numRows == 0) {
       return;
     }
     constexpr int32_t kMinMessageSize = 128;
     velox::IOBufOutputStream stream(
-        *pool(),
+        pagePool,
         nullptr,
         std::max<int64_t>(kMinMessageSize, state.group->size()));
     state.group->flush(&stream);

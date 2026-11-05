@@ -154,6 +154,12 @@ void PartitionedPageWriter::collect(
   }
 }
 
+void PartitionedPageWriter::releaseMemory() {
+  if (!done_ && bufferedBytes_ > 0) {
+    spill();
+  }
+}
+
 MapStatus PartitionedPageWriter::commit() {
   VELOX_CHECK(!done_);
   done_ = true;
