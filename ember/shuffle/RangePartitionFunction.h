@@ -1,15 +1,21 @@
-// Range partitioning on sampled split points, for a global sort.
+// Range partitioning for a global sort.
 //
-// The key is one VARCHAR or VARBINARY column. Partition p holds the keys up to
-// split point p, in byte order, the order the sort uses, so every key of
-// partition p sorts before every key of partition p + 1 (after, for a
-// descending sort), and equal keys share a partition. Nulls go to the first or
-// last partition, as the sort places them.
+// The key is one VARCHAR or VARBINARY column, in byte order, the order the
+// sort uses, so every key of partition p sorts before every key of partition
+// p + 1 (after, for a descending sort), and equal keys share a partition. Nulls
+// go to the first or last partition, as the sort places them.
 //
-// The plan has no split points: the driver samples them when the stage runs,
-// and fills them in with withBounds(). There may be fewer than
-// 'numPartitions' - 1, when the sample has few distinct keys; later partitions
-// stay empty.
+// The driver samples split points when the stage runs, and fills them in with
+// withBounds(). Partition p then holds the keys up to split point p. There may
+// be fewer than 'numPartitions' - 1, when the sample has few distinct keys;
+// later partitions stay empty.
+//
+// Without split points (ember.sort.sample=false, or a sample with no keys), the
+// key's first 8 bytes, read as a big-endian number (shorter keys padded with
+// zero bytes), fall into one of 'numPartitions' equal slices of the 64-bit
+// range. These balance only keys that are uniformly random bytes, such as
+// sortbenchmark.org's gensort keys. Other keys stay correct but may crowd into
+// a few partitions.
 
 #pragma once
 

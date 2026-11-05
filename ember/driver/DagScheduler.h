@@ -105,10 +105,13 @@ class DagScheduler {
   static constexpr const char* kReuseInKiln = "ember.reuse.kiln";
   /// Config key: run a global sort without a limit as this many range-sorted
   /// result tasks instead of one merge task (StagePlan.h; default 0, off).
-  /// The ranges split a sample of the first sort key (RangeBounds.h), which
-  /// reads the sort's input one extra time.
   static constexpr const char* kRangeSortPartitions =
       "ember.sort.range_partitions";
+  /// Config key: split ranges on a sample of the first sort key (RangeBounds.h),
+  /// which balances any keys but reads the sort's input one extra time (default
+  /// true). False uses fixed splits of the key's bytes, which suits uniformly
+  /// random keys only.
+  static constexpr const char* kRangeSortSample = "ember.sort.sample";
 
   DagScheduler(
       std::shared_ptr<SchedulerBackend> backend,
@@ -209,8 +212,10 @@ class DagScheduler {
   const DagSchedulerOptions options_;
   const bool reuseOutputs_;
   const int32_t rangeSortPartitions_;
+  const bool sampleRanges_;
   const bool nodeLocalFiles_;
-  // Config that goes into stage keys: what is not Ember's own, and splits.
+  // Config that goes into stage keys: what is not Ember's own, splits, and
+  // sampling, as outputs of a range shuffle must all use the same split points.
   std::map<std::string, std::string> keyConfig_;
   TaskScheduler taskScheduler_;
   MapOutputTracker mapOutputTracker_;

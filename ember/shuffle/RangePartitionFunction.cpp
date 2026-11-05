@@ -12,6 +12,23 @@ namespace ember::shuffle {
 namespace core = facebook::velox::core;
 namespace velox = facebook::velox;
 
+namespace {
+
+// The key's first 8 bytes as a big-endian number.
+uint64_t keyPrefix(velox::StringView key) {
+  uint64_t prefix = 0;
+  const auto size = std::min<size_t>(key.size(), sizeof(prefix));
+  for (size_t i = 0; i < sizeof(prefix); ++i) {
+    prefix <<= 8;
+    if (i < size) {
+      prefix |= static_cast<uint8_t>(key.data()[i]);
+    }
+  }
+  return prefix;
+}
+
+} // namespace
+
 RangePartitionFunction::RangePartitionFunction(
     int32_t numPartitions,
     velox::column_index_t keyChannel,
@@ -43,11 +60,17 @@ std::optional<uint32_t> RangePartitionFunction::partition(
       continue;
     }
     const auto value = key.valueAt<velox::StringView>(row);
-    const uint32_t range = std::lower_bound(
-                               bounds_.begin(),
-                               bounds_.end(),
-                               std::string_view(value)) -
-        bounds_.begin();
+    uint32_t range;
+    if (bounds_.empty()) {
+      // Slice of the 64-bit range: prefix * numPartitions / 2^64.
+      range = static_cast<uint32_t>(
+          (static_cast<unsigned __int128>(keyPrefix(value)) * numPartitions_) >>
+          64);
+    } else {
+      range = std::lower_bound(
+                  bounds_.begin(), bounds_.end(), std::string_view(value)) -
+          bounds_.begin();
+    }
     partitions[row] = ascending_ ? range : last - range;
   }
   return std::nullopt;

@@ -1,9 +1,9 @@
 // RangeBounds: the split points of a range-partitioned sort, taken from a
-// sample of its keys as Spark's RangePartitioner does. The plan names a range
-// shuffle without split points. Before a stage that writes one runs, the
-// scheduler runs its tasks once with sampleFragment(), which returns a sample
-// of keys of each task instead of writing the shuffle, and computes the split
-// points with rangeBounds(). withBounds() is the stage's fragment with them.
+// sample of its keys as Spark's RangePartitioner does. The plan names a range shuffle without split points. Before a stage that writes
+// one runs, the scheduler runs its tasks once with sampleFragment(), which
+// returns a sample of keys of each task instead of writing the shuffle, and
+// computes the split points with rangeBounds(). withBounds() is the stage's
+// fragment with them.
 
 #pragma once
 

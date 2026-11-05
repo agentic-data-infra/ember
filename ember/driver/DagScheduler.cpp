@@ -86,6 +86,9 @@ DagScheduler::DagScheduler(
           options_.config.contains(kRangeSortPartitions)
               ? folly::to<int32_t>(options_.config.at(kRangeSortPartitions))
               : 0},
+      sampleRanges_{
+          !options_.config.contains(kRangeSortSample) ||
+          folly::to<bool>(options_.config.at(kRangeSortSample))},
       nodeLocalFiles_{
           options_.config.contains(kNodeLocalFiles) &&
           folly::to<bool>(options_.config.at(kNodeLocalFiles))},
@@ -107,6 +110,9 @@ DagScheduler::DagScheduler(
         key == kNodeLocalFiles) {
       keyConfig_[key] = value;
     }
+  }
+  if (!sampleRanges_) {
+    keyConfig_[kRangeSortSample] = "false";
   }
   rootPool_ = velox::memory::memoryManager()->addRootPool(
       fmt::format("ember_driver_{}_{}", options_.appName, ++schedulerCounter));
@@ -820,7 +826,7 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
     // A range shuffle keeps its split points when tasks run again, so that
     // the partitions of old and new map outputs match.
     std::optional<folly::dynamic> rangeFragment;
-    if (writesRanges(stage)) {
+    if (sampleRanges_ && writesRanges(stage)) {
       auto bounds = storedRangeBounds(*stage.shuffleId);
       if (!bounds.has_value()) {
         // Only a shuffle restored from Kiln's catalog has outputs and no

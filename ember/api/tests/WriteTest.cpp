@@ -135,6 +135,22 @@ TEST_F(WriteTest, writesRangePartitionsInOrder) {
   EXPECT_EQ(rows, expected);
 }
 
+TEST_F(WriteTest, skewedKeysShareARangeWithoutSampling) {
+  // Fixed slices of the key's first 8 bytes, 6 of which are the same.
+  auto expected = writeInput(4, 2000, /*sharedPrefix=*/6);
+  auto records = session({{"ember.sort.range_partitions", "6"},
+                          {"ember.sort.sample", "false"}})
+                     .read()
+                     .gensort(input().string())
+                     .orderBy(col("key"))
+                     .write()
+                     .gensort(output().string());
+  EXPECT_EQ(records, 8000);
+  auto [names, rows] = readOutput();
+  EXPECT_EQ(rows, expected);
+  EXPECT_EQ(fs::file_size(output() / "part-00005"), 8000 * 100);
+}
+
 TEST_F(WriteTest, balancesSkewedKeys) {
   // Keys of 10 bytes, of which only the last 4 differ. The shared bytes are not
   // valid UTF-8: split points must keep them, or all rows land in one range.

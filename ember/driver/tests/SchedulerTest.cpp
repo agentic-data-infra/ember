@@ -1246,6 +1246,40 @@ TEST_F(SchedulerTest, rangeSortSamplesOnceWhenOutputsAreRecomputed) {
   EXPECT_EQ(backend->launches(*mapStage), mapTasks * 3);
 }
 
+TEST_F(SchedulerTest, rangeSortSamplesUnlessTurnedOff) {
+  auto path = writeCorpus(2, 200);
+  auto plan = ember_->read().text(path).orderBy(col("value")).physicalPlan();
+  std::optional<int32_t> mapStage;
+  int32_t mapTasks = 0;
+  auto onStage = [&](const StageAttemptInfo& info, FlakyBackend&) {
+    if (!mapStage.has_value()) {
+      mapStage = info.stageId;
+      mapTasks = info.partitions.size();
+    }
+  };
+
+  auto [fixed, fixedBackend] = scheduler(
+      {{DagScheduler::kRangeSortPartitions, "4"},
+       {DagScheduler::kRangeSortSample, "false"}},
+      nullptr,
+      onStage);
+  fixed->runJob(*plan, pool_.get());
+  ASSERT_TRUE(mapStage.has_value());
+  EXPECT_EQ(fixedBackend->launches(*mapStage), mapTasks);
+
+  mapStage.reset();
+  auto [sampled, sampledBackend] = scheduler(
+      {{DagScheduler::kRangeSortPartitions, "4"}}, nullptr, onStage);
+  sampled->runJob(*plan, pool_.get());
+  ASSERT_TRUE(mapStage.has_value());
+  EXPECT_EQ(sampledBackend->launches(*mapStage), mapTasks * 2);
+
+  // Sampled and fixed outputs are never reused for each other.
+  EXPECT_NE(
+      fixed->stagePlan(*plan).stages[0].key,
+      sampled->stagePlan(*plan).stages[0].key);
+}
+
 TEST_F(SchedulerTest, rangeSortMatchesMergeSort) {
   // Lines of random printable characters, so that several ranges get rows.
   std::mt19937 rng(11);

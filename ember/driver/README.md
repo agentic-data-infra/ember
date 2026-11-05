@@ -5,7 +5,7 @@ Turns an optimized plan into stages and runs them.
 | File | Contents |
 |------|----------|
 | `StagePlan` | Cuts an Axiom `MultiFragmentPlan` into stages in dependency order. Rewrites each fragment's plan JSON: a producer's `PartitionedOutput` becomes a `ShuffleWrite`, an `Exchange`/`MergeExchange` becomes a `ShuffleRead`, file scans use serializable handles, and scans of cached tables read the cached output (below). Shuffle ids start as the producing stage's id; the scheduler renumbers them to be unique in its session. |
-| `StageKey` | Gives each stage a content key: a Merkle hash over its rewritten plan (node kind, parameters without node and shuffle ids, column names renamed by first use, code version, child keys). Scans add their files' path, size and mtime; a `ShuffleRead` adds the key of the stage it reads, so a key covers all of a stage's upstream. Calls to nondeterministic functions (`rand`, `uuid`, `now`, ...) and non-local inputs leave the node, and everything downstream, without a key. The code version is the driver executable's identity, so a rebuild changes every key. Query config that is not Ember's own (e.g. `session_timezone`), and `ember.files.max_split_bytes`, goes into every key. `explain()` and `onStageCompleted` show the keys. |
+| `StageKey` | Gives each stage a content key: a Merkle hash over its rewritten plan (node kind, parameters without node and shuffle ids, column names renamed by first use, code version, child keys). Scans add their files' path, size and mtime; a `ShuffleRead` adds the key of the stage it reads, so a key covers all of a stage's upstream. Calls to nondeterministic functions (`rand`, `uuid`, `now`, ...) and non-local inputs leave the node, and everything downstream, without a key. The code version is the driver executable's identity, so a rebuild changes every key. Query config that is not Ember's own (e.g. `session_timezone`), `ember.files.max_split_bytes` and `ember.sort.sample=false` go into every key. `explain()` and `onStageCompleted` show the keys. |
 | `DagScheduler` | Runs a job: for each stage, enumerates splits (files cut into byte ranges, `ember.files.max_split_bytes`; small files packed into one task), adds shuffle block URLs from the tracker, builds one `TaskDescription` per task and runs the set. Recomputes lost shuffle outputs (below). Collects the result stage's rows. At the end it keeps the outputs of keyed map stages for reuse (below) and removes the rest. `onStageCompleted` sees every stage attempt. |
 | `KilnMemo` | With `ember.reuse.kiln`: stored outputs in Kiln's catalog, by stage key, for later programs (below). |
 | `TaskScheduler` | Launches a stage's tasks on the backend and waits. Retries a failed task up to `maxTaskAttempts` (4) times; errors from the user's program fail at once. A task that cannot fetch its input is not retried: the task set returns its fetch failure. |
@@ -44,12 +44,18 @@ itself (`ember/axiom-extension`), with a sort and a writer in each of the N
 tasks and a last stage that merges their write stats. For query results, the
 driver concatenates their rows in partition order, which is sorted order. Row-
 wise nodes (project, filter) may sit above the merge; a limit keeps the single
-merge task. The plan has no split points: before a stage writes a range
-shuffle, `DagScheduler` runs its tasks once more with the write replaced by a
+merge task. Only VARCHAR and VARBINARY first keys are range-partitioned; other
+sorts keep the merge task.
+
+The plan has no split points: before a stage writes a range shuffle,
+`DagScheduler` runs its tasks once more with the write replaced by a
 `reservoir_sample` of the key (`RangeBounds`), as Spark's `RangePartitioner`
-does, and fills the split points into the write. This reads the stage's input
-one extra time. Only VARCHAR and VARBINARY first keys are range-partitioned;
-other sorts keep the merge task.
+does, and fills the split points into the write. That balances any keys, but
+reads the stage's input one extra time: a 2 GB gensort sort with 16 ranges took
+about 15% longer. `ember.sort.sample=false` skips it and uses fixed slices of
+the key's first 8 bytes, which balance only uniformly random keys. The sort
+benchmark sets it, as gensort's keys are uniform. The setting goes into stage
+keys, so sampled and fixed outputs are never reused for each other.
 
 ## Lost shuffle outputs
 
@@ -70,11 +76,12 @@ inputs. Then the stage runs a new attempt for only the partitions it still
 lacks. A stage that ends `maxStageAttempts` (4) attempts with partitions
 missing fails the job.
 
-A range shuffle's outputs must all use the same split points, so the scheduler
-keeps them per shuffle, and rerun map tasks reuse them. They last as long as
-the session and are not saved in Kiln's catalog. A later session that reuses a
-range shuffle from Kiln and loses part of it therefore fails the job with an
-error. Saving the split points in the catalog would let it recompute that part.
+A sampled range shuffle's outputs must all use the same split points, so the
+scheduler keeps them per shuffle, and rerun map tasks reuse them.
+They last as long as the session and are not saved in Kiln's catalog. A later
+session that reuses a sampled range shuffle from Kiln and loses part of it
+therefore fails the job with an error. Saving the split points in the catalog
+would let it recompute that part.
 
 ## Reusing stage outputs
 
