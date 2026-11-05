@@ -350,7 +350,7 @@ TEST_F(KilnShuffleTest, sourceStreamsBlockInPieces) {
       queue->addSourceLocked();
     }
     queue->noMoreSources();
-    const ShuffleContextScope scope(*pool, nullptr, nullptr);
+    const ShuffleContextScope scope(*pool, nullptr, nullptr, nullptr);
     auto source = createShuffleBlockSource(url, 0, queue, pool.get());
     auto request = [&](auto future) {
       {
@@ -715,7 +715,7 @@ TEST_F(KilnShuffleTest, fetchFailureReachesItsTask) {
   const BlockId first{1, 2, 3};
   const BlockId second{4, 5, 6};
   {
-    const ShuffleContextScope scope(*task, nullptr, nullptr);
+    const ShuffleContextScope scope(*task, nullptr, nullptr, nullptr);
     auto context = ShuffleContext::of(*reader);
     EXPECT_FALSE(scope.context().fetchFailures.failure().has_value());
     EXPECT_THROW(context->fetchFailures.fail({"a", first}, "gone"), std::exception);

@@ -1,5 +1,6 @@
 #include "ember/shuffle/ShuffleWrite.h"
 
+#include "ember/shuffle/BackgroundWork.h"
 #include "ember/shuffle/FileShuffle.h"
 #include "ember/shuffle/KilnShuffle.h"
 #include "ember/shuffle/ShuffleContext.h"
@@ -203,7 +204,9 @@ class ShuffleWrite : public exec::Operator {
   void initialize() override {
     Operator::initialize();
     auto* task = operatorCtx_->task().get();
-    auto store = ShuffleContext::of(*pool())->store;
+    auto context = ShuffleContext::of(*pool());
+    auto store = context->store;
+    work_ = std::make_unique<BackgroundWork>(context->ioExecutor);
     const auto& target = node_->target();
     if (target.store == "kiln") {
       writer_ = createKilnWriter(
@@ -269,6 +272,9 @@ class ShuffleWrite : public exec::Operator {
         }
       }
     }
+    if (!pages_.empty()) {
+      work_->start([this] { collectPages(); });
+    }
   }
 
   velox::RowVectorPtr getOutput() override {
@@ -280,19 +286,24 @@ class ShuffleWrite : public exec::Operator {
     for (int32_t p = 0; p < partitions_.size(); ++p) {
       flush(p);
     }
-    writer_->commit();
-    committed_ = true;
-    auto lockedStats = stats_.wlock();
-    lockedStats->addRuntimeStat(
-        "shuffleBytesWritten",
-        velox::RuntimeCounter(
-            writer_->bytesWritten(), velox::RuntimeCounter::Unit::kBytes));
-    lockedStats->addRuntimeStat(
-        "shuffleSpills", velox::RuntimeCounter(writer_->spillCount()));
+    work_->start([this] {
+      collectPages();
+      writer_->commit();
+      committed_ = true;
+      auto lockedStats = stats_.wlock();
+      lockedStats->addRuntimeStat(
+          "shuffleBytesWritten",
+          velox::RuntimeCounter(
+              writer_->bytesWritten(), velox::RuntimeCounter::Unit::kBytes));
+      lockedStats->addRuntimeStat(
+          "shuffleSpills", velox::RuntimeCounter(writer_->spillCount()));
+    });
   }
 
-  exec::BlockingReason isBlocked(velox::ContinueFuture* /*future*/) override {
-    return exec::BlockingReason::kNotBlocked;
+  exec::BlockingReason isBlocked(velox::ContinueFuture* future) override {
+    return work_ != nullptr && work_->blocked(future)
+        ? exec::BlockingReason::kWaitForConsumer
+        : exec::BlockingReason::kNotBlocked;
   }
 
   bool isFinished() override {
@@ -300,6 +311,9 @@ class ShuffleWrite : public exec::Operator {
   }
 
   void close() override {
+    if (work_ != nullptr) {
+      work_->wait();
+    }
     if (writer_ != nullptr && !committed_) {
       writer_->abort();
     }
@@ -375,9 +389,17 @@ class ShuffleWrite : public exec::Operator {
         nullptr,
         std::max<int64_t>(kMinMessageSize, state.group->size()));
     state.group->flush(&stream);
-    writer_->collect(partition, stream.getIOBuf());
+    pages_.emplace_back(partition, stream.getIOBuf());
     state.group.reset();
     state.numRows = 0;
+  }
+
+  // Hands the pages to the writer, which may spill them or wait for Kiln.
+  void collectPages() {
+    for (auto& [partition, page] : pages_) {
+      writer_->collect(partition, std::move(page));
+    }
+    pages_.clear();
   }
 
   const std::shared_ptr<const ShuffleWriteNode> node_;
@@ -392,7 +414,10 @@ class ShuffleWrite : public exec::Operator {
   std::vector<velox::vector_size_t> allRows_;
   velox::Scratch scratch_;
   uint32_t nextArbitrary_{0};
-  bool committed_{false};
+  // Pages for the writer, which 'work_' uses while it runs.
+  std::vector<std::pair<int32_t, std::unique_ptr<folly::IOBuf>>> pages_;
+  std::atomic<bool> committed_{false};
+  std::unique_ptr<BackgroundWork> work_;
 };
 
 } // namespace

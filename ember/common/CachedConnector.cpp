@@ -2,6 +2,7 @@
 
 #include "axiom/connectors/ConnectorMetadataRegistry.h"
 #include "ember/CachedTable.h"
+#include "ember/shuffle/BackgroundWork.h"
 #include "ember/shuffle/ShuffleBlockSource.h"
 #include "velox/common/serialization/Serializable.h"
 #include "velox/exec/OperatorUtils.h"
@@ -26,7 +27,8 @@ class CachedDataSource : public velox::connector::DataSource {
       : outputType_{std::move(outputType)},
         schema_{table.schema()},
         serde_{velox::getNamedVectorSerde("Presto")},
-        pool_{pool} {
+        pool_{pool},
+        fetch_{shuffle::ShuffleContext::of(*pool)->ioExecutor} {
     for (const auto& name : outputType_->names()) {
       channels_.push_back(schema_->getChildIdx(columnHandles.at(name)->name()));
     }
@@ -45,21 +47,39 @@ class CachedDataSource : public velox::connector::DataSource {
 
   std::optional<velox::RowVectorPtr> next(
       uint64_t /*size*/,
-      velox::ContinueFuture& /*future*/) override {
-    while (stream_ != nullptr || nextPage()) {
-      if (stream_->atEnd()) {
-        stream_ = nullptr;
+      velox::ContinueFuture& future) override {
+    while (true) {
+      if (fetch_.blocked(&future)) {
+        return std::nullopt;
+      }
+      if (stream_ != nullptr && !stream_->atEnd()) {
+        velox::RowVectorPtr rows;
+        serde_->deserialize(
+            stream_.get(), pool_, schema_, &rows, 0, serdeOptions_.get());
+        if (rows->size() > 0) {
+          completedRows_ += rows->size();
+          return project(rows);
+        }
         continue;
       }
-      velox::RowVectorPtr rows;
-      serde_->deserialize(
-          stream_.get(), pool_, schema_, &rows, 0, serdeOptions_.get());
-      if (rows->size() > 0) {
-        completedRows_ += rows->size();
-        return project(rows);
+      stream_ = nullptr;
+      if (nextPage_ < pages_.size()) {
+        page_ = std::make_unique<exec::PrestoSerializedPage>(
+            std::move(pages_[nextPage_++]));
+        completedBytes_ += page_->size();
+        stream_ = page_->prepareStreamForDeserialize();
+      } else if (reader_ != nullptr) {
+        fetch_.start([this] {
+          pages_ = reader_->nextPages();
+          nextPage_ = 0;
+          if (pages_.empty()) {
+            reader_ = nullptr;
+          }
+        });
+      } else {
+        return nullptr;
       }
     }
-    return nullptr;
   }
 
   void addDynamicFilter(
@@ -77,25 +97,6 @@ class CachedDataSource : public velox::connector::DataSource {
   }
 
  private:
-  // Starts the next page of the split; false at the end of the split.
-  bool nextPage() {
-    if (nextPage_ == pages_.size()) {
-      if (reader_ != nullptr) {
-        pages_ = reader_->nextPages();
-        nextPage_ = 0;
-      }
-      if (pages_.empty()) {
-        reader_ = nullptr;
-        return false;
-      }
-    }
-    page_ = std::make_unique<exec::PrestoSerializedPage>(
-        std::move(pages_[nextPage_++]));
-    completedBytes_ += page_->size();
-    stream_ = page_->prepareStreamForDeserialize();
-    return true;
-  }
-
   velox::RowVectorPtr project(const velox::RowVectorPtr& rows) const {
     std::vector<velox::VectorPtr> children;
     children.reserve(channels_.size());
@@ -119,6 +120,9 @@ class CachedDataSource : public velox::connector::DataSource {
   std::unique_ptr<velox::ByteInputStream> stream_;
   uint64_t completedBytes_{0};
   uint64_t completedRows_{0};
+  // Fetches pages off the driver thread. Last, so that it waits for them
+  // before the rest goes.
+  shuffle::BackgroundWork fetch_;
 };
 
 class CachedConnector : public velox::connector::Connector {

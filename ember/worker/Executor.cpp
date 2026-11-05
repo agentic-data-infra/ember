@@ -50,6 +50,8 @@ Executor::Executor(ExecutorOptions options) : options_{std::move(options)} {
       std::make_unique<folly::CPUThreadPoolExecutor>(options_.numThreads);
   spillExecutor_ =
       std::make_unique<folly::CPUThreadPoolExecutor>(options_.numThreads);
+  ioExecutor_ =
+      std::make_shared<folly::CPUThreadPoolExecutor>(options_.numThreads);
   rootPool_ = velox::memory::memoryManager()->addRootPool(
       fmt::format("ember_executor_{}", options_.location));
   resultPool_ = rootPool_->addLeafChild("results");
@@ -59,6 +61,7 @@ Executor::Executor(ExecutorOptions options) : options_{std::move(options)} {
 Executor::~Executor() {
   driverExecutor_->join();
   spillExecutor_->join();
+  ioExecutor_->join();
   std::error_code ec;
   std::filesystem::remove_all(options_.shuffleDirectory, ec);
 }
@@ -130,7 +133,7 @@ std::string Executor::runTask(const std::string& bytes) {
         spillExecutor_.get(),
         result.taskId);
     const shuffle::ShuffleContextScope shuffle(
-        *queryCtx->pool(), blockStore_, transport_);
+        *queryCtx->pool(), blockStore_, transport_, ioExecutor_);
     // Created on the first spill, removed with the task.
     const auto spillDirectory = fmt::format(
         "{}/spill/{}_{}.{}_{}.{}",

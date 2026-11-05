@@ -2,7 +2,10 @@
 
 #include "ember/StokeConnector.h"
 
+#include <chrono>
+
 #include <folly/coro/BlockingWait.h>
+#include <folly/executors/GlobalExecutor.h>
 
 #include "axiom/connectors/ConnectorMetadataRegistry.h"
 #include "ember/Stoke.h"
@@ -40,6 +43,14 @@ class StokeDataSink : public velox::connector::DataSink {
                 handle.stream())),
             shuffle::kilnClient(handle.kilnMetadata())} {}
 
+  // The drain uses the producer.
+  ~StokeDataSink() override {
+    if (drain_.valid()) {
+      drain_.cancel();
+      drain_.wait();
+    }
+  }
+
   void appendData(velox::RowVectorPtr input) override {
     decoded_.decode(*input->childAt(0));
     for (velox::vector_size_t i = 0; i < input->size(); ++i) {
@@ -55,10 +66,20 @@ class StokeDataSink : public velox::connector::DataSink {
   }
 
   // Waits until the stream consumed this task's chunks, so that the next
-  // task in its slot starts within the budget (stoke::Producer).
+  // task in its slot starts within the budget (stoke::Producer). That can take
+  // long, with slow trainers, so it gives the driver thread back between short
+  // waits.
   bool finish() override {
     put();
-    blockingWait(producer_.co_drain());
+    if (!drain_.valid()) {
+      drain_ =
+          producer_.co_drain().semi().via(folly::getGlobalCPUExecutor());
+    }
+    drain_.wait(kDrainWait);
+    if (!drain_.isReady()) {
+      return false;
+    }
+    std::move(drain_).get();
     return true;
   }
 
@@ -84,8 +105,11 @@ class StokeDataSink : public velox::connector::DataSink {
     chunk_.clear();
   }
 
+  static constexpr std::chrono::milliseconds kDrainWait{10};
+
   const uint64_t chunkBytes_;
   stoke::Producer producer_;
+  folly::Future<folly::Unit> drain_ = folly::Future<folly::Unit>::makeEmpty();
   velox::DecodedVector decoded_;
   std::string chunk_;
   uint64_t writtenBytes_{0};

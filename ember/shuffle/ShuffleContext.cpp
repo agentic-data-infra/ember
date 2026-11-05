@@ -44,10 +44,12 @@ std::shared_ptr<ShuffleContext> ShuffleContext::of(
 ShuffleContextScope::ShuffleContextScope(
     const velox::memory::MemoryPool& pool,
     std::shared_ptr<ShuffleBlockStore> store,
-    std::shared_ptr<BlockTransport> transport)
+    std::shared_ptr<BlockTransport> transport,
+    std::shared_ptr<folly::Executor> ioExecutor)
     : root_{*pool.root()}, context_{std::make_shared<ShuffleContext>()} {
   context_->store = std::move(store);
   context_->transport = std::move(transport);
+  context_->ioExecutor = std::move(ioExecutor);
   contexts.wlock()->emplace(&root_, context_);
 }
 

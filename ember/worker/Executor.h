@@ -76,6 +76,8 @@ class Executor {
   std::shared_ptr<shuffle::BlockTransport> transport_;
   std::unique_ptr<folly::CPUThreadPoolExecutor> driverExecutor_;
   std::unique_ptr<folly::CPUThreadPoolExecutor> spillExecutor_;
+  // Runs tasks' writes and reads that may wait, off the driver threads.
+  std::shared_ptr<folly::CPUThreadPoolExecutor> ioExecutor_;
   std::shared_ptr<facebook::velox::memory::MemoryPool> rootPool_;
   std::shared_ptr<facebook::velox::memory::MemoryPool> resultPool_;
   // Holds constants of deserialized plans.

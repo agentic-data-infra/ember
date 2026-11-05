@@ -22,7 +22,8 @@ std::shared_ptr<facebook::velox::exec::ExchangeSource> createShuffleBlockSource(
     std::shared_ptr<facebook::velox::exec::ExchangeQueue> queue,
     facebook::velox::memory::MemoryPool* pool);
 
-/// Reads the pages of one stored block, blocking the caller. A block read
+/// Reads the pages of one stored block, blocking the caller, which runs it off
+/// the driver thread (BackgroundWork.h). A block read
 /// from Kiln comes in pieces, so that it holds a few read buffers at a time.
 class BlockPageReader {
  public:

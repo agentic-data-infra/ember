@@ -8,6 +8,7 @@ The interfaces follow Presto C++'s `ShuffleInterface`.
 |------|----------|
 | `ShuffleInterface` | `BlockId` (shuffle, map, reduce), `MapStatus` (location, bytes per partition of each segment), `ShuffleWriter` (`collect`, `commit`, `abort`) and `BlockTransport` (`fetchBlock(location, block)`). Block URLs: `ember-shuffle://<location>/<shuffle>/<map>/<reduce>`. `FetchFailure` names a block that could not be fetched; a reader records it in its task's `ShuffleContext`, because Velox passes exchange errors on as text. |
 | `ShuffleConfig` | The `ember.shuffle.*` keys and `ShuffleTarget`, the store, spilling and Kiln settings that the driver reads from them and puts on each `ShuffleWriteNode`. |
+| `BackgroundWork` | Runs an operator's work that may wait on a task's IO threads, so that its driver reports blocked and frees its thread. |
 | `ShuffleContext` | What a running task gets from its executor: the block store, the block transport and the fetch failure slot, registered under the task's root memory pool. |
 | `FileShuffle` | `ShuffleBlockStore`, the per-executor store of shuffle files, `PartitionedPageWriter`, the buffering and spilling that all writers share, the file writer and the local `BlockTransport`. |
 | `KilnShuffle` | The Kiln writer, which commits a map output as one Kiln chunk, and `co_fetchKilnBlock`, which reads a block's byte ranges of it. Both use a small pool of Kiln buffers per cluster. |
