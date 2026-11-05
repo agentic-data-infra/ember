@@ -19,12 +19,11 @@ The interfaces follow Presto C++'s `ShuffleInterface`.
 
 On disk, map task M of shuffle S writes `shuffle_S_M.data`, frames of
 `[uint32 length][Presto page]` grouped by reduce partition, and
-`shuffle_S_M.index`, numPartitions + 1 int64 offsets. A writer buffers pages
-per partition and spills a run, grouped by partition, when it holds more than
-`ember.shuffle.spill_threshold_bytes` (64MB), or sooner if the memory
-arbitrator asks for the task's memory, which it does when the task reaches
-`query_max_memory_per_node`, with or without `spill_enabled`. At commit it
-concatenates each partition's runs. Attempts write temp files and rename them; the first commit
+`shuffle_S_M.index`, numPartitions + 1 int64 offsets. A map task's buffered data leaves memory when it reaches
+`ember.shuffle.spill_threshold_bytes` (64MB, counting finished pages and open
+partition groups), or when the memory arbitrator asks for it, with or without
+`spill_enabled`. It then goes to a run file, grouped by partition, and at
+commit the writer concatenates each partition's runs. Attempts write temp files and rename them; the first commit
 wins, so a retried or duplicate task never corrupts a block.
 
 With `ember.shuffle.store=kiln` and `ember.shuffle.kiln.metadata` set to the
@@ -46,12 +45,9 @@ block URLs with byte ranges,
 `<metadata>` has its `/` and `%` percent-encoded, so a URL list stays one
 part.
 With `ember.shuffle.spill=false` (Kiln store only; the default is `true`),
-a map task does not spill runs to the executor's directory: each time its
-buffered pages pass the spill threshold or the arbitrator asks, it copies
-them, partition by partition, into one registered buffer and starts appending
-it to its chunk without waiting, so Kiln moves the bytes (over RDMA, one-sided
-writes of all the blocks at once) while the map task goes on. The next append, and the
-commit, first wait for the one in flight. The chunk is then a sequence of
+a spill goes to Kiln instead of a run file: the pages, partition by partition,
+are streamed into the map task's chunk through two registered buffers, one
+filling while Kiln appends the other. The chunk is then a sequence of
 segments, each laid out partition by partition; the map's `MapStatus` lists
 the partition lengths of each segment (an output written at commit is one
 segment), and a block URL lists one byte range per segment,

@@ -125,14 +125,12 @@ PartitionedPageWriter::PartitionedPageWriter(
     int32_t shuffleId,
     int32_t mapId,
     int32_t numPartitions,
-    std::string attemptTag,
-    int64_t spillThreshold)
+    std::string attemptTag)
     : store_{std::move(store)},
       shuffleId_{shuffleId},
       mapId_{mapId},
       numPartitions_{numPartitions},
       attemptTag_{std::move(attemptTag)},
-      spillThreshold_{spillThreshold},
       pages_(numPartitions) {
   VELOX_CHECK_GT(numPartitions_, 0);
 }
@@ -149,14 +147,11 @@ void PartitionedPageWriter::collect(
   VELOX_CHECK_LT(partition, numPartitions_);
   bufferedBytes_ += page->computeChainDataLength();
   pages_[partition].push_back(std::move(page));
-  if (bufferedBytes_ >= spillThreshold_) {
-    spill();
-  }
 }
 
-void PartitionedPageWriter::releaseMemory() {
+void PartitionedPageWriter::spill() {
   if (!done_ && bufferedBytes_ > 0) {
-    spill();
+    spillPages();
   }
 }
 
@@ -224,13 +219,12 @@ std::string PartitionedPageWriter::tmpPath(const std::string& suffix) const {
       suffix);
 }
 
-void PartitionedPageWriter::spill() {
+void PartitionedPageWriter::spillPages() {
   SpillRun run;
   run.path = tmpPath(fmt::format("spill{}", runs_.size()));
   folly::File out(run.path, O_WRONLY | O_CREAT | O_TRUNC);
   run.offsets = writeBuffered(fileWrite(out.fd(), run.path));
   runs_.push_back(std::move(run));
-  ++spillCount_;
 }
 
 std::vector<int64_t> PartitionedPageWriter::writeBuffered(const Write& write) {
@@ -400,15 +394,13 @@ std::unique_ptr<ShuffleWriter> ShuffleBlockStore::createWriter(
     int32_t shuffleId,
     int32_t mapId,
     int32_t numPartitions,
-    const std::string& attemptTag,
-    int64_t spillThreshold) {
+    const std::string& attemptTag) {
   return std::make_unique<FileShuffleWriter>(
       shared_from_this(),
       shuffleId,
       mapId,
       numPartitions,
-      attemptTag,
-      spillThreshold);
+      attemptTag);
 }
 
 std::string ShuffleBlockStore::dataFile(int32_t shuffleId, int32_t mapId)

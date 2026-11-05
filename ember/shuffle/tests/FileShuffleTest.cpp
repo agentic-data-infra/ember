@@ -105,23 +105,30 @@ class FileShuffleTest : public testing::Test {
       int32_t shuffleId,
       int32_t mapId,
       const std::vector<int32_t>& counts,
-      int64_t spillThreshold,
-      int64_t* spills = nullptr) {
-    auto writer = store_->createWriter(
-        shuffleId, mapId, counts.size(), "attempt0", spillThreshold);
+      bool spillEachPage = false) {
+    auto writer =
+        store_->createWriter(shuffleId, mapId, counts.size(), "attempt0");
     const auto max = *std::max_element(counts.begin(), counts.end());
     for (int32_t i = 0; i < max; ++i) {
       for (int32_t p = 0; p < counts.size(); ++p) {
         if (i < counts[p]) {
           writer->collect(p, page(fmt::format("{}-{}", p, i)));
+          if (spillEachPage) {
+            writer->spill();
+          }
         }
       }
     }
-    auto status = writer->commit();
-    if (spills != nullptr) {
-      *spills = writer->spillCount();
+    return writer->commit();
+  }
+
+  // Temporary files of the writers in the store's directory.
+  int64_t tmpFiles() const {
+    int64_t count = 0;
+    for (const auto& entry : fs::directory_iterator(dir_)) {
+      count += entry.path().extension() == ".tmp";
     }
-    return status;
+    return count;
   }
 
   fs::path dir_;
@@ -130,7 +137,7 @@ class FileShuffleTest : public testing::Test {
 };
 
 TEST_F(FileShuffleTest, partitionsAreContiguousAndInOrder) {
-  auto status = writeMap(0, 0, {3, 0, 2}, ShuffleBlockStore::kDefaultSpillThreshold);
+  auto status = writeMap(0, 0, {3, 0, 2});
   EXPECT_EQ(status.location, "test-executor");
   ASSERT_EQ(status.segments.size(), 1);
   ASSERT_EQ(status.partitionLengths().size(), 3);
@@ -143,10 +150,7 @@ TEST_F(FileShuffleTest, partitionsAreContiguousAndInOrder) {
 }
 
 TEST_F(FileShuffleTest, spilledRunsMergeInWriteOrder) {
-  int64_t spills = 0;
-  // A tiny threshold spills after every page.
-  auto status = writeMap(1, 0, {5, 4}, /*spillThreshold=*/1, &spills);
-  EXPECT_EQ(spills, 9);
+  writeMap(1, 0, {5, 4}, /*spillEachPage=*/true);
   EXPECT_EQ(
       readBlock(1, 0, 0),
       (std::vector<std::string>{"0-0", "0-1", "0-2", "0-3", "0-4"}));
@@ -239,19 +243,18 @@ TEST_F(FileShuffleTest, sourceFollowsVeloxFlowControl) {
   EXPECT_EQ(pages, data);
 }
 
-TEST_F(FileShuffleTest, releaseMemorySpillsCollectedPages) {
-  auto writer = store_->createWriter(
-      12, 0, 1, "attempt0", ShuffleBlockStore::kDefaultSpillThreshold);
-  writer->releaseMemory();
-  EXPECT_EQ(writer->spillCount(), 0);
+TEST_F(FileShuffleTest, spillWritesARunOfCollectedPages) {
+  auto writer = store_->createWriter(12, 0, 1, "attempt0");
+  writer->spill();
+  EXPECT_EQ(tmpFiles(), 0);
   writer->collect(0, page("first"));
-  writer->releaseMemory();
-  writer->releaseMemory();
-  EXPECT_EQ(writer->spillCount(), 1);
+  writer->spill();
+  writer->spill();
+  EXPECT_EQ(tmpFiles(), 1);
   writer->collect(0, page("second"));
   writer->commit();
-  writer->releaseMemory();
-  EXPECT_EQ(writer->spillCount(), 1);
+  writer->spill();
+  EXPECT_EQ(tmpFiles(), 0);
   EXPECT_EQ(readBlock(12, 0, 0), (std::vector<std::string>{"first", "second"}));
 }
 
@@ -268,9 +271,11 @@ TEST_F(FileShuffleTest, firstCommitWins) {
 
 TEST_F(FileShuffleTest, abortLeavesNoOutput) {
   {
-    auto writer = store_->createWriter(3, 0, 2, "attempt0", 1);
+    auto writer = store_->createWriter(3, 0, 2, "attempt0");
     writer->collect(0, page("x"));
+    writer->spill();
     writer->collect(1, page("y"));
+    writer->spill();
     writer->abort();
   }
   {
@@ -284,8 +289,8 @@ TEST_F(FileShuffleTest, abortLeavesNoOutput) {
 }
 
 TEST_F(FileShuffleTest, removeShuffle) {
-  writeMap(4, 0, {1}, ShuffleBlockStore::kDefaultSpillThreshold);
-  writeMap(5, 0, {1}, ShuffleBlockStore::kDefaultSpillThreshold);
+  writeMap(4, 0, {1});
+  writeMap(5, 0, {1});
   store_->removeShuffle(4);
   EXPECT_FALSE(store_->hasMapOutput(4, 0));
   EXPECT_TRUE(store_->hasMapOutput(5, 0));

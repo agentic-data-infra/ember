@@ -12,8 +12,7 @@
 // the map output as for a lost executor.
 //
 // With ember.shuffle.spill=false, a writer does not spill to run files:
-// whenever its buffered pages pass the spill threshold, it appends them to
-// its chunk, partition by partition, and goes on without waiting for Kiln.
+// a spill appends the buffered pages to its chunk, partition by partition.
 // The chunk is then a sequence of such segments, and a block is one byte
 // range per segment (MapStatus::segments).
 //
@@ -118,7 +117,6 @@ std::unique_ptr<ShuffleWriter> createKilnWriter(
     int32_t mapId,
     int32_t numPartitions,
     const std::string& attemptTag,
-    int64_t spillThreshold,
     bool spill = true);
 
 /// Reads byte ranges ('offset', 'length') of chunk 'id' of the Kiln cluster

@@ -53,8 +53,7 @@ class ShuffleBlockStore : public std::enable_shared_from_this<ShuffleBlockStore>
       int32_t shuffleId,
       int32_t mapId,
       int32_t numPartitions,
-      const std::string& attemptTag,
-      int64_t spillThreshold = kDefaultSpillThreshold);
+      const std::string& attemptTag);
 
   /// Bytes of a committed block.
   std::unique_ptr<folly::IOBuf> readBlock(
@@ -108,14 +107,13 @@ class PartitionedPageWriter : public ShuffleWriter {
       int32_t shuffleId,
       int32_t mapId,
       int32_t numPartitions,
-      std::string attemptTag,
-      int64_t spillThreshold);
+      std::string attemptTag);
 
   ~PartitionedPageWriter() override;
 
   void collect(int32_t partition, std::unique_ptr<folly::IOBuf> page) override;
 
-  void releaseMemory() override;
+  void spill() override;
 
   MapStatus commit() override;
 
@@ -123,10 +121,6 @@ class PartitionedPageWriter : public ShuffleWriter {
 
   int64_t bytesWritten() const override {
     return bytesWritten_;
-  }
-
-  int64_t spillCount() const override {
-    return spillCount_;
   }
 
  protected:
@@ -140,9 +134,9 @@ class PartitionedPageWriter : public ShuffleWriter {
   /// The bytes writePartitions() writes.
   int64_t outputBytes() const;
 
-  /// Called when the buffered pages pass the spill threshold: writes them to
-  /// a run file, which writePartitions() reads back.
-  virtual void spill();
+  /// Writes the buffered pages to a run file, which writePartitions() reads
+  /// back.
+  virtual void spillPages();
 
   /// Writes the buffered pages, partition by partition, through 'write' and
   /// drops them. Returns the numPartitions + 1 offsets of the partitions.
@@ -181,11 +175,9 @@ class PartitionedPageWriter : public ShuffleWriter {
   const int32_t mapId_;
   const int32_t numPartitions_;
   const std::string attemptTag_;
-  const int64_t spillThreshold_;
   std::vector<std::vector<std::unique_ptr<folly::IOBuf>>> pages_;
   int64_t bufferedBytes_{0};
   std::vector<SpillRun> runs_;
-  int64_t spillCount_{0};
   int64_t bytesWritten_{0};
   bool done_{false};
 };
