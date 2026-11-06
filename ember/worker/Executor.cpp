@@ -7,6 +7,7 @@
 #include "axiom/connectors/file/FileHandler.h"
 #include "ember/RowPages.h"
 #include "ember/Runtime.h"
+#include "ember/shuffle/KilnShuffle.h"
 #include "ember/shuffle/ShuffleContext.h"
 #include "ember/shuffle/ShuffleWrite.h"
 #include "ember/worker/TaskDescription.h"
@@ -85,13 +86,6 @@ std::vector<rpc::FileInfo> Executor::listFiles(
   return files;
 }
 
-namespace {
-
-// Default bytes a merge exchange buffers across its sources.
-constexpr int64_t kMergeExchangeBufferBytes = 32 << 20;
-
-} // namespace
-
 std::string Executor::runTask(const std::string& bytes) {
   TaskResult result;
   uint64_t wallMicros = 0;
@@ -105,12 +99,11 @@ std::string Executor::runTask(const std::string& bytes) {
 
     auto config = std::unordered_map<std::string, std::string>(
         description.config.begin(), description.config.end());
-    // Velox's 128 MB per merge would let the merges of a few reduce tasks
-    // hold more Kiln read buffers than the pool has, and the rest of their
-    // reads would be copied.
+    // A merge buffers its slot's share of the Kiln read pool, so that the
+    // reads of all running merges fit and none of them are copied.
     config.try_emplace(
         std::string(core::QueryConfig::kMaxMergeExchangeBufferSize),
-        std::to_string(kMergeExchangeBufferBytes));
+        std::to_string(shuffle::kilnReadPoolBytes() / options_.slots));
     auto queryCtx = core::QueryCtx::create(
         driverExecutor_.get(),
         core::QueryConfig(std::move(config)),

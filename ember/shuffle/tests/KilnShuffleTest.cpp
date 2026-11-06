@@ -475,6 +475,7 @@ TEST(KilnBufferPoolTest, readsNeverWaitForHeldBuffers) {
   auto staging = kilnStagingPool(metadata);
   auto writes = kilnWritePool(metadata);
   ASSERT_EQ(reads->count(), 2);
+  ASSERT_EQ(kilnReadPoolBytes(), 2 * kKilnReadPieceBytes);
   ASSERT_EQ(staging->count(), 2);
   ASSERT_EQ(writes->count(), 2);
 

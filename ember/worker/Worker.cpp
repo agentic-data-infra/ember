@@ -236,6 +236,7 @@ void Worker::startExecutor() {
       .location = address_,
       .shuffleDirectory = std::move(directory),
       .numThreads = numThreads_,
+      .slots = options_.slots,
       .remoteTransport = transport_,
       .fetchOwnBlocksRemotely = options_.fetchLocalBlocksOverNetwork});
   auto slots = std::make_shared<folly::CPUThreadPoolExecutor>(options_.slots);
