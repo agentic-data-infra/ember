@@ -237,8 +237,7 @@ void Worker::startExecutor() {
       .shuffleDirectory = std::move(directory),
       .numThreads = numThreads_,
       .slots = options_.slots,
-      .remoteTransport = transport_,
-      .fetchOwnBlocksRemotely = options_.fetchLocalBlocksOverNetwork});
+      .remoteTransport = transport_});
   auto slots = std::make_shared<folly::CPUThreadPoolExecutor>(options_.slots);
   std::lock_guard<std::mutex> l(mutex_);
   executor_ = std::move(executor);

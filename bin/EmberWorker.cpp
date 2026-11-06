@@ -38,10 +38,6 @@ DEFINE_string(
     "The machine this worker runs on, for node-local files; default the host name.");
 DEFINE_string(local_dir, "", "Directory for shuffle files; default <tmp>/ember.");
 DEFINE_bool(persistent, false, "Wait for the next driver when one is done.");
-DEFINE_bool(
-    fetch_local_blocks_over_network,
-    false,
-    "Fetch this worker's own shuffle blocks over TCP too (for testing).");
 DEFINE_int32(
     fetch_timeout_ms,
     120'000,
@@ -102,7 +98,6 @@ int main(int argc, char** argv) {
       ? (std::filesystem::temp_directory_path() / "ember").string()
       : FLAGS_local_dir;
   options.persistent = FLAGS_persistent;
-  options.fetchLocalBlocksOverNetwork = FLAGS_fetch_local_blocks_over_network;
   options.connectTimeout = std::chrono::seconds(FLAGS_connect_timeout_s);
   options.fetchTimeout = std::chrono::milliseconds(FLAGS_fetch_timeout_ms);
 
