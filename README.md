@@ -82,8 +82,9 @@ git push --force-with-lease origin ember ember-YYYYMMDD
 git ls-tree HEAD velox      # the Velox commit
 ```
 
-Then set `AXIOM_REF`, check out the Velox commit in `~/source/velox`, run `scripts/build_deps.sh` and `buck2 clean`, and run the
-tests. Old tags stay, so that older Ember commits still build.
+Then set `AXIOM_REF`, check out the Velox commit in `~/source/velox`, run
+`scripts/build_deps.sh` and `buck2 clean`, and run the tests. Old tags stay, so
+that older Ember commits still build.
 
 ## Running WordCount
 
