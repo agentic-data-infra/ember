@@ -15,12 +15,11 @@ PREFIX="${PREFIX:-/opt/deps-gcc12}"
 BUILD_DIR="${BUILD_DIR:-$AXIOM_SRC/_build/release-gcc12}"
 NUM_THREADS="${NUM_THREADS:-$(nproc)}"
 
-# The versions Ember builds with, set only here. See "Updating Axiom and Velox"
-# in README.md.
+# The Axiom version Ember builds with, set only here; it pins Velox's. See
+# "Updating Axiom and Velox" in README.md.
 AXIOM_REPO=https://github.com/agentic-data-infra/axiom.git
 AXIOM_REF=ember-20261105-3
 VELOX_REPO=https://github.com/facebookincubator/velox.git
-VELOX_REF=81a48ef0aab17bf4e010e59004f7f905945414b7
 
 # Clones 'repo' at 'ref' into 'dir' if it is missing, and fails if 'dir' sits
 # at another commit: it may hold work, so it is not moved.
@@ -40,6 +39,8 @@ check_source() {
 }
 
 check_source "$AXIOM_REPO" "$AXIOM_REF" "$AXIOM_SRC"
+# The Velox commit that Axiom's submodule pins.
+VELOX_REF="$(git -C "$AXIOM_SRC" rev-parse "$AXIOM_REF:velox")"
 check_source "$VELOX_REPO" "$VELOX_REF" "$VELOX_SRC"
 
 if [ ! -L "$AXIOM_SRC/velox" ]; then
