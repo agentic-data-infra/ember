@@ -562,8 +562,12 @@ void setKilnBufferPools(size_t reads, size_t writes, size_t staging) {
 }
 
 int64_t kilnPoolBytes() {
-  return readBuffers * kKilnReadPieceBytes +
+  return kilnReadPoolBytes() +
       (writeBuffers + stagingBuffers) * kKilnBufferBytes;
+}
+
+int64_t kilnReadPoolBytes() {
+  return readBuffers * kKilnReadPieceBytes;
 }
 
 std::shared_ptr<kiln::client::BufferPool> kilnReadPool(
