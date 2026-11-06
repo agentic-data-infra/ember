@@ -71,7 +71,7 @@ rebuilding them.
 Ember builds with [our fork of Axiom](https://github.com/agentic-data-infra/axiom):
 upstream Axiom plus the commits of the branch `ember`, each a candidate upstream
 pull request, and Velox at the commit Axiom's `velox` submodule pins. The
-versions are set at the top of `scripts/build_deps.sh`. To update:
+Axiom version is set at the top of `scripts/build_deps.sh`. To update:
 
 ```
 cd ~/source/axiom
@@ -79,11 +79,10 @@ git fetch https://github.com/facebookincubator/axiom.git main
 git rebase FETCH_HEAD ember
 git tag ember-YYYYMMDD
 git push --force-with-lease origin ember ember-YYYYMMDD
-git ls-tree HEAD velox      # the Velox commit to pin
+git ls-tree HEAD velox      # the Velox commit
 ```
 
-Then set `AXIOM_REF` and `VELOX_REF`, check out the Velox commit in
-`~/source/velox`, run `scripts/build_deps.sh` and `buck2 clean`, and run the
+Then set `AXIOM_REF`, check out the Velox commit in `~/source/velox`, run `scripts/build_deps.sh` and `buck2 clean`, and run the
 tests. Old tags stay, so that older Ember commits still build.
 
 ## Running WordCount
