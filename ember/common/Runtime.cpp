@@ -39,8 +39,8 @@ namespace velox = facebook::velox;
 
 namespace {
 
-// 80% of the machine's memory, or of the cgroup's limit if that is lower.
-int64_t defaultMemoryBytes() {
+// The machine's memory, or the cgroup's limit if that is lower.
+int64_t availableMemoryBytes() {
   auto bytes = int64_t{sysconf(_SC_PHYS_PAGES)} * sysconf(_SC_PAGESIZE);
   for (const auto* path :
        {"/sys/fs/cgroup/memory.max",
@@ -53,7 +53,7 @@ int64_t defaultMemoryBytes() {
       }
     }
   }
-  return bytes / 5 * 4;
+  return bytes;
 }
 
 } // namespace
@@ -62,7 +62,12 @@ void initializeRuntime(int64_t memoryBytes) {
   static std::once_flag once;
   static int64_t budget = 0;
   std::call_once(once, [memoryBytes] {
-    budget = memoryBytes > 0 ? memoryBytes : defaultMemoryBytes();
+    const auto available = availableMemoryBytes();
+    budget = memoryBytes > 0 ? memoryBytes : available / 5 * 4;
+    if (budget > available) {
+      LOG(WARNING) << kWorkerMemoryBytes << " is " << budget
+                   << ", more than the " << available << " available";
+    }
     const auto capacity = budget - shuffle::kilnPoolBytes();
     // What the arbitrator does not hand out is what spilling itself uses.
     const auto arbitratorCapacity = capacity - budget / 10;

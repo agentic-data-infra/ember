@@ -14,3 +14,9 @@ ember_worker --driver=host:port [--slots=N] [--port=P] [--host=name] \
              [--node=name] [--local_dir=dir] [--persistent] \
              [--memory_bytes=B]
 ```
+
+`--memory_bytes` is what this process may use, by default 80% of the machine or
+cgroup, and startup logs a warning if it is more than the machine or cgroup
+has. The default is per process, so several workers on one host should get
+values that add up. The budget takes off one set of Kiln buffer pools; each
+further Kiln cluster the process uses adds its own set on top.
