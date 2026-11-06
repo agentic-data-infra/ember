@@ -2,6 +2,7 @@
 //
 //   ember-worker --driver=host:port [--slots=N] [--port=P] [--host=name]
 //                [--node=name] [--local_dir=dir] [--persistent] [--fetch_timeout_ms=T]
+//                [--memory_bytes=B]
 //
 // Start one per machine (or several on one machine), pointed at the address
 // in the driver's master URL ember://host:port. The worker registers with the
@@ -24,6 +25,10 @@
 DEFINE_string(driver, "", "The driver's address, host:port.");
 DEFINE_int32(slots, 0, "Tasks run at once; 0 for the number of cores.");
 DEFINE_int32(threads, 0, "Threads for Velox drivers; 0 for 2 * slots.");
+DEFINE_int64(
+    memory_bytes,
+    0,
+    "Bytes this process may use; 0 for 80% of the machine or cgroup.");
 DEFINE_int32(port, 0, "Port to serve tasks and shuffle blocks on; 0 for any.");
 DEFINE_string(bind_host, "", "Interface to serve on; empty for all.");
 DEFINE_string(host, "", "Host name others reach this worker by.");
@@ -92,6 +97,7 @@ int main(int argc, char** argv) {
       ? FLAGS_slots
       : static_cast<int32_t>(folly::available_concurrency());
   options.numThreads = FLAGS_threads;
+  options.memoryBytes = FLAGS_memory_bytes;
   options.localDirectory = FLAGS_local_dir.empty()
       ? (std::filesystem::temp_directory_path() / "ember").string()
       : FLAGS_local_dir;

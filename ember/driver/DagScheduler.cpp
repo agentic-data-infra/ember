@@ -134,6 +134,10 @@ DagScheduler::DagScheduler(
     kiln_ = shuffle::kilnClient(shuffleTarget_.kilnMetadata);
   }
   for (const auto& [key, value] : options_.config) {
+    // Spilling does not change results.
+    if (key == core::QueryConfig::kSpillEnabled) {
+      continue;
+    }
     if (!key.starts_with("ember.") || key == kMaxSplitBytes ||
         key == kNodeLocalFiles) {
       keyConfig_[key] = value;

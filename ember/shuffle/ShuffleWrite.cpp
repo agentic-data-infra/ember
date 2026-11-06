@@ -218,15 +218,13 @@ class ShuffleWrite : public exec::Operator {
           task->destination(),
           node_->numPartitions(),
           attemptTag(task->taskId()),
-          target.spillThreshold,
           target.spill);
     } else {
       writer_ = store->createWriter(
           node_->shuffleId(),
           task->destination(),
           node_->numPartitions(),
-          attemptTag(task->taskId()),
-          target.spillThreshold);
+          attemptTag(task->taskId()));
     }
   }
 
@@ -250,11 +248,15 @@ class ShuffleWrite : public exec::Operator {
     if (work_ == nullptr || partitions_.empty() || !work_->finish()) {
       return;
     }
-    for (int32_t p = 0; p < partitions_.size(); ++p) {
-      flush(p, *velox::memory::spillMemoryPool());
+    if (bufferedBytes() == 0) {
+      return;
     }
-    collectPages();
-    writer_->releaseMemory();
+    // Reclaim leaves writing to this thread: the task is paused until it is
+    // done.
+    flushAll(*velox::memory::spillMemoryPool());
+    writer_->spill();
+    pageBytes_ = 0;
+    ++reclaimSpills_;
     pool()->release();
   }
 
@@ -298,8 +300,11 @@ class ShuffleWrite : public exec::Operator {
         }
       }
     }
-    if (!pages_.empty()) {
-      work_->start([this] { collectPages(); });
+    if (bufferedBytes() >= node_->target().spillThreshold) {
+      flushAll(*pool());
+      pageBytes_ = 0;
+      ++thresholdSpills_;
+      work_->start([this] { writer_->spill(); });
     }
   }
 
@@ -310,11 +315,9 @@ class ShuffleWrite : public exec::Operator {
   void noMoreInput() override {
     Operator::noMoreInput();
     reserve(kTargetPageBytes);
-    for (int32_t p = 0; p < partitions_.size(); ++p) {
-      flush(p, *pool());
-    }
+    flushAll(*pool());
+    pageBytes_ = 0;
     work_->start([this] {
-      collectPages();
       writer_->commit();
       committed_ = true;
       auto lockedStats = stats_.wlock();
@@ -323,7 +326,9 @@ class ShuffleWrite : public exec::Operator {
           velox::RuntimeCounter(
               writer_->bytesWritten(), velox::RuntimeCounter::Unit::kBytes));
       lockedStats->addRuntimeStat(
-          "shuffleSpills", velox::RuntimeCounter(writer_->spillCount()));
+          "shuffleThresholdSpills", velox::RuntimeCounter(thresholdSpills_));
+      lockedStats->addRuntimeStat(
+          "shuffleReclaimSpills", velox::RuntimeCounter(reclaimSpills_));
     });
   }
 
@@ -352,6 +357,7 @@ class ShuffleWrite : public exec::Operator {
   struct Partition {
     std::unique_ptr<velox::VectorStreamGroup> group;
     velox::vector_size_t numRows{0};
+    int64_t bytes{0};
   };
 
   // Task ids may contain '/' and ':'; keep file names flat.
@@ -400,9 +406,18 @@ class ShuffleWrite : public exec::Operator {
     }
     state.group->append(output, rows, scratch_);
     state.numRows += rows.size();
-    if (state.group->size() >= kTargetPageBytes) {
+    const int64_t bytes = state.group->size();
+    groupBytes_ += bytes - state.bytes;
+    state.bytes = bytes;
+    if (bytes >= kTargetPageBytes) {
       flush(partition, *pool());
     }
+  }
+
+  // What the spill threshold counts: the pages at the writer and the open
+  // partition groups.
+  int64_t bufferedBytes() const {
+    return pageBytes_ + groupBytes_;
   }
 
   // The driver keeps its operators out of reclaim while it calls them, so this
@@ -414,7 +429,14 @@ class ShuffleWrite : public exec::Operator {
     }
   }
 
-  // Serializes the partition's rows into a page allocated from 'pagePool'.
+  void flushAll(velox::memory::MemoryPool& pagePool) {
+    for (int32_t p = 0; p < partitions_.size(); ++p) {
+      flush(p, pagePool);
+    }
+  }
+
+  // Serializes the partition's rows into a page allocated from 'pagePool' and
+  // hands it to the writer.
   void flush(int32_t partition, velox::memory::MemoryPool& pagePool) {
     auto& state = partitions_[partition];
     if (state.group == nullptr || state.numRows == 0) {
@@ -426,17 +448,13 @@ class ShuffleWrite : public exec::Operator {
         nullptr,
         std::max<int64_t>(kMinMessageSize, state.group->size()));
     state.group->flush(&stream);
-    pages_.emplace_back(partition, stream.getIOBuf());
+    auto page = stream.getIOBuf();
+    pageBytes_ += page->computeChainDataLength();
+    writer_->collect(partition, std::move(page));
+    groupBytes_ -= state.bytes;
+    state.bytes = 0;
     state.group.reset();
     state.numRows = 0;
-  }
-
-  // Hands the pages to the writer, which may spill them or wait for Kiln.
-  void collectPages() {
-    for (auto& [partition, page] : pages_) {
-      writer_->collect(partition, std::move(page));
-    }
-    pages_.clear();
   }
 
   const std::shared_ptr<const ShuffleWriteNode> node_;
@@ -451,8 +469,10 @@ class ShuffleWrite : public exec::Operator {
   std::vector<velox::vector_size_t> allRows_;
   velox::Scratch scratch_;
   uint32_t nextArbitrary_{0};
-  // Pages for the writer, which 'work_' uses while it runs.
-  std::vector<std::pair<int32_t, std::unique_ptr<folly::IOBuf>>> pages_;
+  int64_t pageBytes_{0};
+  int64_t groupBytes_{0};
+  int64_t thresholdSpills_{0};
+  int64_t reclaimSpills_{0};
   std::atomic<bool> committed_{false};
   std::unique_ptr<BackgroundWork> work_;
 };

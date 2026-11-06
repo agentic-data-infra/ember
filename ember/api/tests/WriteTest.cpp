@@ -7,8 +7,12 @@
 #include <fstream>
 #include <random>
 
+#include "ember/Runtime.h"
 #include "ember/Session.h"
 #include "ember/functions.h"
+#include "ember/shuffle/KilnShuffle.h"
+#include "velox/common/memory/Memory.h"
+#include "velox/common/memory/MemoryArbitrator.h"
 #include "velox/exec/SpillStats.h"
 
 namespace ember {
@@ -33,9 +37,15 @@ class WriteTest : public testing::Test {
     fs::remove_all(dir_);
   }
 
+  // All tests of this process run in a small budget.
+  static void SetUpTestSuite() {
+    shuffle::setKilnBufferPools(4, 2, 2);
+  }
+
   Session& session(std::map<std::string, std::string> config = {}) {
     auto builder = Session::builder();
     builder.appName("WriteTest").master("local[4]");
+    builder.config(kWorkerMemoryBytes, std::to_string(256 << 20));
     for (const auto& [key, value] : config) {
       builder.config(key, value);
     }
@@ -173,45 +183,43 @@ TEST_F(WriteTest, balancesSkewedKeys) {
   }
 }
 
-TEST_F(WriteTest, spillsSortOverMemoryLimit) {
-  // Two tasks sort 50MB each in 64MB of memory. They also buffer shuffle
-  // reads, and merging their spilled runs back needs more than 32MB.
-  auto expected = writeInput(2, 500'000);
+TEST_F(WriteTest, tasksShareTheProcessMemory) {
+  // Two tasks' sorts and shuffle pages do not fit into the capacity, and are
+  // under the spill threshold: only the arbitrator can get them out of memory,
+  // and for one task's memory it may have to take the other's.
+  auto expected = writeInput(2, 1'500'000);
   const auto spilledBefore =
       facebook::velox::exec::globalSpillStats().spilledBytes.load();
   auto records = session({{"ember.default.parallelism", "2"},
                           {"ember.sort.range_partitions", "2"},
-                          {"spill_enabled", "true"},
-                          {"query_max_memory_per_node", "64MB"},
-                          {"ember.shuffle.spill_threshold_bytes", "1048576"}})
-                     .read()
-                     .gensort(input().string())
-                     .orderBy(col("key"))
-                     .write()
-                     .gensort(output().string());
-  EXPECT_EQ(records, 1'000'000);
-  EXPECT_GT(
-      facebook::velox::exec::globalSpillStats().spilledBytes.load(),
-      spilledBefore);
-  EXPECT_EQ(readOutput().second, expected);
-}
-
-TEST_F(WriteTest, arbitratorReclaimsShuffleMemory) {
-  // Each map task's 80MB of shuffle pages do not fit into 64MB, and are under
-  // the spill threshold: only the arbitrator can get them out of memory.
-  auto expected = writeInput(2, 800'000);
-  auto records = session({{"ember.default.parallelism", "2"},
-                          {"ember.sort.range_partitions", "2"},
-                          {"spill_enabled", "true"},
-                          {"query_max_memory_per_node", "64MB"},
                           {"ember.shuffle.spill_threshold_bytes", "1073741824"}})
                      .read()
                      .gensort(input().string())
                      .orderBy(col("key"))
                      .write()
                      .gensort(output().string());
-  EXPECT_EQ(records, 1'600'000);
+  EXPECT_EQ(records, 3'000'000);
+  EXPECT_GT(
+      facebook::velox::exec::globalSpillStats().spilledBytes.load(),
+      spilledBefore);
   EXPECT_EQ(readOutput().second, expected);
+  // Nothing was killed and retried to make room.
+  const auto stats = facebook::velox::memory::memoryManager()->arbitrator()->stats();
+  EXPECT_GT(stats.reclaimedUsedBytes, 0);
+  EXPECT_EQ(stats.numAborted, 0);
+  EXPECT_EQ(stats.numFailures, 0);
+}
+
+TEST_F(WriteTest, memoryBudgetIsSetOnce) {
+  session();
+  EXPECT_NO_THROW(initializeRuntime());
+  EXPECT_THROW(initializeRuntime(1 << 30), facebook::velox::VeloxUserError);
+}
+
+TEST_F(WriteTest, rejectsThePerTaskLimit) {
+  EXPECT_THROW(
+      session({{"query_max_memory_per_node", "64MB"}}),
+      facebook::velox::VeloxUserError);
 }
 
 TEST_F(WriteTest, rejectsRowsThatAreNotRecords) {

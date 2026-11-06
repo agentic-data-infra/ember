@@ -79,7 +79,6 @@ class KilnShuffleTest : public testing::Test {
       int32_t mapId,
       int32_t numPartitions,
       const std::string& attemptTag = "attempt0",
-      int64_t spillThreshold = ShuffleBlockStore::kDefaultSpillThreshold,
       const std::string& tier = "dram",
       uint64_t bucket = kiln::kDefaultBucket,
       bool spill = true) {
@@ -92,7 +91,6 @@ class KilnShuffleTest : public testing::Test {
         mapId,
         numPartitions,
         attemptTag,
-        spillThreshold,
         spill);
   }
 
@@ -102,14 +100,13 @@ class KilnShuffleTest : public testing::Test {
       int32_t shuffleId,
       int32_t mapId,
       const std::vector<int32_t>& counts,
-      int64_t spillThreshold = ShuffleBlockStore::kDefaultSpillThreshold,
+      bool spillEachPage = false,
       bool spill = true) {
     auto mapWriter = writer(
         shuffleId,
         mapId,
         counts.size(),
         "attempt0",
-        spillThreshold,
         "dram",
         kiln::kDefaultBucket,
         spill);
@@ -119,6 +116,9 @@ class KilnShuffleTest : public testing::Test {
         if (i < counts[p]) {
           mapWriter->collect(
               p, folly::IOBuf::copyBuffer(fmt::format("{}-{}", p, i)));
+          if (spillEachPage) {
+            mapWriter->spill();
+          }
         }
       }
     }
@@ -167,7 +167,7 @@ TEST_F(KilnShuffleTest, oneChunkWithPartitionsInOrder) {
 
 TEST_F(KilnShuffleTest, spilledRunsMergeInWriteOrder) {
   // A tiny threshold spills after every page.
-  auto status = writeMap(1, 0, {5, 4}, /*spillThreshold=*/1);
+  auto status = writeMap(1, 0, {5, 4}, /*spillEachPage=*/true);
   EXPECT_EQ(
       readBlock(status, 0),
       (std::vector<std::string>{"0-0", "0-1", "0-2", "0-3", "0-4"}));
@@ -180,7 +180,7 @@ TEST_F(KilnShuffleTest, spilledRunsMergeInWriteOrder) {
 // every page, its pages go to the chunk as a segment of their own; a block
 // is then one range per segment that has bytes of it.
 TEST_F(KilnShuffleTest, appendsSegmentsWithoutSpillFiles) {
-  auto status = writeMap(10, 0, {5, 4}, /*spillThreshold=*/1, /*spill=*/false);
+  auto status = writeMap(10, 0, {5, 4}, /*spillEachPage=*/true, /*spill=*/false);
   ASSERT_EQ(status.segments.size(), 9);
   EXPECT_EQ(status.segments[0], (std::vector<int64_t>{7, 0}));
   EXPECT_EQ(status.segments[1], (std::vector<int64_t>{0, 7}));
@@ -203,19 +203,18 @@ TEST_F(KilnShuffleTest, appendsSegmentsWithoutSpillFiles) {
 }
 
 // Without spills, released pages go to the chunk as a segment of their own.
-TEST_F(KilnShuffleTest, releaseMemoryAppendsSegment) {
+TEST_F(KilnShuffleTest, spillAppendsSegment) {
   auto mapWriter = writer(
       15,
       0,
       1,
       "attempt0",
-      ShuffleBlockStore::kDefaultSpillThreshold,
       "dram",
       kiln::kDefaultBucket,
       /*spill=*/false);
   mapWriter->collect(0, folly::IOBuf::copyBuffer("first"));
-  mapWriter->releaseMemory();
-  mapWriter->releaseMemory();
+  mapWriter->spill();
+  mapWriter->spill();
   mapWriter->collect(0, folly::IOBuf::copyBuffer("second"));
   auto status = mapWriter->commit();
   EXPECT_EQ(status.segments.size(), 2);
@@ -232,12 +231,14 @@ TEST_F(KilnShuffleTest, largeAppendsWithoutSpills) {
       0,
       2,
       "attempt0",
-      /*spillThreshold=*/5 << 20,
       "dram",
       kiln::kDefaultBucket,
       /*spill=*/false);
   for (int i = 0; i < 5; ++i) {
     mapWriter->collect(i % 2, folly::IOBuf::copyBuffer(data + std::to_string(i)));
+    if (i % 2 == 1) {
+      mapWriter->spill();
+    }
   }
   auto status = mapWriter->commit();
   const int64_t frame = 4 + (3 << 20) + 1;
@@ -255,24 +256,26 @@ TEST_F(KilnShuffleTest, largeAppendsWithoutSpills) {
 // Never past the threshold, the output is written at commit as one segment.
 TEST_F(KilnShuffleTest, noSpillsNeededIsOneSegment) {
   auto status = writeMap(
-      12, 0, {2, 1}, ShuffleBlockStore::kDefaultSpillThreshold, /*spill=*/false);
+      12, 0, {2, 1}, /*spillEachPage=*/false, /*spill=*/false);
   EXPECT_EQ(status.segments, (std::vector<std::vector<int64_t>>{{14, 7}}));
   EXPECT_EQ(readBlock(status, 0), (std::vector<std::string>{"0-0", "0-1"}));
 }
 
-// An aborted writer drops its chunk, appends in flight included; another
-// attempt then commits.
+// An aborted writer drops its chunk; another attempt then commits.
 TEST_F(KilnShuffleTest, abortDropsAppendedSegments) {
   auto aborted = writer(
-      13, 0, 1, "attempt0", 1, "dram", kiln::kDefaultBucket, /*spill=*/false);
+      13, 0, 1, "attempt0", "dram", kiln::kDefaultBucket, /*spill=*/false);
   aborted->collect(0, folly::IOBuf::copyBuffer("lost"));
+  aborted->spill();
   aborted->collect(0, folly::IOBuf::copyBuffer("also lost"));
+  aborted->spill();
   aborted->abort();
   EXPECT_FALSE(store_->hasMapOutput(13, 0));
 
   auto retry = writer(
-      13, 0, 1, "attempt1", 1, "dram", kiln::kDefaultBucket, /*spill=*/false);
+      13, 0, 1, "attempt1", "dram", kiln::kDefaultBucket, /*spill=*/false);
   retry->collect(0, folly::IOBuf::copyBuffer("kept"));
+  retry->spill();
   auto status = retry->commit();
   EXPECT_EQ(readBlock(status, 0), (std::vector<std::string>{"kept"}));
 }
@@ -296,9 +299,12 @@ TEST_F(KilnShuffleTest, largeOutputSpansAppends) {
 // each buffer is filled while the previous one is appended.
 TEST_F(KilnShuffleTest, largeSpilledOutputSpansAppends) {
   const std::string data(3 << 20, 'z');
-  auto mapWriter = writer(14, 0, 2, "attempt0", /*spillThreshold=*/5 << 20);
+  auto mapWriter = writer(14, 0, 2);
   for (int i = 0; i < 7; ++i) {
     mapWriter->collect(i % 2, folly::IOBuf::copyBuffer(data + std::to_string(i)));
+    if (i % 2 == 1) {
+      mapWriter->spill();
+    }
   }
   auto status = mapWriter->commit();
   ASSERT_EQ(status.segments.size(), 1);
@@ -361,12 +367,14 @@ TEST_F(KilnShuffleTest, sourceStreamsBlockInPieces) {
   for (const bool spill : {true, false}) {
     SCOPED_TRACE(spill);
     auto mapWriter = writer(
-        12, spill ? 0 : 1, 1, "attempt0", spill ? 1 << 30 : 1, "dram",
-        kiln::kDefaultBucket, spill);
+        12, spill ? 0 : 1, 1, "attempt0", "dram", kiln::kDefaultBucket, spill);
     std::vector<std::string> data;
     for (int i = 0; i < 5; ++i) {
       data.push_back(std::string(700 << 10, 'a' + i));
       mapWriter->collect(0, folly::IOBuf::copyBuffer(data.back()));
+      if (!spill) {
+        mapWriter->spill();
+      }
     }
     auto status = mapWriter->commit();
     const auto url = blockUrl(
@@ -484,12 +492,18 @@ TEST(KilnBufferPoolTest, readsNeverWaitForHeldBuffers) {
     SCOPED_TRACE(spill);
     auto mapWriter = createKilnWriter(
         store, metadata, "dram", kiln::kDefaultBucket, spill ? 0 : 1, 0, 4,
-        "attempt0", /*spillThreshold=*/spill ? 1 << 30 : 1, spill);
+        "attempt0", spill);
     for (int i = 0; i < 3; ++i) {
       mapWriter->collect(0, folly::IOBuf::copyBuffer(data));
+      if (!spill) {
+        mapWriter->spill();
+      }
     }
     for (int32_t p = 1; p < 4; ++p) {
       mapWriter->collect(p, folly::IOBuf::copyBuffer(fmt::format("page {}", p)));
+      if (!spill) {
+        mapWriter->spill();
+      }
     }
     auto status = mapWriter->commit();
     EXPECT_EQ(writes->available(), 2);
@@ -548,11 +562,13 @@ TEST_F(KilnShuffleTest, rdmaTransfersWithoutCopies) {
         spill ? 0 : 1,
         2,
         "attempt0",
-        /*spillThreshold=*/3 << 20,
         spill);
     for (int i = 0; i < 6; ++i) {
       // Partition 1 is larger than a pooled buffer.
       mapWriter->collect(i == 0 ? 0 : 1, folly::IOBuf::copyBuffer(data));
+      if (i == 2 && !spill) {
+        mapWriter->spill();
+      }
     }
     auto status = mapWriter->commit();
     EXPECT_EQ(status.segments.size(), spill ? 1 : 2);
@@ -579,8 +595,7 @@ TEST_F(KilnShuffleTest, removedChunkFailsTheFetch) {
 }
 
 TEST_F(KilnShuffleTest, localFsTier) {
-  auto mapWriter = writer(8, 0, 2, "attempt0",
-      ShuffleBlockStore::kDefaultSpillThreshold, "localfs");
+  auto mapWriter = writer(8, 0, 2, "attempt0", "localfs");
   mapWriter->collect(0, folly::IOBuf::copyBuffer("on disk"));
   mapWriter->collect(1, folly::IOBuf::copyBuffer("also on disk"));
   auto status = mapWriter->commit();
@@ -596,8 +611,7 @@ TEST_F(KilnShuffleTest, localFsTier) {
 
 TEST_F(KilnShuffleTest, unknownTierFails) {
   EXPECT_THROW(
-      writer(9, 0, 1, "attempt0", ShuffleBlockStore::kDefaultSpillThreshold,
-          "objectstore"),
+      writer(9, 0, 1, "attempt0", "objectstore"),
       facebook::velox::VeloxUserError);
 }
 
@@ -637,8 +651,7 @@ class KilnTierTest : public testing::Test {
     for (int32_t mapId = 0; mapId < 6; ++mapId) {
       auto mapWriter = createKilnWriter(
           store_, metadata, tier, kiln::kDefaultBucket, shuffleId, mapId, 1,
-          "attempt0",
-          ShuffleBlockStore::kDefaultSpillThreshold);
+          "attempt0");
       mapWriter->collect(0, folly::IOBuf::copyBuffer(data(mapId)));
       outputs.push_back(mapWriter->commit());
       if (tiers != nullptr) {

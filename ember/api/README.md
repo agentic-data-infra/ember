@@ -25,6 +25,9 @@ after a hash shuffle on `word`, then a merge to the driver.
 
 Session config: `ember.local.dir` (shuffle files, default `<tmp>/ember`),
 `ember.files.max_split_bytes` (largest byte range of a file per task),
+`ember.worker.memory_bytes` (what this process may use, default 80% of the
+machine or cgroup, shared by all its tasks; a separate worker process takes
+`--memory_bytes`), `spill_enabled` (Velox's, default true here),
 `ember.shuffle.spill_threshold_bytes` (buffered shuffle bytes per map task
 before a spill), `ember.reuse.outputs` (keep shuffle outputs for later jobs
 with the same stages, default true).

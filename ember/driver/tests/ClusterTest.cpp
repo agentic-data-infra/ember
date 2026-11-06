@@ -410,6 +410,15 @@ TEST_F(ClusterTest, driverFailsWithoutWorkers) {
       "0 of 1 workers registered");
 }
 
+TEST_F(ClusterTest, workerTakesAMemoryBudget) {
+  startWorkers(/*count=*/1, /*slots=*/2, {"--memory_bytes=2147483648"});
+  auto& session = startDriver(1);
+  test::writeCorpus(dir_ / "input", 3, 500);
+  EXPECT_EQ(
+      test::toMap(test::wordCount(session, (dir_ / "input").string()).collect()),
+      test::shellWordCount(dir_ / "input"));
+}
+
 // Workers in this process, for debugging the protocol without processes.
 TEST_F(ClusterTest, inProcessWorkers) {
   std::vector<std::unique_ptr<Worker>> workers;

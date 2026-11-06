@@ -69,65 +69,79 @@ KilnCluster kilnCluster(const std::string& metadata, Pool pool = Pool::kNone) {
   return cluster;
 }
 
-// Buffers to hold 'bytes'.
-size_t buffersFor(int64_t bytes) {
-  return (bytes + kKilnBufferBytes - 1) / kKilnBufferBytes;
-}
-
-// Takes 'n' buffers from 'pool', waiting until that many are free. More
-// than the pool has, e.g. for a spill threshold above the pool's bytes, are
-// allocated instead, with a warning: allocating, and with RDMA registering,
-// them costs time.
-std::vector<kiln::Buffer> acquire(
-    kiln::client::Client& client,
-    kiln::client::BufferPool& pool,
-    size_t n) {
-  if (n <= pool.count()) {
-    return blockingWait(pool.co_acquire(n));
-  }
-  LOG_FIRST_N(WARNING, 1) << "Needs " << n << " Kiln buffers of "
-                          << kKilnBufferBytes << " bytes, the pool has "
-                          << pool.count() << ": allocating them";
-  std::vector<kiln::Buffer> buffers;
-  for (size_t i = 0; i < n; ++i) {
-    buffers.push_back(client.allocateBuffer(kKilnBufferBytes));
-  }
-  return buffers;
-}
-
-// Gives back buffers from acquire(); those it allocated go.
-void release(
-    kiln::client::BufferPool& pool,
-    std::vector<kiln::Buffer> buffers) {
-  if (buffers.size() <= pool.count()) {
-    pool.release(std::move(buffers));
-  }
-}
-
-// Copies bytes into consecutive buffers, filling each to its capacity.
-class BufferFiller {
+// Streams bytes into a chunk through two pooled buffers: fills one while Kiln
+// appends the other, and takes one append per chunk at a time.
+class ChunkAppender {
  public:
-  explicit BufferFiller(std::vector<kiln::Buffer>& buffers)
-      : buffers_{buffers} {}
+  ChunkAppender(
+      std::shared_ptr<kiln::client::BufferPool> pool,
+      kiln::client::ChunkWriter& chunk)
+      : pool_{std::move(pool)},
+        chunk_{chunk},
+        buffers_{blockingWait(pool_->co_acquire(2))} {}
 
-  void operator()(const void* data, size_t size) {
+  // The append in flight uses its buffer until it is done. A failed one drops
+  // it, and the pool replaces it.
+  ~ChunkAppender() {
+    try {
+      awaitAppend();
+    } catch (const std::exception&) {
+    }
+    pool_->release(std::move(buffers_));
+  }
+
+  void write(const void* data, size_t size) {
     auto* bytes = static_cast<const uint8_t*>(data);
     while (size > 0) {
-      auto& buffer = buffers_.at(next_);
+      auto& buffer = buffers_[current_];
       const auto n = std::min(size, buffer.capacity() - buffer.size());
       std::memcpy(buffer.data() + buffer.size(), bytes, n);
       buffer.setSize(buffer.size() + n);
       bytes += n;
       size -= n;
       if (buffer.size() == buffer.capacity()) {
-        ++next_;
+        flush();
       }
     }
   }
 
+  // Waits until all bytes are in the chunk.
+  void finish() {
+    flush();
+    awaitAppend();
+  }
+
  private:
-  std::vector<kiln::Buffer>& buffers_;
-  size_t next_{0};
+  // Waits for the append in flight, of the other buffer, and empties that
+  // buffer for reuse.
+  void awaitAppend() {
+    if (append_.has_value()) {
+      auto future = std::move(*append_);
+      append_.reset();
+      auto& other = buffers_[current_ ^ 1];
+      other = std::move(future).get();
+      other.setSize(0);
+    }
+  }
+
+  // Starts appending the current buffer without waiting and goes on with the
+  // other.
+  void flush() {
+    if (buffers_[current_].size() > 0) {
+      awaitAppend();
+      append_ = folly::coro::co_withExecutor(
+                    folly::getGlobalCPUExecutor(),
+                    chunk_.co_append(std::move(buffers_[current_])))
+                    .start();
+      current_ ^= 1;
+    }
+  }
+
+  const std::shared_ptr<kiln::client::BufferPool> pool_;
+  kiln::client::ChunkWriter& chunk_;
+  std::vector<kiln::Buffer> buffers_;
+  size_t current_{0};
+  std::optional<folly::SemiFuture<kiln::Buffer>> append_;
 };
 
 // The data of 'buffer', from 'pool', as an IOBuf that gives the buffer back
@@ -163,15 +177,13 @@ class KilnShuffleWriter : public PartitionedPageWriter {
       int32_t mapId,
       int32_t numPartitions,
       std::string attemptTag,
-      int64_t spillThreshold,
       bool spill)
       : PartitionedPageWriter(
             std::move(store),
             shuffleId,
             mapId,
             numPartitions,
-            std::move(attemptTag),
-            spillThreshold),
+            std::move(attemptTag)),
         metadata_{std::move(metadata)},
         bucket_{bucket},
         placement_{placement},
@@ -189,9 +201,9 @@ class KilnShuffleWriter : public PartitionedPageWriter {
  protected:
   // With spill off, appends the buffered pages to the chunk as a segment of
   // their own instead of writing a run file.
-  void spill() override {
+  void spillPages() override {
     if (spill_) {
-      PartitionedPageWriter::spill();
+      PartitionedPageWriter::spillPages();
       return;
     }
     appendSegment();
@@ -206,7 +218,6 @@ class KilnShuffleWriter : public PartitionedPageWriter {
       if (outputBytes() > 0) {
         appendSegment();
       }
-      awaitAppend();
       const auto id = blockingWait(chunk_->co_commit());
       chunk_.reset();
       status.location = kilnLocation(metadata_, id.toString());
@@ -229,59 +240,10 @@ class KilnShuffleWriter : public PartitionedPageWriter {
     auto chunk = blockingWait(client->co_create(bucket_, placement_, outputBytes()));
     std::vector<int64_t> offsets;
     try {
-      // Two buffers: the map task fills one while Kiln appends the other.
-      auto buffers = acquire(*client, *cluster.writes, 2);
-      size_t current = 0;
-      std::optional<folly::SemiFuture<kiln::Buffer>> append;
-      // Waits for the append in flight, of the other buffer, and empties
-      // that buffer for reuse.
-      auto awaitAppend = [&]() {
-        if (append.has_value()) {
-          auto future = std::move(*append);
-          append.reset();
-          auto& other = buffers[current ^ 1];
-          other = std::move(future).get();
-          other.setSize(0);
-        }
-      };
-      SCOPE_EXIT {
-        // The append in flight uses its buffer until it is done. A failed
-        // one drops it, and the pool replaces it.
-        try {
-          awaitAppend();
-        } catch (const std::exception&) {
-        }
-        release(*cluster.writes, std::move(buffers));
-      };
-      // Starts appending the current buffer without waiting (Kiln takes one
-      // append per chunk at a time, so after the previous one) and goes on
-      // with the other.
-      auto flush = [&]() {
-        if (buffers[current].size() > 0) {
-          awaitAppend();
-          append = folly::coro::co_withExecutor(
-                       folly::getGlobalCPUExecutor(),
-                       chunk->co_append(std::move(buffers[current])))
-                       .start();
-          current ^= 1;
-        }
-      };
-      offsets = writePartitions([&](const void* data, size_t size) {
-        auto* bytes = static_cast<const uint8_t*>(data);
-        while (size > 0) {
-          auto& buffer = buffers[current];
-          const auto n = std::min(size, buffer.capacity() - buffer.size());
-          std::memcpy(buffer.data() + buffer.size(), bytes, n);
-          buffer.setSize(buffer.size() + n);
-          bytes += n;
-          size -= n;
-          if (buffer.size() == buffer.capacity()) {
-            flush();
-          }
-        }
-      });
-      flush();
-      awaitAppend();
+      ChunkAppender appender(cluster.writes, *chunk);
+      offsets = writePartitions(
+          [&](const void* data, size_t size) { appender.write(data, size); });
+      appender.finish();
     } catch (const std::exception&) {
       blockingWait(chunk->co_abort());
       throw;
@@ -300,52 +262,24 @@ class KilnShuffleWriter : public PartitionedPageWriter {
     return record(std::move(status));
   }
 
-  // Copies the buffered pages into pooled buffers and starts appending them
-  // to the chunk, as one append, without waiting: the map task goes on while
-  // Kiln moves the bytes. Kiln takes one append per chunk at a time, so this
-  // first waits for the previous one, which gives its buffers back.
+  // Appends the buffered pages to the chunk as one segment.
   void appendSegment() {
-    awaitAppend();
     const auto cluster = kilnCluster(metadata_, Pool::kWrites);
-    const auto bytes = outputBytes();
     if (chunk_ == nullptr) {
       // The size of the whole output is not known yet: an overflow placement
       // picks the tier by the first segment.
-      chunk_ = blockingWait(cluster.client->co_create(bucket_, placement_, bytes));
+      chunk_ = blockingWait(
+          cluster.client->co_create(bucket_, placement_, outputBytes()));
     }
-    inFlight_ = acquire(*cluster.client, *cluster.writes, buffersFor(bytes));
-    const auto offsets = writeBuffered(BufferFiller(inFlight_));
+    ChunkAppender appender(cluster.writes, *chunk_);
+    const auto offsets = writeBuffered(
+        [&](const void* data, size_t size) { appender.write(data, size); });
+    appender.finish();
     segments_.push_back(partitionLengths(offsets));
-    // co_append uses inFlight_ until it is done; awaitAppend() and
-    // discardChunk() wait for that.
-    append_ = folly::coro::co_withExecutor(
-                  folly::getGlobalCPUExecutor(),
-                  chunk_->co_append(std::move(inFlight_)))
-                  .start();
   }
 
-  // Waits for the append in flight, if any, and gives its buffers back.
-  void awaitAppend() {
-    if (append_.has_value()) {
-      auto append = std::move(*append_);
-      append_.reset();
-      SCOPE_EXIT {
-        // Moved from on success; as they were on failure.
-        release(
-            *kilnCluster(metadata_, Pool::kWrites).writes,
-            std::move(inFlight_));
-      };
-      inFlight_ = std::move(append).get();
-    }
-  }
-
-  // Drops a chunk that was started but not committed. Its append in flight
-  // still uses it, so that one is waited for first.
+  // Drops a chunk that was started but not committed.
   void discardChunk() {
-    try {
-      awaitAppend();
-    } catch (const std::exception&) {
-    }
     if (chunk_ != nullptr) {
       try {
         blockingWait(chunk_->co_abort());
@@ -368,8 +302,6 @@ class KilnShuffleWriter : public PartitionedPageWriter {
   // With spill off: the chunk, started at the first append; the append in
   // flight and its buffers; and the partition lengths of each append.
   std::unique_ptr<kiln::client::ChunkWriter> chunk_;
-  std::optional<folly::SemiFuture<std::vector<kiln::Buffer>>> append_;
-  std::vector<kiln::Buffer> inFlight_;
   std::vector<std::vector<int64_t>> segments_;
 };
 
@@ -404,7 +336,6 @@ std::unique_ptr<ShuffleWriter> createKilnWriter(
     int32_t mapId,
     int32_t numPartitions,
     const std::string& attemptTag,
-    int64_t spillThreshold,
     bool spill) {
   kiln::Placement placement;
   if (tier == "dram+localfs") {
@@ -425,7 +356,6 @@ std::unique_ptr<ShuffleWriter> createKilnWriter(
       mapId,
       numPartitions,
       attemptTag,
-      spillThreshold,
       spill);
 }
 
@@ -629,6 +559,11 @@ void setKilnBufferPools(size_t reads, size_t writes, size_t staging) {
   readBuffers = reads;
   writeBuffers = writes;
   stagingBuffers = staging;
+}
+
+int64_t kilnPoolBytes() {
+  return readBuffers * kKilnReadPieceBytes +
+      (writeBuffers + stagingBuffers) * kKilnBufferBytes;
 }
 
 std::shared_ptr<kiln::client::BufferPool> kilnReadPool(
