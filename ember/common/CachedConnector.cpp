@@ -28,7 +28,7 @@ class CachedDataSource : public velox::connector::DataSource {
         schema_{table.schema()},
         serde_{velox::getNamedVectorSerde("Presto")},
         pool_{pool},
-        fetch_{shuffle::ShuffleContext::of(*pool)->ioExecutor} {
+        fetch_{shuffle::ShuffleRuntime::current()->ioExecutor()} {
     for (const auto& name : outputType_->names()) {
       channels_.push_back(schema_->getChildIdx(columnHandles.at(name)->name()));
     }
@@ -37,7 +37,7 @@ class CachedDataSource : public velox::connector::DataSource {
   void addSplit(std::shared_ptr<velox::connector::ConnectorSplit> split)
       override {
     const auto* block = split->asChecked<CachedBlockSplit>();
-    reader_ = std::make_unique<shuffle::BlockPageReader>(block->url, *pool_);
+    reader_ = std::make_unique<shuffle::BlockPageReader>(block->url);
     serdeOptions_ = exec::getVectorSerdeOptions(
         velox::common::stringToCompressionKind(block->compressionKind),
         "Presto",

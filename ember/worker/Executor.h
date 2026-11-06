@@ -12,10 +12,12 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "ember/rpc/Messages.h"
 #include "ember/shuffle/FileShuffle.h"
+#include "ember/shuffle/ShuffleRuntime.h"
 
 namespace folly {
 class CPUThreadPoolExecutor;
@@ -62,6 +64,11 @@ class Executor {
   /// Deletes the shuffle files of 'shuffleId'.
   void removeShuffle(int32_t shuffleId);
 
+  /// Ends the executor's time as the process's executor, for the next one,
+  /// though calls in progress may still hold on to this one. No task may be
+  /// running.
+  void stop();
+
   /// The data files a scan of 'path' in file format 'schema' reads on this
   /// machine, with their sizes: 'path' itself, or the files of a directory
   /// path ending in '/'.
@@ -81,6 +88,7 @@ class Executor {
   std::shared_ptr<facebook::velox::memory::MemoryPool> resultPool_;
   // Holds constants of deserialized plans.
   std::shared_ptr<facebook::velox::memory::MemoryPool> planPool_;
+  std::optional<shuffle::ShuffleRuntimeScope> runtime_;
 };
 
 } // namespace ember

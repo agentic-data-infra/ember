@@ -257,6 +257,9 @@ void Worker::stopExecutor() {
     // Running tasks finish; their results go nowhere if the driver is gone.
     slots->join();
   }
+  if (executor != nullptr) {
+    executor->stop();
+  }
 }
 
 folly::coro::Task<std::string> Worker::co_launchTask(std::string task) {

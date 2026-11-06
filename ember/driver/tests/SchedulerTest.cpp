@@ -16,7 +16,6 @@
 #include "ember/Session.h"
 #include "ember/TaskId.h"
 #include "ember/driver/DagScheduler.h"
-#include "ember/driver/LocalBackend.h"
 #include "ember/driver/MapOutputTracker.h"
 #include "ember/driver/RangeBounds.h"
 #include "ember/functions.h"
@@ -50,11 +49,11 @@ class FlakyBackend : public SchedulerBackend {
  public:
   using FailIf = std::function<bool(const TaskDescription&)>;
 
-  FlakyBackend(std::shared_ptr<SchedulerBackend> backend, FailIf fail)
-      : backend_{std::move(backend)}, fail_{std::move(fail)} {}
+  FlakyBackend(SchedulerBackend& backend, FailIf fail)
+      : backend_{backend}, fail_{std::move(fail)} {}
 
   int32_t totalSlots() const override {
-    return backend_->totalSlots();
+    return backend_.totalSlots();
   }
 
   void launchTask(
@@ -74,18 +73,18 @@ class FlakyBackend : public SchedulerBackend {
       onResult(result.serialize());
       return;
     }
-    backend_->launchTask(std::move(task), node, std::move(onResult));
+    backend_.launchTask(std::move(task), node, std::move(onResult));
   }
 
   std::vector<std::string> nodes() const override {
-    return backend_->nodes();
+    return backend_.nodes();
   }
 
   std::vector<rpc::FileInfo> listFiles(
       const std::string& node,
       const std::string& schema,
       const std::string& path) override {
-    return backend_->listFiles(node, schema, path);
+    return backend_.listFiles(node, schema, path);
   }
 
   void setExecutorListener(ExecutorListener listener) override {
@@ -94,7 +93,7 @@ class FlakyBackend : public SchedulerBackend {
   }
 
   void removeShuffle(int32_t shuffleId) override {
-    backend_->removeShuffle(shuffleId);
+    backend_.removeShuffle(shuffleId);
   }
 
   /// Reports the executor at 'location' lost, then back, as if it restarted.
@@ -108,9 +107,8 @@ class FlakyBackend : public SchedulerBackend {
     listener.onExecutorAdded(location);
   }
 
-  void stop() override {
-    backend_->stop();
-  }
+  // The session stops the backend.
+  void stop() override {}
 
   int32_t launches(int32_t stageId) {
     std::lock_guard<std::mutex> l(mutex_);
@@ -127,7 +125,7 @@ class FlakyBackend : public SchedulerBackend {
   }
 
  private:
-  const std::shared_ptr<SchedulerBackend> backend_;
+  SchedulerBackend& backend_;
   const FailIf fail_;
   std::mutex mutex_;
   std::map<int32_t, int32_t> launches_;
@@ -137,10 +135,7 @@ class FlakyBackend : public SchedulerBackend {
 class SchedulerTest : public testing::Test {
  protected:
   static void SetUpTestCase() {
-    ember_ = Session::builder()
-                 .appName("SchedulerTest")
-                 .master("local[4]")
-                 .getOrCreate();
+    ember_ = sessionBuilder().appName("SchedulerTest").getOrCreate();
     // Axiom's LocalRunner reads its exchanges in memory.
     velox::exec::ExchangeSource::registerFactory(
         velox::exec::test::createLocalExchangeSource);
@@ -159,13 +154,34 @@ class SchedulerTest : public testing::Test {
     kiln_ = nullptr;
   }
 
+  // The directory of the session's shuffle files.
+  static fs::path localDirectory() {
+    return fs::temp_directory_path() /
+        fmt::format("ember_scheduler_session_{}", ::getpid());
+  }
+
+  static Session::Builder sessionBuilder() {
+    auto builder = Session::builder();
+    builder.master("local[4]").config(
+        "ember.local.dir", localDirectory().string());
+    return builder;
+  }
+
+  static int32_t shuffleFiles() {
+    int32_t files = 0;
+    for (const auto& entry :
+         fs::recursive_directory_iterator(localDirectory())) {
+      files += entry.is_regular_file();
+    }
+    return files;
+  }
+
   // Replaces the active session, until the end of the test, with one whose
   // global sorts plan 4 ranges.
   Session& rangeSession() {
     ember_->stop();
-    ember_ = Session::builder()
+    ember_ = sessionBuilder()
                  .appName("SchedulerRangeTest")
-                 .master("local[4]")
                  .config(DagScheduler::kRangeSortPartitions, "4")
                  .getOrCreate();
     rangeSession_ = true;
@@ -197,10 +213,7 @@ class SchedulerTest : public testing::Test {
   void TearDown() override {
     if (rangeSession_) {
       ember_->stop();
-      ember_ = Session::builder()
-                   .appName("SchedulerTest")
-                   .master("local[4]")
-                   .getOrCreate();
+      ember_ = sessionBuilder().appName("SchedulerTest").getOrCreate();
     }
     fs::remove_all(dir_);
   }
@@ -208,19 +221,15 @@ class SchedulerTest : public testing::Test {
   using OnStage =
       std::function<void(const StageAttemptInfo&, FlakyBackend& backend)>;
 
-  // A scheduler over its own local executor, with 'config'. 'onStage' sees
-  // every stage attempt.
+  // A scheduler over the session's executor, the process's one, with 'config'.
+  // 'onStage' sees every stage attempt.
   std::pair<std::unique_ptr<DagScheduler>, std::shared_ptr<FlakyBackend>>
   scheduler(
       std::map<std::string, std::string> config = {},
       FlakyBackend::FailIf fail = nullptr,
       OnStage onStage = nullptr) {
     auto backend = std::make_shared<FlakyBackend>(
-        std::make_shared<LocalBackend>(LocalBackendOptions{
-            .numSlots = 4,
-            .numThreads = 8,
-            .localDirectory = (dir_ / "local").string()}),
-        std::move(fail));
+        ember_->state().scheduler().backend(), std::move(fail));
     auto dag = std::make_unique<DagScheduler>(
         backend,
         DagSchedulerOptions{
@@ -701,21 +710,17 @@ TEST_F(SchedulerTest, userErrorsAreNotRetried) {
 TEST_F(SchedulerTest, shuffleFilesAreRemovedAfterTheJob) {
   auto path = writeCorpus(2, 100);
   auto [dag, backend] = scheduler({{DagScheduler::kReuseOutputs, "false"}});
+  const auto before = shuffleFiles();
   dag->runJob(*wordCount(path).physicalPlan(), pool_.get());
-  for (const auto& entry : fs::recursive_directory_iterator(dir_ / "local")) {
-    EXPECT_FALSE(entry.is_regular_file()) << entry.path();
-  }
+  EXPECT_EQ(shuffleFiles(), before);
 }
 
 TEST_F(SchedulerTest, storedOutputsAreKeptAfterTheJob) {
   auto path = writeCorpus(2, 100);
   auto [dag, backend] = scheduler();
+  const auto before = shuffleFiles();
   dag->runJob(*wordCount(path).physicalPlan(), pool_.get());
-  int32_t files = 0;
-  for (const auto& entry : fs::recursive_directory_iterator(dir_ / "local")) {
-    files += entry.is_regular_file();
-  }
-  EXPECT_GT(files, 0);
+  EXPECT_GT(shuffleFiles(), before);
 }
 
 // The second run of a job reads the stored output of its last map stage; the
@@ -1271,12 +1276,12 @@ TEST_F(SchedulerTest, rangeSortOfSkewedKeysMatchesMergeSort) {
     return ember_->read().text((dir_ / "input").string() + "/");
   };
   auto [merge, mergeBackend] = scheduler();
-  auto [ranges, rangesBackend] = scheduler();
   const auto ascending = toStrings(merge->runJob(
       *lines().orderBy(col("value")).physicalPlan(), pool_.get()));
   const auto descending = toStrings(merge->runJob(
       *lines().orderBy(col("value").desc()).physicalPlan(), pool_.get()));
   rangeSession();
+  auto [ranges, rangesBackend] = scheduler();
   EXPECT_EQ(
       toStrings(ranges->runJob(
           *lines().orderBy(col("value")).physicalPlan(), pool_.get())),

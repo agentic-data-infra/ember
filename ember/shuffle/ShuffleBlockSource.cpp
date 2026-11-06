@@ -20,8 +20,8 @@ class TransportBlockReader : public BlockReader {
  public:
   TransportBlockReader(
       const std::string& url,
-      std::shared_ptr<ShuffleContext> context)
-      : context_{std::move(context)} {
+      std::shared_ptr<ShuffleRuntime> runtime)
+      : runtime_{std::move(runtime)} {
     std::tie(location_, block_) = parseBlockUrl(url);
     const auto ranges = blockUrlRanges(url);
     VELOX_CHECK_EQ(ranges.size(), 1, "Malformed shuffle block: {}", url);
@@ -40,14 +40,14 @@ class TransportBlockReader : public BlockReader {
   folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_next() override {
     VELOX_CHECK(!atEnd());
     const auto length = nextLength();
-    auto piece = co_await context_->transport->co_fetchBlock(
+    auto piece = co_await runtime_->transport()->co_fetchBlock(
         location_, block_, offset_, length);
     offset_ += length;
     co_return piece;
   }
 
  private:
-  const std::shared_ptr<ShuffleContext> context_;
+  const std::shared_ptr<ShuffleRuntime> runtime_;
   std::string location_;
   BlockId block_;
   int64_t offset_{0};
@@ -56,11 +56,11 @@ class TransportBlockReader : public BlockReader {
 
 std::unique_ptr<BlockReader> createBlockReader(
     const std::string& url,
-    std::shared_ptr<ShuffleContext> context) {
+    std::shared_ptr<ShuffleRuntime> runtime) {
   if (isKilnLocation(parseBlockUrl(url).first)) {
     return std::make_unique<KilnBlockReader>(url);
   }
-  return std::make_unique<TransportBlockReader>(url, std::move(context));
+  return std::make_unique<TransportBlockReader>(url, std::move(runtime));
 }
 
 // Reads one shuffle block as a stream: each request reads pieces until it has
@@ -77,8 +77,8 @@ class ShuffleBlockSource : public exec::ExchangeSource {
       velox::memory::MemoryPool* pool)
       : ExchangeSource(url, destination, std::move(queue), pool),
         url_{url},
-        context_{ShuffleContext::of(*pool)},
-        reader_{createBlockReader(url, context_)} {}
+        runtime_{ShuffleRuntime::current()},
+        reader_{createBlockReader(url, runtime_)} {}
 
   bool shouldRequestLocked() override {
     if (atEnd_) {
@@ -123,10 +123,7 @@ class ShuffleBlockSource : public exec::ExchangeSource {
     while (!reader_->atEnd() && (pages.empty() || bytes < maxBytes)) {
       auto piece = co_await folly::coro::co_awaitTry(reader_->co_next());
       if (piece.hasException()) {
-        auto [location, block] = parseBlockUrl(url_);
-        context_->fetchFailures.fail(
-            {std::move(location), block},
-            piece.exception().what().toStdString());
+        runtime_->failFetch(url_, piece.exception().what().toStdString());
       }
       pending_.append(std::move(piece).value());
       for (auto& page : takeFrames(pending_)) {
@@ -168,7 +165,7 @@ class ShuffleBlockSource : public exec::ExchangeSource {
   }
 
   const std::string url_;
-  const std::shared_ptr<ShuffleContext> context_;
+  const std::shared_ptr<ShuffleRuntime> runtime_;
   const std::unique_ptr<BlockReader> reader_;
   // Bytes read but not yet whole pages.
   folly::IOBufQueue pending_{folly::IOBufQueue::cacheChainLength()};
@@ -189,14 +186,10 @@ std::shared_ptr<exec::ExchangeSource> createShuffleBlockSource(
       url, destination, std::move(queue), pool);
 }
 
-BlockPageReader::BlockPageReader(
-    const std::string& url,
-    const velox::memory::MemoryPool& pool)
+BlockPageReader::BlockPageReader(const std::string& url)
     : url_{url},
-      context_{ShuffleContext::of(pool)},
-      reader_{createBlockReader(url, context_)} {
-  std::tie(location_, block_) = parseBlockUrl(url);
-}
+      runtime_{ShuffleRuntime::current()},
+      reader_{createBlockReader(url, runtime_)} {}
 
 BlockPageReader::~BlockPageReader() = default;
 
@@ -210,7 +203,7 @@ std::vector<std::unique_ptr<folly::IOBuf>> BlockPageReader::nextPages() {
       }
     }
   } catch (const std::exception& e) {
-    context_->fetchFailures.fail({location_, block_}, e.what());
+    runtime_->failFetch(url_, e.what());
   }
   VELOX_CHECK(pending_.empty(), "{} ends in a cut page", url_);
   return {};

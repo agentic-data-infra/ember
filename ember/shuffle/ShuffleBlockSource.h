@@ -8,7 +8,7 @@
 
 #include <folly/io/IOBufQueue.h>
 
-#include "ember/shuffle/ShuffleContext.h"
+#include "ember/shuffle/ShuffleRuntime.h"
 #include "velox/exec/ExchangeSource.h"
 
 namespace ember::shuffle {
@@ -25,22 +25,17 @@ std::shared_ptr<facebook::velox::exec::ExchangeSource> createShuffleBlockSource(
 /// holds little memory at a time.
 class BlockPageReader {
  public:
-  /// 'pool' is a pool of the task that reads.
-  BlockPageReader(
-      const std::string& url,
-      const facebook::velox::memory::MemoryPool& pool);
+  explicit BlockPageReader(const std::string& url);
   ~BlockPageReader();
 
   /// The next pages, in order; none at the end of the block. Records a
-  /// FetchFailure and throws if the block is gone.
+  /// failed fetch and throws if the block is gone.
   std::vector<std::unique_ptr<folly::IOBuf>> nextPages();
 
  private:
   const std::string url_;
-  const std::shared_ptr<ShuffleContext> context_;
+  const std::shared_ptr<ShuffleRuntime> runtime_;
   const std::unique_ptr<BlockReader> reader_;
-  std::string location_;
-  BlockId block_;
   // Bytes read but not yet whole pages.
   folly::IOBufQueue pending_{folly::IOBufQueue::cacheChainLength()};
 };

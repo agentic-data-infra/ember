@@ -190,7 +190,7 @@ TEST_F(FileShuffleTest, sourceFollowsVeloxFlowControl) {
   queue->noMoreSources();
   auto recording = std::make_shared<RecordingTransport>(transport_);
   auto executor = std::make_shared<folly::CPUThreadPoolExecutor>(1);
-  const ShuffleContextScope scope(*pool, store_, recording, executor);
+  const ShuffleRuntimeScope scope(store_, recording, executor);
   auto source = createShuffleBlockSource(url, 0, queue, pool.get());
   auto request = [&](auto future) {
     {
