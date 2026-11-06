@@ -106,10 +106,6 @@ class SessionState {
   facebook::axiom::optimizer::PlanAndStats optimize(
       const facebook::axiom::logical_plan::LogicalPlanNodePtr& plan);
 
-  driver::DagScheduler& scheduler() const {
-    return *scheduler_;
-  }
-
   /// Runs an optimized plan through Ember's scheduler, returning all result
   /// batches.
   std::vector<facebook::velox::RowVectorPtr> execute(

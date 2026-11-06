@@ -221,8 +221,7 @@ class DagScheduler {
   std::shared_ptr<facebook::velox::memory::MemoryPool> rootPool_;
   std::shared_ptr<facebook::velox::memory::MemoryPool> planPool_;
   std::atomic<int64_t> jobCounter_{0};
-  // Unique in the process, like the executor shuffles are stored by.
-  static inline std::atomic<int32_t> shuffleCounter_{0};
+  std::atomic<int32_t> shuffleCounter_{0};
 
   // Stored shuffle outputs by stage key. They stay registered with the
   // tracker, so losses are tracked as for any shuffle.
