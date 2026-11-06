@@ -1,5 +1,6 @@
 // Dataframe API tests on small in-memory inputs.
 
+#include <folly/ScopeGuard.h>
 #include <gtest/gtest.h>
 
 #include "ember/Session.h"
@@ -279,10 +280,17 @@ TEST_F(DataframeTest, errorsSurfaceAtCompile) {
 }
 
 TEST_F(DataframeTest, eagerAnalysisReportsErrorsAtTransformation) {
-  auto state = std::make_shared<SessionState>(
-      "eager", "local[2]",
-      std::map<std::string, std::string>{{"ember.eager_analysis", "true"}});
-  auto df = DataframeReader(state).text("/dev/null");
+  ember_->stop();
+  SCOPE_EXIT {
+    ember_->stop();
+    SetUpTestCase();
+  };
+  ember_ = Session::builder()
+                .appName("DataframeEagerTest")
+                .master("local[2]")
+                .config("ember.eager_analysis", "true")
+                .getOrCreate();
+  auto df = ember_->read().text("/dev/null");
   EXPECT_EQ(df.columns(), (std::vector<std::string>{"value"}));
   EXPECT_THROW(df.select("nope"), facebook::velox::VeloxUserError);
 }

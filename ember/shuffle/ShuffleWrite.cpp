@@ -3,7 +3,7 @@
 #include "ember/shuffle/BackgroundWork.h"
 #include "ember/shuffle/FileShuffle.h"
 #include "ember/shuffle/KilnShuffle.h"
-#include "ember/shuffle/ShuffleContext.h"
+#include "ember/shuffle/ShuffleRuntime.h"
 #include "velox/common/memory/ByteStream.h"
 #include "velox/exec/OperatorUtils.h"
 #include "velox/exec/Task.h"
@@ -204,9 +204,9 @@ class ShuffleWrite : public exec::Operator {
   void initialize() override {
     Operator::initialize();
     auto* task = operatorCtx_->task().get();
-    auto context = ShuffleContext::of(*pool());
-    auto store = context->store;
-    work_ = std::make_unique<BackgroundWork>(context->ioExecutor);
+    const auto runtime = ShuffleRuntime::current();
+    auto store = runtime->store();
+    work_ = std::make_unique<BackgroundWork>(runtime->ioExecutor());
     const auto& target = node_->target();
     if (target.store == "kiln") {
       writer_ = createKilnWriter(

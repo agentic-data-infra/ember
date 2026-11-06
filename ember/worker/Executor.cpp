@@ -5,16 +5,17 @@
 #include <folly/executors/CPUThreadPoolExecutor.h>
 
 #include "axiom/connectors/file/FileHandler.h"
+#include "ember/CachedConnector.h"
 #include "ember/RowPages.h"
 #include "ember/Runtime.h"
 #include "ember/shuffle/KilnShuffle.h"
-#include "ember/shuffle/ShuffleContext.h"
 #include "ember/shuffle/ShuffleWrite.h"
 #include "ember/worker/TaskDescription.h"
 #include "velox/common/config/Config.h"
 #include "velox/common/file/FileSystems.h"
 #include "velox/common/time/Timer.h"
 #include "velox/core/QueryCtx.h"
+#include "velox/exec/Exchange.h"
 #include "velox/exec/PlanNodeStats.h"
 #include "velox/exec/Task.h"
 
@@ -25,6 +26,19 @@ namespace exec = facebook::velox::exec;
 namespace velox = facebook::velox;
 
 namespace {
+
+// The shuffle block 'split' reads, if any.
+std::optional<std::string> splitBlockUrl(
+    const std::shared_ptr<velox::connector::ConnectorSplit>& split) {
+  if (auto remote =
+          std::dynamic_pointer_cast<exec::RemoteConnectorSplit>(split)) {
+    return remote->taskId;
+  }
+  if (auto cached = std::dynamic_pointer_cast<CachedBlockSplit>(split)) {
+    return cached->url;
+  }
+  return std::nullopt;
+}
 
 void collectSplitNodes(
     const core::PlanNodePtr& node,
@@ -55,9 +69,11 @@ Executor::Executor(ExecutorOptions options) : options_{std::move(options)} {
       fmt::format("ember_executor_{}", options_.location));
   resultPool_ = rootPool_->addLeafChild("results");
   planPool_ = rootPool_->addLeafChild("plans");
+  runtime_.emplace(blockStore_, transport_, ioExecutor_);
 }
 
 Executor::~Executor() {
+  stop();
   driverExecutor_->join();
   spillExecutor_->join();
   ioExecutor_->join();
@@ -67,6 +83,10 @@ Executor::~Executor() {
 
 void Executor::removeShuffle(int32_t shuffleId) {
   blockStore_->removeShuffle(shuffleId);
+}
+
+void Executor::stop() {
+  runtime_.reset();
 }
 
 std::vector<rpc::FileInfo> Executor::listFiles(
@@ -110,8 +130,6 @@ std::string Executor::runTask(const std::string& bytes) {
         /*pool=*/nullptr,
         spillExecutor_.get(),
         result.taskId);
-    const shuffle::ShuffleContextScope shuffle(
-        *queryCtx->pool(), blockStore_, transport_, ioExecutor_);
     // Created on the first spill, removed with the task.
     const auto spillDirectory = fmt::format(
         "{}/spill/{}_{}.{}_{}.{}",
@@ -160,22 +178,26 @@ std::string Executor::runTask(const std::string& bytes) {
 
     std::vector<core::PlanNodeId> splitNodes;
     collectSplitNodes(plan, splitNodes);
+    std::vector<std::string> blocks;
     for (const auto& nodeId : splitNodes) {
       auto it = description.splits.find(nodeId);
       if (it != description.splits.end()) {
         for (const auto& split : it->second) {
-          task->addSplit(
-              nodeId,
-              exec::Split(
-                  std::const_pointer_cast<velox::connector::ConnectorSplit>(
-                      velox::ISerializable::deserialize<
-                          velox::connector::ConnectorSplit>(split))));
+          auto connectorSplit =
+              std::const_pointer_cast<velox::connector::ConnectorSplit>(
+                  velox::ISerializable::deserialize<
+                      velox::connector::ConnectorSplit>(split));
+          if (auto url = splitBlockUrl(connectorSplit)) {
+            blocks.push_back(std::move(*url));
+          }
+          task->addSplit(nodeId, exec::Split(std::move(connectorSplit)));
         }
       }
       task->noMoreSplits(nodeId);
     }
 
     task->taskCompletionFuture().wait();
+    auto fetchFailure = shuffle::ShuffleRuntime::current()->takeFailure(blocks);
     if (task->state() != exec::TaskState::kFinished) {
       result.state = TaskState::kFailed;
       result.error = task->errorMessage();
@@ -191,7 +213,7 @@ std::string Executor::runTask(const std::string& bytes) {
         result.error = fmt::format(
             "Task ended as {}", exec::taskStateString(task->state()));
       }
-      result.fetchFailure = shuffle.context().fetchFailures.failure();
+      result.fetchFailure = std::move(fetchFailure);
       if (result.fetchFailure.has_value()) {
         result.userError = false;
       }

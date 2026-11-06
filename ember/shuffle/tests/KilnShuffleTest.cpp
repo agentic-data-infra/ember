@@ -387,7 +387,7 @@ TEST_F(KilnShuffleTest, sourceStreamsBlockInPieces) {
       queue->addSourceLocked();
     }
     queue->noMoreSources();
-    const ShuffleContextScope scope(*pool, nullptr, nullptr, nullptr);
+    const ShuffleRuntimeScope scope(nullptr, nullptr, nullptr);
     auto source = createShuffleBlockSource(url, 0, queue, pool.get());
     auto request = [&](auto future) {
       {
@@ -750,25 +750,27 @@ TEST(KilnBlockUrlTest, roundTrip) {
 
 }
 
-// A reader's failure reaches the task it belongs to, and only that task.
-TEST_F(KilnShuffleTest, fetchFailureReachesItsTask) {
-  auto task = facebook::velox::memory::memoryManager()->addRootPool("task");
-  auto reader = task->addLeafChild("reader");
-  auto other = facebook::velox::memory::memoryManager()->addRootPool("other");
+// A failed fetch is reported once, to the tasks that read the block; the
+// process has one runtime at a time.
+TEST_F(KilnShuffleTest, runtimeRecordsFailedFetches) {
+  EXPECT_THROW(ShuffleRuntime::current(), std::exception);
+  const ShuffleRuntimeScope scope(nullptr, nullptr, nullptr);
+  EXPECT_THROW(
+      ShuffleRuntimeScope(nullptr, nullptr, nullptr), std::exception);
+  auto runtime = ShuffleRuntime::current();
   const BlockId first{1, 2, 3};
   const BlockId second{4, 5, 6};
-  {
-    const ShuffleContextScope scope(*task, nullptr, nullptr, nullptr);
-    auto context = ShuffleContext::of(*reader);
-    EXPECT_FALSE(scope.context().fetchFailures.failure().has_value());
-    EXPECT_THROW(context->fetchFailures.fail({"a", first}, "gone"), std::exception);
-    EXPECT_THROW(context->fetchFailures.fail({"b", second}, "gone"), std::exception);
-    ASSERT_TRUE(scope.context().fetchFailures.failure().has_value());
-    EXPECT_EQ(scope.context().fetchFailures.failure()->location, "a");
-    EXPECT_EQ(scope.context().fetchFailures.failure()->block, first);
-    EXPECT_THROW(ShuffleContext::of(*other), std::exception);
-  }
-  EXPECT_THROW(ShuffleContext::of(*reader), std::exception);
+  const auto firstUrl = blockUrl("a", first, {{0, 10}});
+  const auto secondUrl = blockUrl("b", second, {{0, 10}});
+  const auto otherUrl = blockUrl("c", second, {{0, 10}});
+  EXPECT_THROW(runtime->failFetch(firstUrl, "gone"), std::exception);
+  EXPECT_THROW(runtime->failFetch(secondUrl, "gone"), std::exception);
+  EXPECT_FALSE(runtime->takeFailure({otherUrl}).has_value());
+  const auto failure = runtime->takeFailure({firstUrl, secondUrl});
+  ASSERT_TRUE(failure.has_value());
+  EXPECT_EQ(failure->location, "a");
+  EXPECT_EQ(failure->block, first);
+  EXPECT_FALSE(runtime->takeFailure({firstUrl, secondUrl}).has_value());
 }
 
 } // namespace
