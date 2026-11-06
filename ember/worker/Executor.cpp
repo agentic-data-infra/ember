@@ -43,10 +43,8 @@ Executor::Executor(ExecutorOptions options) : options_{std::move(options)} {
   initializeRuntime();
   blockStore_ = std::make_shared<shuffle::ShuffleBlockStore>(
       options_.location, options_.shuffleDirectory);
-  transport_ = options_.fetchOwnBlocksRemotely
-      ? options_.remoteTransport
-      : std::make_shared<shuffle::LocalBlockTransport>(
-            blockStore_, options_.remoteTransport);
+  transport_ = std::make_shared<shuffle::LocalBlockTransport>(
+      blockStore_, options_.remoteTransport);
   driverExecutor_ =
       std::make_unique<folly::CPUThreadPoolExecutor>(options_.numThreads);
   spillExecutor_ =

@@ -39,9 +39,6 @@ struct ExecutorOptions {
   int32_t slots{1};
   /// Fetches the blocks of other executors; null if there are none.
   std::shared_ptr<shuffle::BlockTransport> remoteTransport;
-  /// Fetches this executor's own blocks through 'remoteTransport' too, which
-  /// tests use.
-  bool fetchOwnBlocksRemotely{false};
 };
 
 class Executor {

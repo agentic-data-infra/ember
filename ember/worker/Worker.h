@@ -1,5 +1,6 @@
 // Worker: the process side of an executor. It serves tasks and shuffle blocks
-// on its own port and offers its task slots to a driver.
+// on its own port and offers its task slots to a driver. A process runs one
+// worker.
 //
 // A worker starts its RPC server, then registers with the driver at
 // 'driver', retrying until the driver is up, and sends heartbeats. For each
@@ -59,8 +60,6 @@ struct WorkerOptions {
   bool persistent{false};
   /// How long to retry reaching the driver; zero retries forever.
   std::chrono::milliseconds connectTimeout{std::chrono::seconds(60)};
-  /// Fetch blocks of this process's own executor over TCP too.
-  bool fetchLocalBlocksOverNetwork{false};
   /// A shuffle block fetch fails after this long; the driver then recomputes
   /// the block.
   std::chrono::milliseconds fetchTimeout{std::chrono::seconds(120)};

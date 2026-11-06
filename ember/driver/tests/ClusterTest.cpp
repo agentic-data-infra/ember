@@ -1,8 +1,8 @@
 // Ember as a cluster on one machine: a driver (this test) and ember-worker
 // processes started separately, as they would be on other hosts. Tasks reach
-// the workers over RPC and every shuffle block travels between workers over
-// TCP. Workers are killed or frozen mid-job to check that lost shuffle
-// outputs are recomputed.
+// the workers over RPC and shuffle blocks travel between workers over TCP.
+// Workers are killed or frozen mid-job to check that lost shuffle outputs are
+// recomputed.
 
 #include <gtest/gtest.h>
 
@@ -18,7 +18,6 @@
 #include "ember/driver/DagScheduler.h"
 #include "ember/shuffle/ShuffleConfig.h"
 #include "ember/tests/WordCountUtil.h"
-#include "ember/worker/Worker.h"
 #include "kiln/local/LocalCluster.h"
 #include "velox/common/base/tests/GTestUtils.h"
 
@@ -139,9 +138,7 @@ class ClusterTest : public testing::Test {
           fmt::format("--slots={}", slots),
           "--host=localhost",
           fmt::format("--port={}", port),
-          fmt::format("--local_dir={}", (dir_ / "workers").string()),
-          // Even a worker's own blocks go over TCP.
-          "--fetch_local_blocks_over_network"};
+          fmt::format("--local_dir={}", (dir_ / "workers").string())};
       args.insert(args.end(), extraArgs.begin(), extraArgs.end());
       workers_.push_back(std::make_unique<WorkerProcess>(
           args, dir_ / fmt::format("worker-{}.log", id)));
@@ -417,32 +414,6 @@ TEST_F(ClusterTest, workerTakesAMemoryBudget) {
   EXPECT_EQ(
       test::toMap(test::wordCount(session, (dir_ / "input").string()).collect()),
       test::shellWordCount(dir_ / "input"));
-}
-
-// Workers in this process, for debugging the protocol without processes.
-TEST_F(ClusterTest, inProcessWorkers) {
-  std::vector<std::unique_ptr<Worker>> workers;
-  std::vector<std::thread> threads;
-  for (int i = 0; i < 2; ++i) {
-    workers.push_back(std::make_unique<Worker>(WorkerOptions{
-        .driver = rpc::HostAndPort{"localhost", port_},
-        .advertisedHost = "localhost",
-        .slots = 2,
-        .localDirectory = (dir_ / "workers").string(),
-        .fetchLocalBlocksOverNetwork = true}));
-    workers.back()->start();
-    threads.emplace_back([worker = workers.back().get()] { worker->run(); });
-  }
-  auto& session = startDriver(2);
-  test::writeCorpus(dir_ / "input", 3, 500);
-  EXPECT_EQ(
-      test::toMap(test::wordCount(session, (dir_ / "input").string()).collect()),
-      test::shellWordCount(dir_ / "input"));
-  session.stop();
-  session_.reset();
-  for (auto& thread : threads) {
-    thread.join();
-  }
 }
 
 // Map outputs in Kiln outlive the worker that wrote them: killing it after the
