@@ -85,6 +85,9 @@ void initializeRuntime(int64_t memoryBytes) {
     velox::memory::SharedArbitrator::registerFactory();
     velox::memory::MemoryManager::Options options;
     options.arbitratorKind = "SHARED";
+    // Velox's own allocator gives freed pages back to the OS, so the
+    // process's memory follows what the pools hold; malloc's arenas keep it.
+    options.useMmapAllocator = true;
     options.allocatorCapacity = capacity;
     options.arbitratorCapacity = arbitratorCapacity;
     // Velox's defaults are for pools of gigabytes. With these, tasks of any
@@ -92,7 +95,11 @@ void initializeRuntime(int64_t memoryBytes) {
     using ArbitratorConfig = velox::memory::SharedArbitrator::ExtraConfig;
     options.extraArbitratorConfigs = {
         {std::string(ArbitratorConfig::kMemoryPoolInitialCapacity), "8MB"},
-        {std::string(ArbitratorConfig::kMemoryPoolMinReclaimBytes), "8MB"}};
+        {std::string(ArbitratorConfig::kMemoryPoolMinReclaimBytes), "8MB"},
+        // A global arbitration round frees half the memory, so that many
+        // tasks spill at once rather than one or two per round.
+        {std::string(ArbitratorConfig::kGlobalArbitrationMemoryReclaimPct),
+         "50"}};
     velox::memory::initializeMemoryManager(options);
     velox::filesystems::registerLocalFileSystem();
     registerKilnFileSystem();
