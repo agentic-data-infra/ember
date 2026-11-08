@@ -18,6 +18,7 @@
 #include "velox/dwio/common/FileSink.h"
 #include "velox/dwio/common/WriterFactory.h"
 #include "velox/dwio/parquet/RegisterParquetWriter.h"
+#include "velox/dwio/parquet/writer/Writer.h"
 #include "velox/vector/DecodedVector.h"
 
 namespace ember {
@@ -153,11 +154,13 @@ class OutputDataSink : public velox::connector::DataSink {
       velox::RowTypePtr type,
       std::shared_ptr<const OutputInsertTableHandle> handle,
       std::string taskId,
-      velox::memory::MemoryPool& pool)
+      velox::memory::MemoryPool& pool,
+      std::optional<int64_t> taskMemoryBytes)
       : type_{std::move(type)},
         handle_{std::move(handle)},
         taskId_{std::move(taskId)},
-        pool_{pool} {}
+        pool_{pool},
+        taskMemoryBytes_{taskMemoryBytes} {}
 
   ~OutputDataSink() override {
     if (!done_) {
@@ -241,6 +244,18 @@ class OutputDataSink : public velox::connector::DataSink {
     auto options = std::make_shared<velox::dwio::common::WriterOptions>();
     options->schema = type_;
     options->memoryPool = &pool_;
+    // The writer buffers a row group, and writing it out copies it once more.
+    // A quarter of the task's memory then leaves half of it to the rest of
+    // the task, so that the writer needs no reclaim, which it cannot do
+    // without allocating.
+    if (taskMemoryBytes_.has_value()) {
+      auto parquetOptions =
+          std::make_shared<velox::parquet::ParquetWriterOptions>();
+      parquetOptions->rowGroupSizeBytes = std::min<uint64_t>(
+          *taskMemoryBytes_ / 4,
+          velox::parquet::DefaultFlushPolicy::kDefaultBytesInRowGroup);
+      options->formatSpecificOptions = std::move(parquetOptions);
+    }
     // As other engines write Parquet by default.
     options->compressionKind = velox::common::CompressionKind_SNAPPY;
     writer_ = velox::dwio::common::getWriterFactory(
@@ -274,6 +289,8 @@ class OutputDataSink : public velox::connector::DataSink {
   const std::string taskId_;
   // The connector's pool of the TableWriter operator, which outlives it.
   velox::memory::MemoryPool& pool_;
+  // kTaskMemoryBytes.
+  const std::optional<int64_t> taskMemoryBytes_;
 
   std::string name_;
   std::string path_;
@@ -453,11 +470,17 @@ std::unique_ptr<velox::connector::DataSink> OutputConnector::createDataSink(
     velox::connector::ConnectorQueryCtx* connectorQueryCtx,
     velox::connector::CommitStrategy /*commitStrategy*/) {
   handle->asChecked<OutputInsertTableHandle>();
+  std::optional<int64_t> taskMemoryBytes;
+  if (const auto* properties = connectorQueryCtx->sessionProperties()) {
+    taskMemoryBytes =
+        properties->get<int64_t>(std::string(kTaskMemoryBytes));
+  }
   return std::make_unique<OutputDataSink>(
       std::move(inputType),
       std::static_pointer_cast<const OutputInsertTableHandle>(handle),
       connectorQueryCtx->taskId(),
-      *connectorQueryCtx->connectorMemoryPool());
+      *connectorQueryCtx->connectorMemoryPool(),
+      taskMemoryBytes);
 }
 
 axiom_connector::ConnectorWriteHandlePtr OutputConnectorMetadata::beginWrite(
