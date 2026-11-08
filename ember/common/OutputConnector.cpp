@@ -172,7 +172,10 @@ class OutputDataSink : public velox::connector::DataSink {
     if (writer_ == nullptr) {
       open();
     }
-    writer_->write(input);
+    {
+      const Writing writing{*this};
+      writer_->write(input);
+    }
     rows_ += input->size();
   }
 
@@ -180,7 +183,10 @@ class OutputDataSink : public velox::connector::DataSink {
     if (writer_ == nullptr || done_) {
       return true;
     }
-    writer_->close();
+    {
+      const Writing writing{*this};
+      writer_->close();
+    }
     writer_.reset();
     if (kilnFile_ == nullptr) {
       fileSystem_->rename(tempPath_, path_, /*overwrite=*/true);
@@ -217,6 +223,55 @@ class OutputDataSink : public velox::connector::DataSink {
   }
 
  private:
+  // Gives the memory arbitrator the Parquet writer's buffered row group: on a
+  // reclaim the writer writes it out early, as Velox's Hive sink does for its
+  // writers. The TableWriter's connector pool asks it while the task is
+  // paused; not while the writer is in a write.
+  class RowGroupReclaimer : public velox::memory::MemoryReclaimer {
+   public:
+    explicit RowGroupReclaimer(OutputDataSink& sink)
+        : MemoryReclaimer(0), sink_{sink} {}
+
+    bool reclaimableBytes(
+        const velox::memory::MemoryPool& pool,
+        uint64_t& reclaimableBytes) const override {
+      reclaimableBytes = sink_.reclaimable() ? pool.usedBytes() : 0;
+      return sink_.reclaimable();
+    }
+
+    uint64_t reclaim(
+        velox::memory::MemoryPool* pool,
+        uint64_t /*targetBytes*/,
+        uint64_t /*maxWaitMs*/,
+        Stats& stats) override {
+      if (!sink_.reclaimable()) {
+        ++stats.numNonReclaimableAttempts;
+        return 0;
+      }
+      const auto before = pool->reservedBytes();
+      sink_.writer_->flush();
+      return std::max<int64_t>(before - pool->reservedBytes(), 0);
+    }
+
+   private:
+    OutputDataSink& sink_;
+  };
+
+  // Marks the writer busy for RowGroupReclaimer.
+  struct Writing {
+    explicit Writing(OutputDataSink& sink) : sink{sink} {
+      sink.writing_ = true;
+    }
+    ~Writing() {
+      sink.writing_ = false;
+    }
+    OutputDataSink& sink;
+  };
+
+  bool reclaimable() const {
+    return writer_ != nullptr && !writing_ && !done_;
+  }
+
   void open() {
     name_ = partName(taskPartition(taskId_), handle_->format());
     if (isKilnPath(handle_->directory())) {
@@ -240,7 +295,12 @@ class OutputDataSink : public velox::connector::DataSink {
     }
     auto options = std::make_shared<velox::dwio::common::WriterOptions>();
     options->schema = type_;
-    options->memoryPool = &pool_;
+    // A pool of its own when the TableWriter's can be reclaimed from.
+    if (pool_.reclaimer() != nullptr) {
+      writerPool_ = pool_.addAggregateChild(
+          "parquet", std::make_unique<RowGroupReclaimer>(*this));
+    }
+    options->memoryPool = writerPool_ != nullptr ? writerPool_.get() : &pool_;
     // As other engines write Parquet by default.
     options->compressionKind = velox::common::CompressionKind_SNAPPY;
     writer_ = velox::dwio::common::getWriterFactory(
@@ -274,6 +334,10 @@ class OutputDataSink : public velox::connector::DataSink {
   const std::string taskId_;
   // The connector's pool of the TableWriter operator, which outlives it.
   velox::memory::MemoryPool& pool_;
+  // The Parquet writer's, with RowGroupReclaimer; before 'writer_', which
+  // allocates from it.
+  std::shared_ptr<velox::memory::MemoryPool> writerPool_;
+  bool writing_{false};
 
   std::string name_;
   std::string path_;
