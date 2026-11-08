@@ -32,6 +32,7 @@
 
 #include "ember/shuffle/FileShuffle.h"
 #include "kiln/common/ChunkId.h"
+#include "velox/common/memory/MemoryPool.h"
 
 namespace kiln::client {
 class BufferPool;
@@ -140,23 +141,25 @@ folly::coro::Task<void> co_readKiln(
 /// Reads the Kiln block at block URL 'url' (see blockUrl()) piece by piece,
 /// each at most kKilnReadPieceBytes, in order. A piece goes into a buffer
 /// of the read pool if one is free, and keeps it until the IOBuf is freed;
-/// else it is copied through the staging pool. Never waits for a read
-/// buffer, as those may be held by pages that wait for this block, e.g. in
-/// a merge. Not thread safe.
+/// else it is copied through the staging pool into memory of 'pool'. Never
+/// waits for a read buffer, as those may be held by pages that wait for
+/// this block, e.g. in a merge. Not thread safe.
 class KilnBlockReader : public BlockReader {
  public:
-  explicit KilnBlockReader(const std::string& url);
+  KilnBlockReader(
+      const std::string& url,
+      std::shared_ptr<facebook::velox::memory::MemoryPool> pool);
   ~KilnBlockReader() override;
 
   bool atEnd() const override;
 
-  int64_t nextLength() const override;
+  int64_t nextLength(int64_t length) const override;
 
   /// Does nothing if no read buffer is free.
-  void prefetch() override;
+  void prefetch(int64_t length) override;
 
-  /// Then prefetches the piece after.
-  folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_next() override;
+  folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_next(
+      int64_t length) override;
 
   int64_t copiedBytes() const override {
     return copiedBytes_;
@@ -165,15 +168,25 @@ class KilnBlockReader : public BlockReader {
   struct State;
 
  private:
+  // The next read of at most 'length' bytes, ('offset', 'length') in the
+  // chunk; moves past it.
+  std::pair<int64_t, int64_t> take(int64_t length);
+
   std::shared_ptr<const State> state_;
-  size_t next_{0};
+  // The range and the offset in it that the next read starts at.
+  size_t range_{0};
+  int64_t done_{0};
+  int64_t remainingBytes_{0};
   int64_t copiedBytes_{0};
+  // The piece read ahead and its bytes.
   std::optional<folly::SemiFuture<std::unique_ptr<folly::IOBuf>>> prefetch_;
+  int64_t prefetchLength_{0};
 };
 
 /// The bytes of the Kiln block at block URL 'url': its pieces from a
 /// KilnBlockReader, chained.
 folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchKilnBlock(
-    std::string url);
+    std::string url,
+    std::shared_ptr<facebook::velox::memory::MemoryPool> pool);
 
 } // namespace ember::shuffle

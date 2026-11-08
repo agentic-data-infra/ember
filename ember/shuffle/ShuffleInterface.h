@@ -96,22 +96,26 @@ class BlockTransport {
 inline constexpr int64_t kBlockPieceBytes = 1 << 20;
 
 /// Reads one block piece by piece, so that a reader holds little of it at a
-/// time. Not thread safe.
+/// time. The caller says how many bytes it wants next, so that pieces can
+/// end where its pages do. Not thread safe.
 class BlockReader {
  public:
   virtual ~BlockReader() = default;
 
-  /// Whether all pieces have been returned.
+  /// Whether all bytes have been returned.
   virtual bool atEnd() const = 0;
 
-  /// The bytes of the next piece, 0 at the end.
-  virtual int64_t nextLength() const = 0;
+  /// The bytes co_next('length') returns: 'length', or fewer at the end of
+  /// a range or beyond the reader's piece size; a prefetched piece's.
+  virtual int64_t nextLength(int64_t length) const = 0;
 
-  /// May start reading the next piece in the background.
-  virtual void prefetch() {}
+  /// May start reading the next piece, as co_next('length') would, in the
+  /// background.
+  virtual void prefetch(int64_t /*length*/) {}
 
-  /// The next piece.
-  virtual folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_next() = 0;
+  /// The next piece, of nextLength('length') bytes.
+  virtual folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_next(
+      int64_t length) = 0;
 
   /// Bytes returned so far that were copied through the Kiln staging pool.
   virtual int64_t copiedBytes() const {

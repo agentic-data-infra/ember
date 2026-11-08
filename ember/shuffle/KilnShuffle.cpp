@@ -15,6 +15,8 @@
 
 namespace ember::shuffle {
 
+namespace velox = facebook::velox;
+
 namespace {
 
 using folly::coro::blockingWait;
@@ -444,21 +446,42 @@ folly::coro::Task<void> co_readKiln(
 struct KilnBlockReader::State {
   std::string metadata;
   KilnCluster cluster;
+  std::shared_ptr<velox::memory::MemoryPool> pool;
   kiln::ChunkId id;
-  std::vector<std::pair<int64_t, int64_t>> pieces;
+  std::vector<std::pair<int64_t, int64_t>> ranges;
 };
 
 namespace {
 
-// Reads piece 'i' of 'state''s block into 'buffer', from the read pool,
-// and returns it as an IOBuf that gives the buffer back when freed.
+// 'size' bytes of 'pool' as an empty IOBuf that frees them when freed.
+std::unique_ptr<folly::IOBuf> allocate(
+    std::shared_ptr<velox::memory::MemoryPool> pool,
+    int64_t size) {
+  struct Held {
+    std::shared_ptr<velox::memory::MemoryPool> pool;
+    int64_t size;
+  };
+  auto* data = pool->allocate(size);
+  return folly::IOBuf::takeOwnership(
+      data,
+      size,
+      0,
+      [](void* data, void* userData) {
+        auto* held = static_cast<Held*>(userData);
+        held->pool->free(data, held->size);
+        delete held;
+      },
+      new Held{std::move(pool), size});
+}
+
+// Reads 'piece' of 'state''s chunk into 'buffer', from the read pool, and
+// returns it as an IOBuf that gives the buffer back when freed.
 folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_readPooled(
     std::shared_ptr<const KilnBlockReader::State> state,
-    size_t i,
+    std::pair<int64_t, int64_t> piece,
     kiln::Buffer buffer) {
-  const auto& [offset, length] = state->pieces[i];
   auto read = co_await folly::coro::co_awaitTry(co_readPiece(
-      *state->cluster.client, state->id, offset, length, buffer));
+      *state->cluster.client, state->id, piece.first, piece.second, buffer));
   if (read.hasException()) {
     state->cluster.reads->release(std::move(buffer));
     co_yield folly::coro::co_error(std::move(read.exception()));
@@ -466,12 +489,12 @@ folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_readPooled(
   co_return wrap(state->cluster.reads, std::move(read).value());
 }
 
-// Reads piece 'i' of 'state''s block through the staging pool.
+// Reads 'piece' of 'state''s chunk through the staging pool into memory of
+// 'state''s Velox pool.
 folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_readStaged(
     std::shared_ptr<const KilnBlockReader::State> state,
-    size_t i) {
-  const auto piece = state->pieces[i];
-  auto data = folly::IOBuf::create(piece.second);
+    std::pair<int64_t, int64_t> piece) {
+  auto data = allocate(state->pool, piece.second);
   co_await co_readKiln(
       state->metadata,
       state->id,
@@ -485,41 +508,74 @@ folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_readStaged(
 
 } // namespace
 
-KilnBlockReader::KilnBlockReader(const std::string& url) {
+KilnBlockReader::KilnBlockReader(
+    const std::string& url,
+    std::shared_ptr<velox::memory::MemoryPool> pool) {
   const auto [metadata, chunk] = parseKilnLocation(parseBlockUrl(url).first);
   auto state = std::make_shared<State>();
   state->metadata = metadata;
   state->cluster = kilnCluster(metadata, Pool::kReads);
+  state->pool = std::move(pool);
   state->id = kiln::ChunkId::parse(chunk);
-  state->pieces = pieces(blockUrlRanges(url), kKilnReadPieceBytes);
+  for (const auto& range : blockUrlRanges(url)) {
+    if (range.second > 0) {
+      state->ranges.push_back(range);
+      remainingBytes_ += range.second;
+    }
+  }
   state_ = std::move(state);
 }
 
 KilnBlockReader::~KilnBlockReader() = default;
 
 bool KilnBlockReader::atEnd() const {
-  return next_ == state_->pieces.size();
+  return remainingBytes_ == 0;
 }
 
-int64_t KilnBlockReader::nextLength() const {
-  return atEnd() ? 0 : state_->pieces[next_].second;
+int64_t KilnBlockReader::nextLength(int64_t length) const {
+  if (prefetch_.has_value()) {
+    return prefetchLength_;
+  }
+  if (range_ == state_->ranges.size()) {
+    return 0;
+  }
+  return std::min(
+      {length,
+       state_->ranges[range_].second - done_,
+       static_cast<int64_t>(kKilnReadPieceBytes)});
 }
 
-void KilnBlockReader::prefetch() {
-  if (atEnd() || prefetch_.has_value()) {
+std::pair<int64_t, int64_t> KilnBlockReader::take(int64_t length) {
+  const auto n = nextLength(length);
+  VELOX_CHECK_GT(n, 0);
+  const auto [offset, size] = state_->ranges[range_];
+  const std::pair<int64_t, int64_t> piece{offset + done_, n};
+  done_ += n;
+  if (done_ == size) {
+    ++range_;
+    done_ = 0;
+  }
+  return piece;
+}
+
+void KilnBlockReader::prefetch(int64_t length) {
+  if (range_ == state_->ranges.size() || prefetch_.has_value()) {
     return;
   }
   auto buffers = state_->cluster.reads->tryAcquire(1);
   if (buffers.empty()) {
     return;
   }
+  const auto piece = take(length);
   prefetch_ = folly::coro::co_withExecutor(
                   folly::getGlobalCPUExecutor(),
-                  co_readPooled(state_, next_, std::move(buffers[0])))
+                  co_readPooled(state_, piece, std::move(buffers[0])))
                   .start();
+  prefetchLength_ = piece.second;
 }
 
-folly::coro::Task<std::unique_ptr<folly::IOBuf>> KilnBlockReader::co_next() {
+folly::coro::Task<std::unique_ptr<folly::IOBuf>> KilnBlockReader::co_next(
+    int64_t length) {
   VELOX_CHECK(!atEnd());
   std::unique_ptr<folly::IOBuf> piece;
   if (prefetch_.has_value()) {
@@ -528,22 +584,22 @@ folly::coro::Task<std::unique_ptr<folly::IOBuf>> KilnBlockReader::co_next() {
     piece = co_await std::move(read);
   } else if (auto buffers = state_->cluster.reads->tryAcquire(1);
              !buffers.empty()) {
-    piece = co_await co_readPooled(state_, next_, std::move(buffers[0]));
+    piece = co_await co_readPooled(state_, take(length), std::move(buffers[0]));
   } else {
-    piece = co_await co_readStaged(state_, next_);
-    copiedBytes_ += state_->pieces[next_].second;
+    piece = co_await co_readStaged(state_, take(length));
+    copiedBytes_ += piece->length();
   }
-  ++next_;
-  prefetch();
+  remainingBytes_ -= piece->computeChainDataLength();
   co_return piece;
 }
 
 folly::coro::Task<std::unique_ptr<folly::IOBuf>> co_fetchKilnBlock(
-    std::string url) {
-  KilnBlockReader reader{url};
+    std::string url,
+    std::shared_ptr<velox::memory::MemoryPool> pool) {
+  KilnBlockReader reader{url, std::move(pool)};
   std::unique_ptr<folly::IOBuf> block;
   while (!reader.atEnd()) {
-    auto piece = co_await reader.co_next();
+    auto piece = co_await reader.co_next(kKilnReadPieceBytes);
     if (block == nullptr) {
       block = std::move(piece);
     } else {
