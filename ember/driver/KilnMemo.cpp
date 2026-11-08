@@ -45,9 +45,12 @@ KilnMemo::KilnMemo(std::string metadata)
     : metadata_{std::move(metadata)},
       catalog_{std::make_unique<kiln::catalog::Catalog>(
           *shuffle::kilnClient(metadata_),
-          // Like the shuffle chunks they list: in DRAM only.
+          // Like the shuffle chunks they list: in DRAM only, and evicted
+          // when it fills, as a memo is computed again if it is gone.
           kiln::catalog::CatalogOptions{
-              .placement = {.tier = kiln::Tier::kDram},
+              .placement =
+                  {.tier = kiln::Tier::kDram,
+                   .retention = kiln::Retention::kEphemeral},
               .buffers = shuffle::kilnStagingPool(metadata_),
               .refPrefix = "memo/ember/"})} {}
 

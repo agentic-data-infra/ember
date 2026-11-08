@@ -1146,6 +1146,20 @@ TEST_F(SchedulerTest, reusesKilnOutputsAcrossPrograms) {
   }
   ASSERT_FALSE(locations.empty());
   first.reset();
+  // Kept, but Kiln may evict them like cached chunks. Asked without the
+  // shared client's cache, which still has them as committed (retained).
+  kiln::client::Client fresh(kiln::client::ClientOptions{
+      .metadata = kiln::MetadataAddress::parse(kilnMetadata())});
+  for (const auto& location : locations) {
+    const auto chunk = shuffle::parseKilnLocation(location).second;
+    if (!chunk.empty()) {
+      EXPECT_EQ(
+          folly::coro::blockingWait(fresh.co_stat(kiln::ChunkId::parse(chunk)))
+              .placement.retention,
+          kiln::Retention::kEphemeral);
+    }
+  }
+  auto client = shuffle::kilnClient(kilnMetadata());
 
   // Only the result stage runs.
   attempts.clear();
@@ -1159,7 +1173,6 @@ TEST_F(SchedulerTest, reusesKilnOutputsAcrossPrograms) {
 
   // Kiln evicted a chunk of the second map stage: that stage runs again,
   // from the first one's outputs, and is stored again.
-  auto client = shuffle::kilnClient(kilnMetadata());
   for (const auto& location : locations) {
     const auto chunk = shuffle::parseKilnLocation(location).second;
     if (!chunk.empty()) {

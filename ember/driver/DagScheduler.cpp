@@ -267,9 +267,19 @@ void DagScheduler::storeInKiln(const std::string& key, int32_t shuffleId) {
   }
   try {
     if (kilnMemo_->put(key, *maps)) {
-      // Later programs read the chunks: they stay until Kiln evicts them.
-      std::lock_guard<std::mutex> l(bucketsMutex_);
-      kilnBuckets_.erase(shuffleId);
+      // Later programs read the chunks: they stay, but Kiln may evict them
+      // now, like cached ones.
+      std::optional<uint64_t> bucket;
+      {
+        std::lock_guard<std::mutex> l(bucketsMutex_);
+        if (auto it = kilnBuckets_.find(shuffleId); it != kilnBuckets_.end()) {
+          bucket = it->second;
+          kilnBuckets_.erase(it);
+        }
+      }
+      if (bucket.has_value()) {
+        folly::coro::blockingWait(kiln_->co_releaseBucket(*bucket));
+      }
     }
   } catch (const std::exception& e) {
     LOG(WARNING) << "Cannot store stage " << key << " in Kiln: " << e.what();
