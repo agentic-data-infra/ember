@@ -1,5 +1,6 @@
 #include "ember/Runtime.h"
 
+#include <malloc.h>
 #include <unistd.h>
 
 #include <fstream>
@@ -62,6 +63,10 @@ void initializeRuntime(int64_t memoryBytes) {
   static std::once_flag once;
   static int64_t budget = 0;
   std::call_once(once, [memoryBytes] {
+    // glibc gives threads that contend in malloc arenas of their own, up to
+    // 8 per core, and each arena keeps what is freed into it. With 4, a
+    // worker of a 20 GB sort held a GiB less at the same speed.
+    mallopt(M_ARENA_MAX, 4);
     const auto available = availableMemoryBytes();
     budget = memoryBytes > 0 ? memoryBytes : available / 5 * 4;
     if (budget > available) {
