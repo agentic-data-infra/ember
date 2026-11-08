@@ -683,10 +683,17 @@ class KilnTierTest : public testing::Test {
   std::shared_ptr<ShuffleBlockStore> store_;
 };
 
-// A shuffle bigger than Kiln's DRAM loses its first map outputs to eviction
-// in DRAM alone.
-TEST_F(KilnTierTest, dramEvicts) {
-  EXPECT_LT(writeAndRead("dram", 0), 6);
+// Kiln keeps shuffle chunks (retained): a shuffle bigger than its DRAM
+// fails in DRAM alone, rather than losing map outputs to eviction.
+TEST_F(KilnTierTest, dramRunsOutOfSpace) {
+  try {
+    writeAndRead("dram", 0);
+    FAIL() << "Wrote 12 MiB into 8 MiB of DRAM";
+  } catch (const std::exception& e) {
+    EXPECT_NE(std::string(e.what()).find("blocks in dram"), std::string::npos)
+        << e.what();
+  }
+  EXPECT_EQ(cluster_.metadata().evictions(), 0);
 }
 
 TEST_F(KilnTierTest, localFsHoldsAll) {
