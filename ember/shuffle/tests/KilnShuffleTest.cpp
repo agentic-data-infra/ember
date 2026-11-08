@@ -32,6 +32,11 @@ namespace {
 
 namespace fs = std::filesystem;
 
+// Memory for the block reads that are copied.
+std::shared_ptr<facebook::velox::memory::MemoryPool> readMemory() {
+  return facebook::velox::memory::memoryManager()->addLeafPool();
+}
+
 // The pages of a whole block.
 std::vector<std::unique_ptr<folly::IOBuf>> splitFrames(
     std::unique_ptr<folly::IOBuf> block) {
@@ -133,7 +138,7 @@ class KilnShuffleTest : public testing::Test {
     auto url = blockUrl(
         status.location, {0, 0, reduceId}, status.blockRanges(reduceId));
     std::vector<std::string> pages;
-    auto block = folly::coro::blockingWait(co_fetchKilnBlock(url));
+    auto block = folly::coro::blockingWait(co_fetchKilnBlock(url, readMemory()));
     for (auto& page : splitFrames(std::move(block))) {
       pages.push_back(page->moveToFbString().toStdString());
     }
@@ -447,7 +452,8 @@ TEST_F(KilnShuffleTest, manyBlocksHeldAtOnce) {
     std::vector<std::unique_ptr<folly::IOBuf>> blocks;
     for (int32_t p = 0; p < counts.size(); ++p) {
       blocks.push_back(folly::coro::blockingWait(co_fetchKilnBlock(
-          blockUrl(status.location, {6, 0, p}, status.blockRanges(p)))));
+          blockUrl(status.location, {6, 0, p}, status.blockRanges(p)),
+          readMemory())));
     }
     for (int32_t p = 0; p < counts.size(); ++p) {
       auto pages = splitFrames(std::move(blocks[p]));
@@ -511,7 +517,8 @@ TEST(KilnBufferPoolTest, readsNeverWaitForHeldBuffers) {
 
     auto fetch = [&](int32_t p) {
       return folly::coro::blockingWait(co_fetchKilnBlock(
-          blockUrl(status.location, {0, 0, p}, status.blockRanges(p))));
+          blockUrl(status.location, {0, 0, p}, status.blockRanges(p)),
+          readMemory()));
     };
     auto text = [](std::unique_ptr<folly::IOBuf> block) {
       return splitFrames(std::move(block))[0]->moveToFbString().toStdString();
@@ -533,6 +540,112 @@ TEST(KilnBufferPoolTest, readsNeverWaitForHeldBuffers) {
     EXPECT_EQ(reads->available(), 2);
     EXPECT_EQ(staging->available(), 2);
   }
+}
+
+// Against its own cluster, with a read pool of two buffers that other blocks
+// hold: a source's reads are copied into its Velox pool, and each request
+// reads to the end of a page, so that between requests the source holds no
+// read memory, only the pages Velox has not yet used.
+TEST(KilnBufferPoolTest, copiedReadsUseVeloxMemoryAndEndWithPages) {
+  facebook::velox::memory::MemoryManager::testingSetInstance(
+      facebook::velox::memory::MemoryManager::Options{});
+  kiln::local::LocalCluster cluster{kiln::local::LocalClusterOptions{
+      .dramServers = 1, .localFsServers = 0}};
+  const auto metadata = cluster.metadataAddress().toString();
+  setKilnBufferPools(2, 2, 2);
+  SCOPE_EXIT {
+    setKilnBufferPools(kDefaultKilnReadBuffers, kDefaultKilnWriteBuffers);
+  };
+  const auto dir = fs::temp_directory_path() /
+      fmt::format("ember_kiln_copied_{}", ::getpid());
+  auto store = std::make_shared<ShuffleBlockStore>("test-executor", dir.string());
+  SCOPE_EXIT {
+    fs::remove_all(dir);
+  };
+  // Partition 0 is five pages of 700 KiB, so that most are cut between two
+  // pieces of 1 MiB; partitions 1 and 2 hold the read buffers.
+  auto mapWriter = createKilnWriter(
+      store, metadata, "dram", kiln::kDefaultBucket, 0, 0, 3, "attempt0", true);
+  std::vector<std::string> data;
+  for (int i = 0; i < 5; ++i) {
+    data.push_back(std::string(700 << 10, 'a' + i));
+    mapWriter->collect(0, folly::IOBuf::copyBuffer(data.back()));
+  }
+  for (int32_t p = 1; p < 3; ++p) {
+    mapWriter->collect(p, folly::IOBuf::copyBuffer(fmt::format("page {}", p)));
+  }
+  auto status = mapWriter->commit();
+  std::vector<std::unique_ptr<folly::IOBuf>> held;
+  for (int32_t p = 1; p < 3; ++p) {
+    held.push_back(folly::coro::blockingWait(co_fetchKilnBlock(
+        blockUrl(status.location, {0, 0, p}, status.blockRanges(p)),
+        readMemory())));
+  }
+  ASSERT_EQ(kilnReadPool(metadata)->available(), 0);
+
+  auto root = facebook::velox::memory::memoryManager()->addRootPool();
+  auto pool = root->addLeafChild("exchange");
+  auto queue = std::make_shared<facebook::velox::exec::ExchangeQueue>(1, 0);
+  {
+    std::lock_guard<std::mutex> l(queue->mutex());
+    queue->addSourceLocked();
+  }
+  queue->noMoreSources();
+  const ShuffleRuntimeScope scope(nullptr, nullptr, nullptr);
+  auto source = createShuffleBlockSource(
+      blockUrl(status.location, {0, 0, 0}, status.blockRanges(0)),
+      0,
+      queue,
+      pool.get());
+  std::vector<std::string> pages;
+  for (bool atEnd = false; !atEnd;) {
+    {
+      std::lock_guard<std::mutex> l(queue->mutex());
+      ASSERT_TRUE(source->shouldRequestLocked());
+    }
+    auto response = source->request(1 << 20, std::chrono::seconds(1))
+                        .via(folly::getGlobalCPUExecutor())
+                        .get();
+    EXPECT_GT(response.bytes, 0);
+    EXPECT_GE(pool->usedBytes(), response.bytes);
+    facebook::velox::ContinueFuture future;
+    facebook::velox::ContinuePromise stale;
+    std::lock_guard<std::mutex> l(queue->mutex());
+    bool done = false;
+    for (auto& page :
+         queue->dequeueLocked(0, 1 << 30, &done, &future, &stale)) {
+      if (page != nullptr) {
+        pages.push_back(page->getIOBuf()->moveToFbString().toStdString());
+      }
+    }
+    // The pages used up, nothing of the reads is left.
+    EXPECT_EQ(pool->usedBytes(), 0);
+    atEnd = response.atEnd;
+  }
+  EXPECT_EQ(pages, data);
+  EXPECT_EQ(
+      source->stats().at("kilnCopiedBytes"), status.blockRanges(0)[0].second);
+
+  // With too little memory for a copy, the request fails with a memory error,
+  // the task's, and the block is not taken for lost.
+  auto small = facebook::velox::memory::memoryManager()->addRootPool(
+      "small", 512 << 10);
+  const auto url = blockUrl(status.location, {0, 0, 0}, status.blockRanges(0));
+  auto starved = createShuffleBlockSource(
+      url, 0, queue, small->addLeafChild("exchange").get());
+  {
+    std::lock_guard<std::mutex> l(queue->mutex());
+    ASSERT_TRUE(starved->shouldRequestLocked());
+  }
+  try {
+    starved->request(1 << 20, std::chrono::seconds(1))
+        .via(folly::getGlobalCPUExecutor())
+        .get();
+    ADD_FAILURE() << "Read without memory";
+  } catch (const facebook::velox::VeloxRuntimeError& e) {
+    EXPECT_EQ(e.errorCode(), facebook::velox::error_code::kMemCapExceeded);
+  }
+  EXPECT_FALSE(ShuffleRuntime::current()->takeFailure({url}).has_value());
 }
 
 // Against its own cluster, whose metadata and DRAM servers serve RDMA, with
@@ -621,6 +734,11 @@ TEST_F(KilnShuffleTest, unknownTierFails) {
 // bytes.
 class KilnTierTest : public testing::Test {
  protected:
+  static void SetUpTestSuite() {
+    facebook::velox::memory::MemoryManager::testingSetInstance(
+        facebook::velox::memory::MemoryManager::Options{});
+  }
+
   KilnTierTest()
       : cluster_{kiln::local::LocalClusterOptions{
             .dramServers = 1,
@@ -668,7 +786,8 @@ class KilnTierTest : public testing::Test {
       const auto& status = outputs[mapId];
       try {
         auto block = folly::coro::blockingWait(co_fetchKilnBlock(blockUrl(
-            status.location, {shuffleId, mapId, 0}, status.blockRanges(0))));
+            status.location, {shuffleId, mapId, 0}, status.blockRanges(0)),
+            readMemory()));
         auto pages = splitFrames(std::move(block));
         count += pages.size() == 1 &&
             pages[0]->moveToFbString().toStdString() == data(mapId);

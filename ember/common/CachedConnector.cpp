@@ -37,7 +37,8 @@ class CachedDataSource : public velox::connector::DataSource {
   void addSplit(std::shared_ptr<velox::connector::ConnectorSplit> split)
       override {
     const auto* block = split->asChecked<CachedBlockSplit>();
-    reader_ = std::make_unique<shuffle::BlockPageReader>(block->url);
+    reader_ = std::make_unique<shuffle::BlockPageReader>(
+        block->url, pool_->shared_from_this());
     serdeOptions_ = exec::getVectorSerdeOptions(
         velox::common::stringToCompressionKind(block->compressionKind),
         "Presto",
