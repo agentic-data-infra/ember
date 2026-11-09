@@ -410,13 +410,17 @@ TEST_F(KilnShuffleTest, sourceStreamsBlockInPieces) {
         sizes.remainingBytes,
         std::vector<int64_t>{std::min<int64_t>(
             status.blockRanges(0)[0].second, 1 << 20)});
-    // Each request of a piece returns whole pages, about that many bytes.
+    // Each request of a piece returns whole pages, no more than that many
+    // bytes once the source knows the pages' lengths.
     int requests = 0;
     for (bool atEnd = false; !atEnd; ++requests) {
       auto response = request(folly::makeSemiFuture().deferValue([&](auto&&) {
         return source->request(1 << 20, std::chrono::seconds(1));
       }));
       EXPECT_GT(response.bytes, 0);
+      if (requests > 0) {
+        EXPECT_LE(response.bytes, 1 << 20);
+      }
       atEnd = response.atEnd;
       EXPECT_EQ(response.remainingBytes.empty(), atEnd);
     }

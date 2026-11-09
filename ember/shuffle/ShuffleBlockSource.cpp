@@ -126,16 +126,17 @@ class BlockPages {
     }
   }
 
-  // Whole pages of about 'minBytes' or more, at least one unless at the end.
-  // Reads to the end of a page and then starts the next read. Records a
-  // failed fetch and throws if the block is gone.
+  // Whole pages, as many as fit in 'maxBytes' and at least one; none only at
+  // the end. The first read of a block, before it knows a page's length, may
+  // finish one more. Reads to the end of a page and then starts the next
+  // read. Records a failed fetch and throws if the block is gone.
   folly::coro::Task<std::vector<std::unique_ptr<folly::IOBuf>>> co_next(
-      int64_t minBytes) {
+      int64_t maxBytes) {
     std::vector<std::unique_ptr<folly::IOBuf>> pages;
     int64_t bytes = 0;
     while (!reader_->atEnd() &&
-           (pages.empty() || bytes < minBytes ||
-            pending_.chainLength() > kFrameHeaderBytes)) {
+           (pages.empty() || pending_.chainLength() > kFrameHeaderBytes ||
+            bytes + nextReadBytes() <= maxBytes)) {
       auto piece =
           co_await folly::coro::co_awaitTry(reader_->co_next(nextReadBytes()));
       if (piece.hasException()) {
@@ -183,8 +184,8 @@ class BlockPages {
 
 namespace {
 
-// Reads one shuffle block as a stream: each request reads whole pages, about
-// as many bytes as Velox asks for, and starts the next read. Velox asks for
+// Reads one shuffle block as a stream: each request reads whole pages, no more
+// than Velox asks for unless one page is larger, and starts the next read. Velox asks for
 // more as its queue drains, so a block holds only a few pages at a time,
 // even in a merge, which holds a page of every source until it has used it
 // up. Pieces that are copied go into the exchange's memory pool.
