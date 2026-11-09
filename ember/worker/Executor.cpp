@@ -6,6 +6,7 @@
 
 #include "axiom/connectors/file/FileHandler.h"
 #include "ember/CachedConnector.h"
+#include "ember/OutputConnector.h"
 #include "ember/RowPages.h"
 #include "ember/Runtime.h"
 #include "ember/shuffle/KilnShuffle.h"
@@ -122,10 +123,22 @@ std::string Executor::runTask(const std::string& bytes) {
     config.try_emplace(
         std::string(core::QueryConfig::kMaxMergeExchangeBufferSize),
         std::to_string(shuffle::kilnReadPoolBytes() / options_.slots));
+    // The output's writer sizes what it buffers by the slot's share of the
+    // memory arbitrator.
+    const auto taskMemoryBytes =
+        velox::memory::memoryManager()->arbitrator()->capacity() /
+        options_.slots;
+    std::unordered_map<std::string, std::shared_ptr<velox::config::ConfigBase>>
+        connectorConfigs{
+            {std::string(kOutputConnectorId),
+             std::make_shared<velox::config::ConfigBase>(
+                 std::unordered_map<std::string, std::string>{
+                     {std::string(kTaskMemoryBytes),
+                      std::to_string(taskMemoryBytes)}})}};
     auto queryCtx = core::QueryCtx::create(
         driverExecutor_.get(),
         core::QueryConfig(std::move(config)),
-        /*connectorConfigs=*/{},
+        std::move(connectorConfigs),
         velox::cache::AsyncDataCache::getInstance(),
         /*pool=*/nullptr,
         spillExecutor_.get(),

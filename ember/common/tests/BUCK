@@ -14,3 +14,14 @@ load("//ember:options.bzl", "EMBER_STOKE")
     # Archives must precede the prebuilt Velox/Axiom libraries they use.
     link_ordering = "topological",
 ) for _ in ([1] if EMBER_STOKE else [])]
+
+cxx_test(
+    name = "output_connector_test",
+    srcs = ["OutputConnectorTest.cpp"],
+    deps = [
+        "//ember/common:common",
+        "//ember/tests:test_main",
+    ],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+)

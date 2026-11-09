@@ -41,6 +41,11 @@ namespace ember {
 
 inline constexpr std::string_view kOutputConnectorId = "ember_output";
 
+/// Connector session property that the executor sets: a task slot's share of
+/// the memory arbitrator, in bytes. Sizes the Parquet row group (see
+/// OutputDataSink); unset, Velox's default.
+inline constexpr std::string_view kTaskMemoryBytes = "task_memory_bytes";
+
 /// Session property: the format of the parts: "parquet" or "gensort".
 inline constexpr std::string_view kOutputFormat = "format";
 
