@@ -300,7 +300,8 @@ class ShuffleWrite : public exec::Operator {
         }
       }
     }
-    if (bufferedBytes() >= node_->target().spillThreshold) {
+    const auto& threshold = node_->target().spillThreshold;
+    if (threshold.has_value() && bufferedBytes() >= *threshold) {
       flushAll(*pool());
       pageBytes_ = 0;
       ++thresholdSpills_;

@@ -19,10 +19,11 @@ The interfaces follow Presto C++'s `ShuffleInterface`.
 
 On disk, map task M of shuffle S writes `shuffle_S_M.data`, frames of
 `[uint32 length][Presto page]` grouped by reduce partition, and
-`shuffle_S_M.index`, numPartitions + 1 int64 offsets. A map task's buffered data leaves memory when it reaches
-`ember.shuffle.spill_threshold_bytes` (64MB, counting finished pages and open
-partition groups), or when the memory arbitrator asks for it, with or without
-`spill_enabled`. It then goes to a run file, grouped by partition, and at
+`shuffle_S_M.index`, numPartitions + 1 int64 offsets. A map task's buffered data leaves memory when the memory
+arbitrator asks for it, with or without `spill_enabled`, so that an output that
+fits in memory is written once; with `ember.shuffle.spill_threshold_bytes` set
+(unset by default), also when it reaches that many bytes (finished pages and
+open partition groups). It then goes to a run file, grouped by partition, and at
 commit the writer concatenates each partition's runs. Attempts write temp files and rename them; the first commit
 wins, so a retried or duplicate task never corrupts a block.
 

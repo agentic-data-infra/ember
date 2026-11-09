@@ -2,13 +2,9 @@
 
 #include <folly/Conv.h>
 
-#include "ember/shuffle/FileShuffle.h"
 #include "velox/common/base/Exceptions.h"
 
 namespace ember::shuffle {
-
-ShuffleTarget::ShuffleTarget()
-    : spillThreshold{ShuffleBlockStore::kDefaultSpillThreshold} {}
 
 ShuffleTarget ShuffleTarget::fromConfig(
     const std::map<std::string, std::string>& config) {
@@ -46,7 +42,9 @@ folly::dynamic ShuffleTarget::serialize() const {
   folly::dynamic obj = folly::dynamic::object;
   obj["store"] = store;
   obj["spill"] = spill;
-  obj["spillThreshold"] = spillThreshold;
+  if (spillThreshold.has_value()) {
+    obj["spillThreshold"] = *spillThreshold;
+  }
   obj["kilnMetadata"] = kilnMetadata;
   obj["kilnTier"] = kilnTier;
   obj["kilnBucket"] = static_cast<int64_t>(kilnBucket);
@@ -57,7 +55,9 @@ ShuffleTarget ShuffleTarget::create(const folly::dynamic& obj) {
   ShuffleTarget target;
   target.store = obj["store"].asString();
   target.spill = obj["spill"].asBool();
-  target.spillThreshold = obj["spillThreshold"].asInt();
+  if (const auto* threshold = obj.get_ptr("spillThreshold")) {
+    target.spillThreshold = threshold->asInt();
+  }
   target.kilnMetadata = obj["kilnMetadata"].asString();
   target.kilnTier = obj["kilnTier"].asString();
   target.kilnBucket = static_cast<uint64_t>(obj["kilnBucket"].asInt());
