@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -12,7 +13,9 @@
 
 namespace ember::shuffle {
 
-/// Bytes a map task buffers before spilling a run to disk.
+/// Bytes a map task buffers before it spills, as well as when the memory
+/// arbitrator asks. Unset (the default), only the arbitrator makes it spill,
+/// so that a map output that fits in memory is written once.
 inline constexpr std::string_view kSpillThreshold =
     "ember.shuffle.spill_threshold_bytes";
 
@@ -43,8 +46,8 @@ struct ShuffleTarget {
   std::string store{"file"};
   /// kShuffleSpill.
   bool spill{true};
-  /// kSpillThreshold.
-  int64_t spillThreshold;
+  /// kSpillThreshold; none if unset.
+  std::optional<int64_t> spillThreshold;
   /// kKilnMetadata, for the "kiln" store.
   std::string kilnMetadata;
   /// kKilnTier.
@@ -52,8 +55,6 @@ struct ShuffleTarget {
   /// The Kiln bucket of the shuffle. The driver creates one per shuffle and
   /// deletes it with the shuffle, which removes the shuffle's chunks from Kiln.
   uint64_t kilnBucket{0};
-
-  ShuffleTarget();
 
   /// The target that session config 'config' asks for.
   static ShuffleTarget fromConfig(

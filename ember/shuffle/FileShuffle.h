@@ -32,9 +32,6 @@ namespace ember::shuffle {
 /// blocks of their committed outputs.
 class ShuffleBlockStore : public std::enable_shared_from_this<ShuffleBlockStore> {
  public:
-  /// Default per-writer buffer before spilling to a run file.
-  static constexpr int64_t kDefaultSpillThreshold = 64 << 20;
-
   /// 'location' identifies the executor to readers; 'directory' holds the
   /// files and is created if missing.
   ShuffleBlockStore(std::string location, std::string directory);

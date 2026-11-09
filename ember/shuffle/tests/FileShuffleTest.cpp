@@ -12,6 +12,7 @@
 #include "ember/shuffle/BackgroundWork.h"
 #include "ember/shuffle/FileShuffle.h"
 #include "ember/shuffle/ShuffleBlockSource.h"
+#include "ember/shuffle/ShuffleConfig.h"
 #include "velox/common/memory/Memory.h"
 #include "velox/exec/ExchangeQueue.h"
 
@@ -362,6 +363,21 @@ TEST(BlockUrlTest, roundTrip) {
   // A fetch failure names the block without its ranges.
   EXPECT_EQ(parseBlockUrl(blockUrl("host:4040", id)).second, id);
   EXPECT_TRUE(blockUrlRanges(blockUrl("host:4040", id)).empty());
+}
+
+// Without ember.shuffle.spill_threshold_bytes, map tasks spill only when the
+// memory arbitrator asks; a set threshold reaches the writers.
+TEST(ShuffleTargetTest, spillThresholdIsUnsetByDefault) {
+  const auto unset = ShuffleTarget::fromConfig({});
+  EXPECT_FALSE(unset.spillThreshold.has_value());
+  EXPECT_TRUE(unset.spill);
+  EXPECT_FALSE(
+      ShuffleTarget::create(unset.serialize()).spillThreshold.has_value());
+
+  const auto set =
+      ShuffleTarget::fromConfig({{std::string(kSpillThreshold), "1024"}});
+  EXPECT_EQ(set.spillThreshold, 1024);
+  EXPECT_EQ(ShuffleTarget::create(set.serialize()).spillThreshold, 1024);
 }
 
 } // namespace
