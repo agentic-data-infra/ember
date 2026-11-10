@@ -44,12 +44,14 @@ DEFINE_int32(
     "Milliseconds before a shuffle block fetch from another worker fails.");
 DEFINE_int32(
     kiln_read_buffers,
-    ember::shuffle::kDefaultKilnReadBuffers,
-    "1 MiB buffers for reads from each Kiln cluster, allocated up front.");
+    0,
+    "1 MiB buffers for reads from each Kiln cluster, allocated up front; 0 "
+    "for 16 per slot.");
 DEFINE_int32(
     kiln_write_buffers,
-    ember::shuffle::kDefaultKilnWriteBuffers,
-    "4 MiB buffers for writes to each Kiln cluster, allocated up front.");
+    0,
+    "4 MiB buffers for writes to each Kiln cluster, allocated up front; 0 "
+    "for 4 per slot.");
 DEFINE_int32(
     kiln_staging_buffers,
     ember::shuffle::kDefaultKilnStagingBuffers,
@@ -79,10 +81,6 @@ int main(int argc, char** argv) {
     LOG(ERROR) << "--driver=host:port is required";
     return 2;
   }
-  ember::shuffle::setKilnBufferPools(
-      FLAGS_kiln_read_buffers,
-      FLAGS_kiln_write_buffers,
-      FLAGS_kiln_staging_buffers);
   ember::WorkerOptions options;
   options.driver = ember::rpc::HostAndPort::parse(FLAGS_driver);
   options.bindHost = FLAGS_bind_host;
@@ -92,6 +90,16 @@ int main(int argc, char** argv) {
   options.slots = FLAGS_slots > 0
       ? FLAGS_slots
       : static_cast<int32_t>(folly::available_concurrency());
+  // Sized by the slots, so that a small worker's pools leave its tasks as
+  // much memory per slot as a large one's.
+  ember::shuffle::setKilnBufferPools(
+      FLAGS_kiln_read_buffers > 0
+          ? FLAGS_kiln_read_buffers
+          : ember::shuffle::kKilnReadBuffersPerSlot * options.slots,
+      FLAGS_kiln_write_buffers > 0
+          ? FLAGS_kiln_write_buffers
+          : ember::shuffle::kKilnWriteBuffersPerSlot * options.slots,
+      FLAGS_kiln_staging_buffers);
   options.numThreads = FLAGS_threads;
   options.memoryBytes = FLAGS_memory_bytes;
   options.localDirectory = FLAGS_local_dir.empty()

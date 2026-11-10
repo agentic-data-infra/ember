@@ -63,10 +63,17 @@ inline constexpr size_t kKilnBufferBytes = 4 << 20;
 /// little each.
 inline constexpr size_t kKilnReadPieceBytes = 1 << 20;
 
-/// Default buffers of each pool: 256 MiB to read and to write, 32 MiB to
-/// stage reads.
-inline constexpr size_t kDefaultKilnReadBuffers = 256;
-inline constexpr size_t kDefaultKilnWriteBuffers = 64;
+/// Read and write buffers a worker needs per task slot: a merge buffers its
+/// slot's share of the read pool (16 MiB), and a task appends through two
+/// write buffers at a time, plus one while it writes an output file.
+inline constexpr size_t kKilnReadBuffersPerSlot = 16;
+inline constexpr size_t kKilnWriteBuffersPerSlot = 4;
+
+/// Default buffers of each pool, those of 16 slots: 256 MiB to read and to
+/// write, 32 MiB to stage reads.
+inline constexpr size_t kDefaultKilnReadBuffers = 16 * kKilnReadBuffersPerSlot;
+inline constexpr size_t kDefaultKilnWriteBuffers =
+    16 * kKilnWriteBuffersPerSlot;
 inline constexpr size_t kDefaultKilnStagingBuffers = 8;
 
 /// The number of buffers in the pools of each Kiln cluster this process
