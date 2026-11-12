@@ -3,12 +3,14 @@
 #include "ember/StokeConnector.h"
 
 #include <chrono>
+#include <optional>
 
 #include <folly/coro/BlockingWait.h>
 #include <folly/executors/GlobalExecutor.h>
 
 #include "axiom/connectors/ConnectorMetadataRegistry.h"
 #include "ember/Stoke.h"
+#include "ember/shuffle/ChunkAppender.h"
 #include "ember/shuffle/KilnShuffle.h"
 #include "kiln/client/Client.h"
 #include "stoke/client/Producer.h"
@@ -28,8 +30,10 @@ namespace {
 
 constexpr std::string_view kBatchColumn = "batch";
 
-// Frames each batch into the chunk being built and puts the chunk once it
-// has 'chunkBytes'. NULL rows are no batch. The stream is opened per sink:
+// Frames each batch straight into the chunk being written, through two
+// buffers of the process's Kiln write pool (shuffle::ChunkAppender), and
+// commits and puts the chunk once it has 'chunkBytes'. NULL rows are no
+// batch. The stream is opened per sink:
 // a stream removed and created again under the same name gets a new bucket
 // and maybe other shards.
 class StokeDataSink : public velox::connector::DataSink {
@@ -41,7 +45,8 @@ class StokeDataSink : public velox::connector::DataSink {
                 std::make_shared<stoke::Registry>(
                     shuffle::kilnClient(handle.kilnMetadata())),
                 handle.stream())),
-            shuffle::kilnClient(handle.kilnMetadata())} {}
+            shuffle::kilnClient(handle.kilnMetadata())},
+        pool_{shuffle::kilnWritePool(handle.kilnMetadata())} {}
 
   // The drain uses the producer.
   ~StokeDataSink() override {
@@ -58,8 +63,15 @@ class StokeDataSink : public velox::connector::DataSink {
         continue;
       }
       const auto batch = decoded_.valueAt<velox::StringView>(i);
-      stoke::format::appendFrame(chunk_, std::string_view(batch));
-      if (chunk_.size() >= chunkBytes_) {
+      if (writer_ == nullptr) {
+        writer_ = blockingWait(producer_.co_create(chunkBytes_));
+        appender_.emplace(pool_, *writer_);
+      }
+      const auto length = stoke::format::frameLength(batch.size());
+      appender_->write(length.data(), length.size());
+      appender_->write(batch.data(), batch.size());
+      chunkSize_ += length.size() + batch.size();
+      if (chunkSize_ >= chunkBytes_) {
         put();
       }
     }
@@ -88,7 +100,14 @@ class StokeDataSink : public velox::connector::DataSink {
   }
 
   void abort() override {
-    chunk_.clear();
+    appender_.reset();
+    if (writer_ != nullptr) {
+      try {
+        blockingWait(writer_->co_abort());
+      } catch (const std::exception&) {
+      }
+      writer_.reset();
+    }
   }
 
   Stats stats() const override {
@@ -97,12 +116,15 @@ class StokeDataSink : public velox::connector::DataSink {
 
  private:
   void put() {
-    if (chunk_.empty()) {
+    if (writer_ == nullptr) {
       return;
     }
-    blockingWait(producer_.co_put(chunk_));
-    writtenBytes_ += chunk_.size();
-    chunk_.clear();
+    appender_->finish();
+    appender_.reset();
+    blockingWait(producer_.co_put(blockingWait(writer_->co_commit())));
+    writer_.reset();
+    writtenBytes_ += chunkSize_;
+    chunkSize_ = 0;
   }
 
   static constexpr std::chrono::milliseconds kDrainWait{10};
@@ -110,8 +132,12 @@ class StokeDataSink : public velox::connector::DataSink {
   const uint64_t chunkBytes_;
   stoke::Producer producer_;
   folly::Future<folly::Unit> drain_ = folly::Future<folly::Unit>::makeEmpty();
+  const std::shared_ptr<kiln::client::BufferPool> pool_;
   velox::DecodedVector decoded_;
-  std::string chunk_;
+  // The chunk being written, if any, and its bytes so far.
+  std::unique_ptr<kiln::client::ChunkWriter> writer_;
+  std::optional<shuffle::ChunkAppender> appender_;
+  uint64_t chunkSize_{0};
   uint64_t writtenBytes_{0};
 };
 
