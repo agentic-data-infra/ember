@@ -62,22 +62,31 @@ struct StokePack {
     if (rows == 0) {
       return false;
     }
-    values_.resize(rows * window);
-    for (size_t i = 0; i < values_.size(); ++i) {
-      const auto token = tokens[i];
-      values_[i] = token.has_value() ? token.value() : 0;
+    // The batch is built in 'out': its header in place, then the tokens,
+    // copied at once from flat elements without nulls.
+    const stoke::format::BatchHeader header{
+        .dtype = stoke::format::DType::kInt32, .shape = {rows, window}};
+    out.resize(stoke::format::encodedSize(header));
+    auto payload = stoke::format::encodeHeader(
+        header, {reinterpret_cast<uint8_t*>(out.data()), out.size()});
+    const auto count = static_cast<velox::vector_size_t>(rows * window);
+    if (!tokens.mayHaveNulls() && tokens.isFlatElements()) {
+      const auto* elements =
+          tokens.elementsVectorBase()->template asFlatVector<int32_t>();
+      std::memcpy(
+          payload.data(),
+          elements->rawValues() + tokens.offset(),
+          payload.size());
+    } else {
+      for (velox::vector_size_t i = 0; i < count; ++i) {
+        const auto token = tokens[i];
+        const int32_t value = token.has_value() ? token.value() : 0;
+        std::memcpy(
+            payload.data() + i * sizeof(int32_t), &value, sizeof(value));
+      }
     }
-    const auto encoded = stoke::format::encodeBatch(
-        {.dtype = stoke::format::DType::kInt32, .shape = {rows, window}},
-        {reinterpret_cast<const uint8_t*>(values_.data()),
-         values_.size() * sizeof(int32_t)});
-    out.resize(encoded.size());
-    std::memcpy(out.data(), encoded.data(), encoded.size());
     return true;
   }
-
- private:
-  std::vector<int32_t> values_;
 };
 
 } // namespace
