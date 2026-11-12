@@ -103,6 +103,46 @@ TEST_F(StokeFunctionsTest, packsWholeWindowsIntoABatch) {
   }
 }
 
+// Rows after the first start inside the elements vector: each batch holds
+// its own row's tokens.
+TEST_F(StokeFunctionsTest, packsEachRowsOwnTokens) {
+  auto batches = values(
+      ember_->read().text(writeText({"abcdefg", "hijklmn"})).select(
+          call(
+              "stoke_pack",
+              call("stoke_tokenize", col("value")),
+              lit(int64_t{1}),
+              lit(kSequence))
+              .alias("batch")));
+  ASSERT_EQ(batches.size(), 2);
+  for (size_t row = 0; row < 2; ++row) {
+    const auto& bytes = *batches[row];
+    auto batch = stoke::format::parseBatch(
+        {reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()});
+    std::vector<int32_t> tokens(8);
+    ASSERT_EQ(batch.payload.size(), tokens.size() * sizeof(int32_t));
+    std::memcpy(tokens.data(), batch.payload.data(), batch.payload.size());
+    EXPECT_EQ(tokens[0], row == 0 ? 'a' : 'h');
+    EXPECT_EQ(tokens[7], 256);
+  }
+}
+
+// A NULL token is packed as 0.
+TEST_F(StokeFunctionsTest, packsNullTokensAsZero) {
+  auto batches = values(ember_->read().text(writeText({"x"})).select(
+      expr("stoke_pack(CAST(ARRAY[1, NULL, 3, 4, 5, 6, 7, 8] AS INTEGER[]), "
+           "1, 7)")
+          .alias("batch")));
+  ASSERT_EQ(batches.size(), 1);
+  const auto& bytes = *batches[0];
+  auto batch = stoke::format::parseBatch(
+      {reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()});
+  std::vector<int32_t> tokens(8);
+  ASSERT_EQ(batch.payload.size(), tokens.size() * sizeof(int32_t));
+  std::memcpy(tokens.data(), batch.payload.data(), batch.payload.size());
+  EXPECT_EQ(tokens, (std::vector<int32_t>{1, 0, 3, 4, 5, 6, 7, 8}));
+}
+
 TEST_F(StokeFunctionsTest, packsAtMostBRows) {
   // 40 tokens hold five windows of 8; B = 2 keeps two.
   auto batches = values(
