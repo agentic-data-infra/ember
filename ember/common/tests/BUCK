@@ -25,3 +25,14 @@ cxx_test(
     # Archives must precede the prebuilt Velox/Axiom libraries they use.
     link_ordering = "topological",
 )
+
+cxx_test(
+    name = "runtime_test",
+    srcs = ["RuntimeTest.cpp"],
+    deps = [
+        "//ember/common:common",
+        "//ember/tests:test_main",
+    ],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+)

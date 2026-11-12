@@ -90,9 +90,16 @@ void initializeRuntime(int64_t memoryBytes) {
     velox::memory::SharedArbitrator::registerFactory();
     velox::memory::MemoryManager::Options options;
     options.arbitratorKind = "SHARED";
-    // Velox's own allocator gives freed pages back to the OS, so the
-    // process's memory follows what the pools hold; malloc's arenas keep it.
+    // Velox's own allocator keeps freed pages of its size classes mapped for
+    // the next allocation and gives them back to the OS only to stay within
+    // its capacity, so the process's memory is bounded by the budget;
+    // malloc's arenas keep what they like.
     options.useMmapAllocator = true;
+    // Larger allocations than the largest size class are mapped afresh each
+    // time and unmapped when freed, so every use faults in and zeroes new
+    // pages. Up to 32 MB (e.g. Parquet pages and decoded columns), they reuse
+    // freed pages instead.
+    options.largestSizeClassPages = 8192;
     options.allocatorCapacity = capacity;
     options.arbitratorCapacity = arbitratorCapacity;
     // Velox's defaults are for pools of gigabytes. With these, tasks of any
