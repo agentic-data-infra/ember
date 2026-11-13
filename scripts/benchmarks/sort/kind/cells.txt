@@ -1,0 +1,8 @@
+# Ember's kind cells (queue.sh kind/run_cell.sh <results dir> < kind/cells.txt): a warmup per system, then two
+# measured runs per cell. baselines/kind/cells.txt has the same cells for the other systems.
+ember     mem       warmup w1 w2
+ember-pp  mem       warmup w1 w2
+ember     spill16   w1 w2
+ember-pp  spill16   w1 w2
+ember     spill128  w1 w2
+ember-pp  spill128  w1 w2

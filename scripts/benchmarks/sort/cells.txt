@@ -1,0 +1,15 @@
+# Ember's single-worker cells (queue.sh run_cell.sh <results dir> < cells.txt): one warmup per cap, then two
+# measured runs per cell. baselines/cells.txt has the same cells for the other systems.
+ember-pp  spill16-8g   warmup w1 w2
+ember     spill16-8g   w1 w2
+ember     spill16      w1 w2
+ember-pp  spill16      w1 w2
+ember     spill128     w1 w2
+ember-pp  spill128     w1 w2
+ember     spill128-wf  w1 w2
+ember-pp  mem-1g       warmup w1 w2
+ember     mem-1g       warmup w1 w2
+ember-pp  mem-5g       warmup w1 w2
+ember     mem-5g       warmup w1 w2
+ember-pp  mem-20g      warmup w1 w2
+ember     mem-20g      warmup w1 w2

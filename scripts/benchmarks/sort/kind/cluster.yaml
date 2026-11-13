@@ -1,0 +1,19 @@
+# The kind cluster for multi-worker sort benchmarks: deploy/kind/cluster.yaml with 4 workers (4 x 4 slots = 16 cores)
+# and two host mounts in every node, so that every system's driver and tasks see the same files: the inputs read-only at
+# /sortbench, and a shared output directory at /bench-out. Shuffle, spill and Kiln stay node-local. Drivers run on the
+# control plane, which has the mounts too, so the worker nodes only run tasks. up.sh fills in DATA_DIR and OUT_DIR.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: ember
+nodes:
+  - role: control-plane
+    extraMounts: &mounts
+      - hostPath: DATA_DIR
+        containerPath: /sortbench
+        readOnly: true
+      - hostPath: OUT_DIR
+        containerPath: /bench-out
+  - {role: worker, extraMounts: *mounts}
+  - {role: worker, extraMounts: *mounts}
+  - {role: worker, extraMounts: *mounts}
+  - {role: worker, extraMounts: *mounts}

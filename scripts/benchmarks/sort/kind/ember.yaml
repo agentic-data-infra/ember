@@ -1,0 +1,51 @@
+# Ember for the benchmarks, as deploy/kubernetes/kiln.yaml's kiln-server and ember-worker.yaml (the kiln-meta
+# Deployment and Service of kiln.yaml stay as deploy/kind/up.sh starts them), plus the benchmark mounts, node-local
+# scratch and the sizes run_cell.sh fills in: WORKER_MEM, REGIONS and REGION_MB. kiln-disk.yaml adds a localfs tier.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: kiln-server, namespace: ember}
+spec:
+  selector: {matchLabels: {app: kiln-server}}
+  template:
+    metadata: {labels: {app: kiln-server}}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: kiln-server
+          image: ember:dev
+          command: [kiln_server, --metadata=kiln-meta.ember.svc.cluster.local:7470, --port=7480, --host=$(NODE_IP),
+                    --regions=REGIONS, --region_size_mb=REGION_MB]
+          env: [{name: NODE_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}]
+          volumeMounts: [{name: shm, mountPath: /dev/shm}]
+      volumes: [{name: shm, hostPath: {path: /dev/shm}}]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: ember-worker, namespace: ember}
+spec:
+  selector: {matchLabels: {app: ember-worker}}
+  template:
+    metadata: {labels: {app: ember-worker}}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: ember-worker
+          image: ember:dev
+          command: [ember_worker, --driver=ember-driver.ember.svc.cluster.local:7077, --port=7078, --host=$(NODE_IP),
+                    --node=$(NODE_NAME), --slots=4, --local_dir=/var/lib/bench-scratch/ember, --persistent,
+                    --connect_timeout_s=0, --memory_bytes=WORKER_MEM]
+          env:
+            - {name: NODE_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}
+            - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
+          volumeMounts:
+            - {name: scratch, mountPath: /var/lib/bench-scratch}
+            - {name: shm, mountPath: /dev/shm}
+            - {name: input, mountPath: /sortbench}
+            - {name: out, mountPath: /bench-out}
+      volumes:
+        - {name: scratch, hostPath: {path: /var/lib/bench-scratch, type: DirectoryOrCreate}}
+        - {name: shm, hostPath: {path: /dev/shm}}
+        - {name: input, hostPath: {path: /sortbench}}
+        - {name: out, hostPath: {path: /bench-out}}

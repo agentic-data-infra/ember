@@ -1,0 +1,8 @@
+# Spark 3.5.5 (standalone master/worker and spark-submit) with the Gluten 1.7 bundle and the sort job, as run on the
+# host (Ubuntu 22.04, OpenJDK 17). build_images.sh stages spark/, gluten.jar and sortbench.jar.
+FROM ubuntu:22.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openjdk-17-jre-headless procps python3 && rm -rf /var/lib/apt/lists/*
+COPY spark/ /opt/spark/
+COPY gluten.jar sortbench.jar /opt/bench/
+ENV SPARK_HOME=/opt/spark JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 PATH=/opt/spark/bin:/opt/spark/sbin:$PATH \
+    SPARK_NO_DAEMONIZE=1

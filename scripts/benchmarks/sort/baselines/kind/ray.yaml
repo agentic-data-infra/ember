@@ -1,0 +1,57 @@
+# Ray for the benchmarks: the head on the control plane with no CPUs (it runs the driver only, as Spark's and Ember's
+# drivers), a worker on every worker node with 4 CPUs and an object store of OBJECT_STORE bytes (systems.sh), in a
+# memory-backed /dev/shm. Ray spills under the pod's /tmp/ray, on the node's disk. Token authentication is off
+# (RAY_AUTH_MODE=disabled, here and for the driver): Ray 2.60 turns it on where a token exists, which only the head has.
+apiVersion: v1
+kind: Service
+metadata: {name: ray-head, namespace: ember}
+spec:
+  selector: {app: ray-head}
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: ray-head, namespace: ember, labels: {bench: "1"}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: ray-head}}
+  template:
+    metadata: {labels: {app: ray-head}}
+    spec:
+      nodeSelector: {node-role.kubernetes.io/control-plane: ""}
+      tolerations: [{key: node-role.kubernetes.io/control-plane, effect: NoSchedule}]
+      containers:
+        - name: head
+          image: bench-ray:1
+          env: [{name: RAY_AUTH_MODE, value: disabled}]
+          command: [ray, start, --head, --port=6379, --num-cpus=0, --object-store-memory=1073741824, --include-dashboard=false, --block]
+          volumeMounts:
+            - {name: shm, mountPath: /dev/shm}
+            - {name: input, mountPath: /sortbench}
+            - {name: out, mountPath: /bench-out}
+      volumes:
+        - {name: shm, emptyDir: {medium: Memory}}
+        - {name: input, hostPath: {path: /sortbench}}
+        - {name: out, hostPath: {path: /bench-out}}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: ray-worker, namespace: ember}
+spec:
+  selector: {matchLabels: {app: ray-worker}}
+  template:
+    metadata: {labels: {app: ray-worker}}
+    spec:
+      containers:
+        - name: worker
+          image: bench-ray:1
+          env: [{name: RAY_AUTH_MODE, value: disabled}]
+          command: [sh, -c, "until ray start --address=ray-head.ember.svc.cluster.local:6379 --num-cpus=4 --object-store-memory=OBJECT_STORE --block; do sleep 2; done"]
+          volumeMounts:
+            - {name: shm, mountPath: /dev/shm}
+            - {name: input, mountPath: /sortbench}
+            - {name: out, mountPath: /bench-out}
+      volumes:
+        - {name: shm, emptyDir: {medium: Memory}}
+        - {name: input, hostPath: {path: /sortbench}}
+        - {name: out, hostPath: {path: /bench-out}}

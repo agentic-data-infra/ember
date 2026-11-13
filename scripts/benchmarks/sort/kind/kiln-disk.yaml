@@ -1,0 +1,20 @@
+# A second Kiln server per node on the localfs tier (DISK_REGIONS regions of 2 GiB in the node's scratch), for
+# ember.shuffle.kiln.tier=dram+localfs. run_cell.sh fills in DISK_REGIONS and applies it for the spilling cells only.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: kiln-disk, namespace: ember}
+spec:
+  selector: {matchLabels: {app: kiln-disk}}
+  template:
+    metadata: {labels: {app: kiln-disk}}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: kiln-disk
+          image: ember:dev
+          command: [kiln_server, --metadata=kiln-meta.ember.svc.cluster.local:7470, --port=7481, --host=$(NODE_IP),
+                    --tier=localfs, --dir=/var/lib/bench-scratch/kiln-disk, --regions=DISK_REGIONS, --region_size_mb=2048]
+          env: [{name: NODE_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}]
+          volumeMounts: [{name: scratch, mountPath: /var/lib/bench-scratch}]
+      volumes: [{name: scratch, hostPath: {path: /var/lib/bench-scratch, type: DirectoryOrCreate}}]
