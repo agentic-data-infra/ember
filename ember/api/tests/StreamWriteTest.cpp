@@ -20,6 +20,7 @@
 #include "ember/shuffle/KilnShuffle.h"
 #include "kiln/local/LocalCluster.h"
 #include "stoke/client/Registry.h"
+#include "stoke/format/Batch.h"
 #include "stoke/client/StreamClient.h"
 #include "stoke/loader/Loader.h"
 #include "stoke/rpc/Rpc.h"
@@ -298,11 +299,59 @@ TEST_F(StreamWriteTest, boundsUnconsumedChunksWhileATrainerReads) {
   EXPECT_LT(loader.stats().peakBuffered, 4 + 3);
 }
 
+// With packing, each task concatenates its rows' tokens and cuts them into
+// batches of [B, T + 1]: its last batch holds the whole windows left, and
+// the tokens after them are dropped.
+TEST_F(StreamWriteTest, packsTokensAcrossRows) {
+  // 2 files, a task each, of 5 lines of 20 letters: 5 x 21 = 105 tokens a
+  // task, 6 batches of 2 x 8 and a last one of 1 x 8, 1 token dropped.
+  const auto input = writeText(2, 5);
+  auto tokens = session().read().text(input).select(
+      call("stoke_tokenize", col("value")).alias("tokens"));
+  EXPECT_EQ(
+      tokens.write().stream(
+          std::string(kStream),
+          /*seal=*/true,
+          StokePacking{.batch = kBatch, .sequence = kSequence}),
+      10);
+
+  std::multiset<std::string> expected;
+  for (int32_t f = 0; f < 2; ++f) {
+    std::vector<int32_t> all;
+    for (int32_t i = 0; i < 5; ++i) {
+      all.insert(all.end(), 20, 'a' + (f * 5 + i) % 26);
+      all.push_back(256);
+    }
+    const uint64_t window = kSequence + 1;
+    for (size_t begin = 0; begin + window <= all.size();) {
+      const auto rows = std::min<uint64_t>(kBatch, (all.size() - begin) / window);
+      const stoke::format::BatchHeader header{
+          .dtype = stoke::format::DType::kInt32, .shape = {rows, window}};
+      expected.insert(stoke::format::encodeBatch(
+          header,
+          {reinterpret_cast<const uint8_t*>(all.data() + begin),
+           rows * window * sizeof(int32_t)}));
+      begin += rows * window;
+    }
+  }
+  ASSERT_EQ(expected.size(), 14);
+  EXPECT_EQ(consume(), expected);
+}
+
 TEST_F(StreamWriteTest, rejectsOtherColumnsAndMissingStreams) {
   auto input = writeText(1, 2);
   EXPECT_ANY_THROW(session().read().text(input).write().stream(
       std::string(kStream)));
   EXPECT_ANY_THROW(batches(input).write().stream("missing"));
+  // Batches are not packed, and tokens are only written packed.
+  EXPECT_ANY_THROW(batches(input).write().stream(
+      std::string(kStream), false, StokePacking{.batch = 1, .sequence = 1}));
+  EXPECT_ANY_THROW(session()
+                       .read()
+                       .text(input)
+                       .select(call("stoke_tokenize", col("value")))
+                       .write()
+                       .stream(std::string(kStream)));
   EXPECT_EQ(chunksPut(), 0);
 }
 

@@ -20,10 +20,12 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
 #include "ember/Dataframe.h"
+#include "ember/Stoke.h"
 
 namespace ember {
 
@@ -47,10 +49,17 @@ class DataframeWriter {
   /// Writes the rows, one VARBINARY column of batches in stoke's format
   /// (e.g. stoke_pack's), into the stoke stream 'name' of the Kiln cluster
   /// ember.kiln.metadata (or ember.shuffle.kiln.metadata), in chunks of
-  /// ember.stoke.chunk_bytes (default 16 MiB). With 'seal', seals the stream
-  /// once the write is committed. Returns the number of rows written, NULLs
+  /// ember.stoke.chunk_bytes (default 16 MiB). With 'packing', the column
+  /// is ARRAY<INTEGER> instead, e.g. stoke_tokenize's tokens: each task
+  /// concatenates its rows' tokens in order and cuts them into batches of
+  /// 'packing'; its last batch holds the whole windows left, and fewer
+  /// tokens than a window are dropped. With 'seal', seals the stream once
+  /// the write is committed. Returns the number of rows written, NULLs
   /// included.
-  int64_t stream(const std::string& name, bool seal = false) const;
+  int64_t stream(
+      const std::string& name,
+      bool seal = false,
+      std::optional<StokePacking> packing = std::nullopt) const;
 
  private:
   int64_t files(const std::string& directory, const std::string& format) const;

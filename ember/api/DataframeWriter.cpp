@@ -14,6 +14,7 @@ namespace ember {
 
 namespace fs = std::filesystem;
 namespace lp = facebook::axiom::logical_plan;
+namespace velox = facebook::velox;
 
 namespace {
 
@@ -91,14 +92,26 @@ int64_t DataframeWriter::files(
       makeOutputTable(output, schema));
 }
 
-int64_t DataframeWriter::stream(const std::string& name, bool seal) const {
+int64_t DataframeWriter::stream(
+    const std::string& name,
+    bool seal,
+    std::optional<StokePacking> packing) const {
   VELOX_USER_CHECK(
       hasStoke(), "Writing to a stoke stream needs a build with stoke");
   const auto schema = df_.schema();
-  VELOX_USER_CHECK(
-      schema->size() == 1 && schema->childAt(0)->isVarbinary(),
-      "A stoke stream takes one VARBINARY column of batches, not {}",
-      schema->toString());
+  if (packing.has_value()) {
+    VELOX_USER_CHECK(
+        schema->size() == 1 &&
+            *schema->childAt(0) == *velox::ARRAY(velox::INTEGER()),
+        "Packing into a stoke stream takes one ARRAY<INTEGER> column of "
+        "tokens, not {}",
+        schema->toString());
+  } else {
+    VELOX_USER_CHECK(
+        schema->size() == 1 && schema->childAt(0)->isVarbinary(),
+        "A stoke stream takes one VARBINARY column of batches, not {}",
+        schema->toString());
+  }
   const auto& config = df_.session()->config();
   auto metadata = config.find(std::string(kKilnFilesMetadata));
   if (metadata == config.end()) {
@@ -117,14 +130,21 @@ int64_t DataframeWriter::stream(const std::string& name, bool seal) const {
       chunkBytes != config.end()) {
     properties[std::string(kStokeChunkBytes)] = chunkBytes->second;
   }
-  auto plan = df_.then([name, column = schema->nameOf(0)](
+  if (packing.has_value()) {
+    properties[std::string(kStokePackBatch)] = std::to_string(packing->batch);
+    properties[std::string(kStokePackSequence)] =
+        std::to_string(packing->sequence);
+  }
+  auto plan = df_.then([name,
+                        column = schema->nameOf(0),
+                        target = packing.has_value() ? "tokens" : "batch"](
                            auto& builder, const auto& /*context*/) {
                    builder.tableWrite(
                        std::string(kStokeConnectorId),
                        "default",
                        name,
                        lp::WriteKind::kInsert,
-                       {"batch"},
+                       {target},
                        std::vector<lp::ExprApi>{lp::Col(column)});
                  })
                   .logicalPlan();

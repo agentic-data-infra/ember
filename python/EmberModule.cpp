@@ -417,10 +417,27 @@ PYBIND11_MODULE(_ember, m) {
           py::call_guard<py::gil_scoped_release>())
       .def(
           "stream",
-          &DataframeWriter::stream,
+          [](const DataframeWriter& writer,
+             const std::string& name,
+             bool seal,
+             std::optional<uint64_t> batch,
+             std::optional<uint64_t> sequence) {
+            if (batch.has_value() != sequence.has_value()) {
+              throw py::value_error("give both batch and sequence, or neither");
+            }
+            std::optional<StokePacking> packing;
+            if (batch.has_value()) {
+              packing = StokePacking{*batch, *sequence};
+            }
+            py::gil_scoped_release release;
+            return writer.stream(name, seal, packing);
+          },
+          "Writes batches into a stoke stream; with batch and sequence, "
+          "packs a column of tokens into batches of [batch, sequence + 1].",
           py::arg("name"),
           py::arg("seal") = false,
-          py::call_guard<py::gil_scoped_release>());
+          py::arg("batch") = py::none(),
+          py::arg("sequence") = py::none());
 
   // Session.
 
