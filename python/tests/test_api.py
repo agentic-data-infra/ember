@@ -121,6 +121,8 @@ class ApiTest(unittest.TestCase):
             self.people().select("missing").collect()
         with self.assertRaises(ValueError):
             bool(col("a") > 1)
+        with self.assertRaises(ValueError):
+            self.people().write.stream("train", batch=32)
 
 
 class RangeSortTest(unittest.TestCase):

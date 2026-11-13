@@ -99,18 +99,20 @@ class StokeConnectorTest : public velox::exec::test::OperatorTestBase {
                             : std::nullopt);
     }
     auto input = makeRowVector(
-        {"batch"},
-        {makeNullableFlatVector<velox::StringView>(values, velox::VARBINARY())});
+        {"batch", "tokens"},
+        {makeNullableFlatVector<velox::StringView>(values, velox::VARBINARY()),
+         velox::BaseVector::createNullConstant(
+             velox::ARRAY(velox::INTEGER()), values.size(), pool())});
     auto handle = std::make_shared<velox::core::InsertTableHandle>(
         std::string(kStokeConnectorId),
         std::make_shared<StokeInsertTableHandle>(
-            std::string(kStream), metadata(), chunkBytes),
+            std::string(kStream), metadata(), chunkBytes, std::nullopt),
         /*notNullColumns=*/folly::F14FastSet<std::string>{});
     auto source = velox::exec::test::PlanBuilder().values({input}).planNode();
     auto plan = std::make_shared<velox::core::TableWriteNode>(
         "write",
         asRowType(input->type()),
-        std::vector<std::string>{"batch"},
+        std::vector<std::string>{"batch", "tokens"},
         std::nullopt,
         handle,
         /*hasPartitioningScheme=*/false,
@@ -209,17 +211,27 @@ TEST_F(StokeConnectorTest, dropsTheChunksOfARetriedWrite) {
 }
 
 TEST_F(StokeConnectorTest, serializesItsInsertHandle) {
-  StokeInsertTableHandle handle("train", "localhost:7470", 4096);
+  StokeInsertTableHandle handle("train", "localhost:7470", 4096, std::nullopt);
   auto copy = StokeInsertTableHandle::create(handle.serialize());
   EXPECT_EQ(copy->stream(), "train");
   EXPECT_EQ(copy->kilnMetadata(), "localhost:7470");
   EXPECT_EQ(copy->chunkBytes(), 4096);
+  EXPECT_FALSE(copy->packing().has_value());
+
+  StokeInsertTableHandle packing(
+      "train", "localhost:7470", 4096, StokePacking{.batch = 32, .sequence = 4096});
+  copy = StokeInsertTableHandle::create(packing.serialize());
+  ASSERT_TRUE(copy->packing().has_value());
+  EXPECT_EQ(copy->packing()->batch, 32);
+  EXPECT_EQ(copy->packing()->sequence, 4096);
 }
 
 TEST_F(StokeConnectorTest, beginsWritesIntoOpenStreams) {
   auto& metadata = connectorMetadata();
   auto table = metadata.findTable({"default", std::string(kStream)});
-  EXPECT_EQ(table->type()->toString(), "ROW<batch:VARBINARY>");
+  EXPECT_EQ(
+      table->type()->toString(),
+      "ROW<batch:VARBINARY,tokens:ARRAY<INTEGER>>");
 
   auto handle = metadata.beginWrite(
       session({{std::string(kStokeKilnMetadata), this->metadata()},
@@ -233,6 +245,16 @@ TEST_F(StokeConnectorTest, beginsWritesIntoOpenStreams) {
   EXPECT_EQ(insert->stream(), kStream);
   EXPECT_EQ(insert->kilnMetadata(), this->metadata());
   EXPECT_EQ(insert->chunkBytes(), 4096);
+  EXPECT_FALSE(insert->packing().has_value());
+
+  // Packing needs both B and T.
+  EXPECT_ANY_THROW(metadata.beginWrite(
+      session({{std::string(kStokeKilnMetadata), this->metadata()},
+               {std::string(kStokePackBatch), "32"}}),
+      table,
+      axiom_connector::WriteKind::kInsert,
+      nullptr,
+      false));
 
   // No Kiln cluster.
   EXPECT_ANY_THROW(metadata.beginWrite(

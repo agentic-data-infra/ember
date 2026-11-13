@@ -216,7 +216,20 @@ batches.write.stream("train", seal=True)
 ```
 
 `write.stream(name, seal=False)` takes one VARBINARY column, one batch per
-row, and returns the number of batches written. Each scan task frames its
+row, and returns the number of batches written. With `batch=B` and
+`sequence=T` it instead takes one ARRAY<INTEGER> column of tokens and packs
+them itself, across rows: each task concatenates its rows' tokens and cuts
+them into windows of T + 1, B windows per batch (the last batch of a task
+may hold fewer, and tokens short of a whole window at its end are
+dropped), so documents need no padding. It then returns the number of
+rows written:
+
+```python
+docs = df.filter("int_score >= 3").select("tokens")
+docs.write.stream("train", seal=True, batch=32, sequence=4096)
+```
+
+Either way, each scan task frames its
 batches into chunks of `ember.stoke.chunk_bytes` (16 MiB by default) in the
 stream's Kiln bucket and puts every chunk into the stream as soon as it is
 written, so trainers start while the job still runs. A stream created
