@@ -36,3 +36,23 @@ cxx_test(
     # Archives must precede the prebuilt Velox/Axiom libraries they use.
     link_ordering = "topological",
 )
+
+cxx_test(
+    name = "gpt2_tokenizer_test",
+    srcs = ["Gpt2TokenizerTest.cpp"],
+    deps = [
+        "//ember/common:common",
+        "//ember/tests:test_main",
+    ],
+    env = {"EMBER_TEST_DATA": "$(location :test_data)"},
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+)
+
+# Hugging Face's GPT-2 files and the ids its tokenizer gives
+# (data/gen_gpt2_ids.py).
+export_file(
+    name = "test_data",
+    src = "data",
+    visibility = ["PUBLIC"],
+)

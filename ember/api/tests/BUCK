@@ -100,6 +100,7 @@ cxx_test(
         "//ember/tests:test_main",
         "stoke//stoke/format:format",
     ],
+    env = {"EMBER_TEST_DATA": "$(location //ember/common/tests:test_data)"},
     # Archives must precede the prebuilt Velox/Axiom libraries they use.
     link_ordering = "topological",
 ) for _ in ([1] if EMBER_STOKE else [])]

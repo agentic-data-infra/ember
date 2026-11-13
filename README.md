@@ -195,11 +195,14 @@ their other tests against an external cluster.
 [stoke](https://github.com/agentic-data-infra/stoke) is a distributed
 PyTorch dataloader for data preprocessed by Ember. Ember's side of it is a
 build option, off by default: `-c ember.stoke=true` builds against the
-`third-party/stoke` submodule (the Buck cell `stoke//`) and adds two
-functions that turn text into training batches in stoke's format:
+`third-party/stoke` submodule (the Buck cell `stoke//`) and adds functions
+that turn text into training batches in stoke's format:
 
 - `stoke_tokenize(text)`: byte-level tokens, each UTF-8 byte (0 to 255) and
   then the end-of-text token 256.
+- `stoke_tokenize(text, gpt2)`: GPT-2's BPE tokens, the ids of Hugging
+  Face's `tokenizers`, and then the end-of-text token 50256. `gpt2` is the
+  directory of Hugging Face's GPT-2 files `vocab.json` and `merges.txt`.
 - `stoke_pack(tokens, B, T)`: one int32 batch of `[b, T + 1]`, with `b` at
   most `B` whole windows of the tokens; NULL if there is no whole window.
 

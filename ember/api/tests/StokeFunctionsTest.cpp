@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
@@ -75,6 +76,20 @@ TEST_F(StokeFunctionsTest, tokenizesBytesAndEndOfText) {
                   .collect();
   ASSERT_EQ(rows.size(), 1);
   EXPECT_EQ(rows[0].toString(), "[[97,98,256]]");
+}
+
+// With the directory of GPT-2's files, GPT-2's tokens and its end of text.
+TEST_F(StokeFunctionsTest, tokenizesWithGpt2) {
+  const std::string gpt2 =
+      std::string(std::getenv("EMBER_TEST_DATA")) + "/gpt2";
+  auto rows = ember_->read()
+                  .text(writeText({"Hello world", "it's 2026"}))
+                  .select(call("stoke_tokenize", col("value"), lit(gpt2))
+                              .alias("tokens"))
+                  .collect();
+  ASSERT_EQ(rows.size(), 2);
+  EXPECT_EQ(rows[0].toString(), "[[15496,995,50256]]");
+  EXPECT_EQ(rows[1].toString(), "[[270,338,1160,2075,50256]]");
 }
 
 TEST_F(StokeFunctionsTest, packsWholeWindowsIntoABatch) {
