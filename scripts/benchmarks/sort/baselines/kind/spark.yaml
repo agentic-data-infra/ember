@@ -1,0 +1,54 @@
+# Spark standalone for the benchmarks: the master on the control plane, a worker on every worker node (hostNetwork, 4 cores,
+# shuffle and spill under /var/lib/bench-scratch/spark). Executor sizes are per job (systems.sh); the worker offers more.
+# No service links: Kubernetes would set SPARK_MASTER_PORT=tcp://... from the spark-master Service, which Spark reads.
+apiVersion: v1
+kind: Service
+metadata: {name: spark-master, namespace: ember}
+spec:
+  selector: {app: spark-master}
+  ports: [{port: 7077}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: spark-master, namespace: ember, labels: {bench: "1"}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: spark-master}}
+  template:
+    metadata: {labels: {app: spark-master}}
+    spec:
+      enableServiceLinks: false
+      nodeSelector: {node-role.kubernetes.io/control-plane: ""}
+      tolerations: [{key: node-role.kubernetes.io/control-plane, effect: NoSchedule}]
+      containers:
+        - name: master
+          image: bench-spark:1
+          command: [spark-class, org.apache.spark.deploy.master.Master, --host, 0.0.0.0, --port, "7077"]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: spark-worker, namespace: ember}
+spec:
+  selector: {matchLabels: {app: spark-worker}}
+  template:
+    metadata: {labels: {app: spark-worker}}
+    spec:
+      enableServiceLinks: false
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: worker
+          image: bench-spark:1
+          command: [spark-class, org.apache.spark.deploy.worker.Worker, spark://spark-master.ember.svc.cluster.local:7077,
+                    --host, $(NODE_IP), --cores, "4", --memory, 40g, --work-dir, /var/lib/bench-scratch/spark/work]
+          env:
+            - {name: NODE_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}
+            - {name: SPARK_LOCAL_DIRS, value: /var/lib/bench-scratch/spark/local}
+          volumeMounts:
+            - {name: scratch, mountPath: /var/lib/bench-scratch}
+            - {name: input, mountPath: /sortbench}
+            - {name: out, mountPath: /bench-out}
+      volumes:
+        - {name: scratch, hostPath: {path: /var/lib/bench-scratch, type: DirectoryOrCreate}}
+        - {name: input, hostPath: {path: /sortbench}}
+        - {name: out, hostPath: {path: /bench-out}}

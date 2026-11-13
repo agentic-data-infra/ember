@@ -1,0 +1,7 @@
+# ember:dev plus Python 3.10 (Ubuntu 22.04's, as the repo's .venv) and the ember Python package built from the same
+# commit, for the Parquet sort driver (parquet_sort.py). build_image.sh stages ember/ and parquet_sort.py.
+FROM ember:dev
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
+COPY ember/ /opt/ember-py/ember/
+COPY parquet_sort.py /opt/bench/
+ENV PYTHONPATH=/opt/ember-py

@@ -1,0 +1,28 @@
+# The baselines' single-worker cells (queue.sh run_cell.sh <results dir> < baselines/cells.txt), as cells.txt for Ember.
+rdd     spill16-8g   warmup w1 w2
+df      spill16-8g   warmup w1 w2
+gluten  spill16-8g   warmup w1 w2
+ray     spill16-8g   warmup w1 w2
+rdd     spill16      w1 w2
+df      spill16      w1 w2
+gluten  spill16      w1 w2
+ray     spill16      w1 w2
+rdd     spill128     w1 w2
+df      spill128     w1 w2
+gluten  spill128     w1 w2
+ray     spill128     w1 w2
+rdd     spill128-wf  w1 w2
+df      spill128-wf  w1 w2
+gluten  spill128-wf  w1 w2
+rdd     mem-1g       warmup w1 w2
+df      mem-1g       warmup w1 w2
+gluten  mem-1g       warmup w1 w2
+ray     mem-1g       warmup w1 w2
+rdd     mem-5g       warmup w1 w2
+df      mem-5g       warmup w1 w2
+gluten  mem-5g       warmup w1 w2
+ray     mem-5g       warmup w1 w2
+rdd     mem-20g      warmup w1 w2
+df      mem-20g      warmup w1 w2
+gluten  mem-20g      warmup w1 w2
+ray     mem-20g      warmup w1 w2

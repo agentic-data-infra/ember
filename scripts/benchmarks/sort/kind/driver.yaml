@@ -1,0 +1,36 @@
+# The driver of one benchmark run, a Job on the control plane, behind the ember-driver Service the Ember workers connect
+# to. run_cell.sh fills in IMAGE, ARGS (the command, a YAML list) and CONF (EMBER_CONF). No service links: the
+# environment variables Kubernetes derives from Services can clash with a driver's own settings.
+apiVersion: v1
+kind: Service
+metadata: {name: ember-driver, namespace: ember}
+spec:
+  selector: {app: ember-driver}
+  ports: [{port: 7077}]
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: bench-driver, namespace: ember}
+spec:
+  backoffLimit: 0
+  template:
+    metadata: {labels: {app: ember-driver}}
+    spec:
+      restartPolicy: Never
+      enableServiceLinks: false
+      nodeSelector: {node-role.kubernetes.io/control-plane: ""}
+      tolerations: [{key: node-role.kubernetes.io/control-plane, effect: NoSchedule}]
+      containers:
+        - name: driver
+          image: IMAGE
+          command: ARGS
+          env:
+            - {name: POD_IP, valueFrom: {fieldRef: {fieldPath: status.podIP}}}
+            - {name: EMBER_CONF, value: "CONF"}
+          ports: [{containerPort: 7077}]
+          volumeMounts:
+            - {name: input, mountPath: /sortbench}
+            - {name: out, mountPath: /bench-out}
+      volumes:
+        - {name: input, hostPath: {path: /sortbench}}
+        - {name: out, hostPath: {path: /bench-out}}

@@ -1,0 +1,13 @@
+# The baselines' kind cells (queue.sh kind/run_cell.sh <results dir> < baselines/kind/cells.txt), as kind/cells.txt.
+rdd     mem       warmup w1 w2
+df      mem       warmup w1 w2
+gluten  mem       warmup w1 w2
+ray     mem       warmup w1 w2
+rdd     spill16   w1 w2
+df      spill16   w1 w2
+gluten  spill16   w1 w2
+ray     spill16   w1 w2
+rdd     spill128  w1 w2
+df      spill128  w1 w2
+gluten  spill128  w1 w2
+ray     spill128  w1 w2
