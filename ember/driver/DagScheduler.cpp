@@ -1,6 +1,8 @@
 #include "ember/driver/DagScheduler.h"
 
+#include <algorithm>
 #include <numeric>
+#include <random>
 #include <set>
 
 #include <folly/ScopeGuard.h>
@@ -43,6 +45,19 @@ constexpr int64_t kSplitBytesCeiling = 128 << 20;
 constexpr int64_t kOpenCostBytes = 4 << 20;
 
 std::atomic<int32_t> schedulerCounter{0};
+
+// Shuffles items [begin, end) with Fisher-Yates: the same order from the same
+// seed on any build, which std::shuffle does not promise.
+template <typename T>
+void shuffleRange(
+    std::vector<T>& items,
+    size_t begin,
+    size_t end,
+    std::mt19937_64& rng) {
+  for (size_t n = end - begin; n > 1; --n) {
+    std::swap(items[begin + n - 1], items[begin + rng() % n]);
+  }
+}
 
 // The file format and path of what a scan reads.
 std::pair<std::string, std::string> scanSource(
@@ -128,8 +143,22 @@ DagScheduler::DagScheduler(
       nodeLocalFiles_{
           options_.config.contains(kNodeLocalFiles) &&
           folly::to<bool>(options_.config.at(kNodeLocalFiles))},
+      shuffleSplits_{
+          options_.config.contains(kShuffleSplits)
+              ? options_.config.at(kShuffleSplits)
+              : "none"},
+      shuffleSeed_{
+          options_.config.contains(kShuffleSeed)
+              ? folly::to<uint64_t>(options_.config.at(kShuffleSeed))
+              : 0},
       taskScheduler_{std::move(backend), options_.maxTaskAttempts},
       kilnMemo_{KilnMemo::fromConfig(options_.config)} {
+  VELOX_USER_CHECK(
+      shuffleSplits_ == "none" || shuffleSplits_ == "file" ||
+          shuffleSplits_ == "global",
+      "{} must be none, file or global, not '{}'",
+      kShuffleSplits,
+      shuffleSplits_);
   if (shuffleTarget_.store == "kiln") {
     kiln_ = shuffle::kilnClient(shuffleTarget_.kilnMetadata);
   }
@@ -139,7 +168,8 @@ DagScheduler::DagScheduler(
       continue;
     }
     if (!key.starts_with("ember.") || key == kMaxSplitBytes ||
-        key == kNodeLocalFiles) {
+        key == kNodeLocalFiles || key == kShuffleSplits ||
+        key == kShuffleSeed) {
       keyConfig_[key] = value;
     }
   }
@@ -373,15 +403,30 @@ DagScheduler::scanSplits(
       maxSplitBytes = folly::to<int64_t>(it->second);
     }
     VELOX_USER_CHECK_GT(maxSplitBytes, 0);
+    // Ranges in file order, or shuffled (kShuffleSplits) from files sorted
+    // by path, so that the seed alone sets the order.
+    std::mt19937_64 rng(shuffleSeed_);
     auto& scanRanges = rangesPerScan.emplace_back();
-    for (const auto& [node, files] : filesPerNode) {
+    for (auto& [node, files] : filesPerNode) {
+      if (shuffleSplits_ != "none") {
+        std::sort(files.begin(), files.end(), [](const auto& a, const auto& b) {
+          return a.path < b.path;
+        });
+      }
       auto& ranges = scanRanges.emplace_back(NodeRanges{node, {}}).ranges;
       for (const auto& file : files) {
+        const auto first = ranges.size();
         for (int64_t start = 0; start < file.size; start += maxSplitBytes) {
           const auto length = std::min(maxSplitBytes, file.size - start);
           ranges.push_back(
               {rangeSplit(handle, file.path, start, length), length});
         }
+        if (shuffleSplits_ == "file") {
+          shuffleRange(ranges, first, ranges.size(), rng);
+        }
+      }
+      if (shuffleSplits_ == "global") {
+        shuffleRange(ranges, 0, ranges.size(), rng);
       }
     }
     maxSplitBytesPerScan.push_back(maxSplitBytes);
