@@ -250,18 +250,19 @@ its splits to tasks shuffled, with `ember.files.shuffle`:
 
 `ember.files.shuffle_seed` (default 0) seeds the shuffle: the same seed and
 files give the same order, so each epoch takes a new seed. A split is a byte
-range of a file of at most `ember.files.max_split_bytes`, and rows inside a
-range keep their order. A Parquet range reads the row groups that start in
-it, so for `file` set the split size to about one row group. Small splits
-mean more tasks and Kiln chunks, which costs throughput (4-38% in our
-dataloader runs with 4 MiB splits):
+range of a file, and rows inside a range keep their order (a Parquet range
+reads the row groups that start in it). Splits follow Ember's split sizing,
+as in Spark: total bytes / parallelism, between 4 and 128 MB, or
+`ember.files.max_split_bytes`. So `file` reorders only files cut into
+several ranges. A smaller `ember.files.max_split_bytes` gives a finer order,
+but more and smaller tasks and Kiln chunks, which costs throughput (4-38%
+in our dataloader runs with 4 MiB splits):
 
 ```python
 ember = (
     Session.builder.appName("Feed")
     .config("ember.files.shuffle", "global")
     .config("ember.files.shuffle_seed", str(epoch))
-    .config("ember.files.max_split_bytes", str(4 << 20))
     .getOrCreate()
 )
 ```

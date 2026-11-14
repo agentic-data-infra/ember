@@ -101,8 +101,7 @@ class DagScheduler {
   /// "none" (default) keeps files and ranges in order; "file" keeps the file
   /// order but shuffles each file's ranges; "global" shuffles all ranges.
   /// Ranges are the unit, so a file shuffles only when it has several (see
-  /// kMaxSplitBytes; a Parquet range of about the row-group size reads about
-  /// one row group). With node-local files, each node's ranges shuffle apart.
+  /// kMaxSplitBytes). With node-local files, each node's ranges shuffle apart.
   static constexpr const char* kShuffleSplits = "ember.files.shuffle";
   /// Config key: the seed of kShuffleSplits (default 0). The same seed and
   /// files give the same order; a new epoch takes a new seed.
