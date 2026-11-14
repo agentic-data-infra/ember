@@ -97,6 +97,16 @@ class DagScheduler {
   /// the scan, and the nodes are those with workers when the job starts.
   /// Only stages with one scan; their stages have no keys.
   static constexpr const char* kNodeLocalFiles = "ember.files.node_local";
+  /// Config key: the order in which file scans hand their ranges to tasks.
+  /// "none" (default) keeps files and ranges in order; "file" keeps the file
+  /// order but shuffles each file's ranges; "global" shuffles all ranges.
+  /// Ranges are the unit, so a file shuffles only when it has several (see
+  /// kMaxSplitBytes; a Parquet range of about the row-group size reads about
+  /// one row group). With node-local files, each node's ranges shuffle apart.
+  static constexpr const char* kShuffleSplits = "ember.files.shuffle";
+  /// Config key: the seed of kShuffleSplits (default 0). The same seed and
+  /// files give the same order; a new epoch takes a new seed.
+  static constexpr const char* kShuffleSeed = "ember.files.shuffle_seed";
   /// Config key: keep keyed shuffle outputs for later jobs to reuse (default
   /// true).
   static constexpr const char* kReuseOutputs = "ember.reuse.outputs";
@@ -213,6 +223,9 @@ class DagScheduler {
   const bool reuseOutputs_;
   const bool sampleRanges_;
   const bool nodeLocalFiles_;
+  // kShuffleSplits and its seed.
+  const std::string shuffleSplits_;
+  const uint64_t shuffleSeed_;
   // Config that goes into stage keys: what is not Ember's own, splits, and
   // sampling, as outputs of a range shuffle must all use the same split points.
   std::map<std::string, std::string> keyConfig_;

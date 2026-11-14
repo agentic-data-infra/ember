@@ -1,13 +1,15 @@
 // Ember's scheduler and shuffle end to end: stage plans, task messages,
 // retries, recomputing lost shuffle outputs, byte-range splits of text and
-// Parquet files, packing small files, spills, range-partitioned sorts, and
-// agreement with Axiom's in-process LocalRunner.
+// Parquet files, shuffled splits, packing small files, spills,
+// range-partitioned sorts, and agreement with Axiom's in-process LocalRunner.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <random>
 
 #include <folly/coro/BlockingWait.h>
@@ -575,6 +577,82 @@ TEST_F(SchedulerTest, smallFilesShareTasks) {
   EXPECT_EQ(backend->launches(stages.stages[0].stageId), 3);
 }
 
+TEST_F(SchedulerTest, shufflesSplits) {
+  auto path = writeCorpus(3, 3000);
+  auto plan = wordCount(path).physicalPlan();
+  auto expected = toStrings(wordCount(path).collectBatches());
+
+  // The scan's ranges (file, start) in task order, read in 4KB ranges with
+  // 'config'.
+  using Ranges = std::vector<std::pair<std::string, int64_t>>;
+  auto rangesWith = [&](std::map<std::string, std::string> config) {
+    config[DagScheduler::kMaxSplitBytes] = "4096";
+    std::mutex mutex;
+    std::map<int32_t, Ranges> perTask;
+    auto [dag, backend] =
+        scheduler(std::move(config), [&](const TaskDescription& task) {
+          std::lock_guard<std::mutex> l(mutex);
+          for (const auto& [nodeId, splits] : task.splits) {
+            for (const auto& split : splits) {
+              if (split.isObject() &&
+                  split.getDefault("name", "") == "FileRangeSplit") {
+                perTask[task.partition].emplace_back(
+                    split["filePath"].asString(), split["start"].asInt());
+              }
+            }
+          }
+          return false;
+        });
+    EXPECT_EQ(toStrings(dag->runJob(*plan, pool_.get())), expected);
+    Ranges ranges;
+    for (const auto& [task, taskRanges] : perTask) {
+      ranges.insert(ranges.end(), taskRanges.begin(), taskRanges.end());
+    }
+    return ranges;
+  };
+  auto sortedRanges = [](Ranges ranges) {
+    std::sort(ranges.begin(), ranges.end());
+    return ranges;
+  };
+
+  const auto inOrder = rangesWith({});
+  ASSERT_GT(inOrder.size(), 30);
+  const auto all = sortedRanges(inOrder);
+
+  // Global: a permutation of all ranges, set by the seed alone.
+  const auto global = rangesWith({{DagScheduler::kShuffleSplits, "global"}});
+  EXPECT_EQ(sortedRanges(global), all);
+  EXPECT_NE(global, inOrder);
+  EXPECT_EQ(
+      rangesWith(
+          {{DagScheduler::kShuffleSplits, "global"},
+           {DagScheduler::kShuffleSeed, "0"}}),
+      global);
+  EXPECT_NE(
+      rangesWith(
+          {{DagScheduler::kShuffleSplits, "global"},
+           {DagScheduler::kShuffleSeed, "1"}}),
+      global);
+
+  // File: files one after another in path order, each one's ranges shuffled.
+  const auto perFile = rangesWith({{DagScheduler::kShuffleSplits, "file"}});
+  EXPECT_EQ(sortedRanges(perFile), all);
+  std::vector<std::string> fileOrder;
+  for (const auto& [file, start] : perFile) {
+    if (fileOrder.empty() || fileOrder.back() != file) {
+      fileOrder.push_back(file);
+    }
+  }
+  EXPECT_EQ(fileOrder.size(), 3);
+  EXPECT_TRUE(std::is_sorted(fileOrder.begin(), fileOrder.end()));
+  EXPECT_FALSE(std::is_sorted(perFile.begin(), perFile.end()));
+
+  auto invalid = [&] {
+    scheduler({{DagScheduler::kShuffleSplits, "random"}});
+  };
+  VELOX_ASSERT_THROW(invalid(), "must be none, file or global, not 'random'");
+}
+
 TEST_F(SchedulerTest, retriesFailedTasks) {
   auto path = writeCorpus(2, 200);
   auto df = wordCount(path);
@@ -946,6 +1024,7 @@ TEST_F(SchedulerTest, keysCoverQueryConfig) {
   ASSERT_TRUE(base.has_value());
   EXPECT_NE(keyWith({{"session_timezone", "Asia/Tokyo"}}), base);
   EXPECT_EQ(keyWith({{DagScheduler::kReuseOutputs, "true"}}), base);
+  EXPECT_NE(keyWith({{DagScheduler::kShuffleSplits, "global"}}), base);
 }
 
 TEST_F(SchedulerTest, kilnStoreMatchesFileStore) {
