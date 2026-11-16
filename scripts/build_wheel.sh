@@ -7,6 +7,10 @@
 # The module is built for the Python in .venv (see python/README.md), so the
 # wheel is tagged for that interpreter. auditwheel copies the shared libraries
 # _ember.so still links (gflags, glog, boost_context, ...) into the wheel.
+#
+# The module is built with the stoke connector (-c ember.stoke=true), so
+# write().format("stoke") works from the wheel; it is unused otherwise. Its
+# sources are the third-party/stoke submodule.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -16,7 +20,12 @@ TAG=$($PYTHON -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_inf
 
 uv pip install -q -p $PYTHON wheel auditwheel patchelf
 
-buck2 build //python:_ember --out python/ember/_ember.so
+if [ ! -e third-party/stoke/stoke ]; then
+    echo "third-party/stoke is missing: run git submodule update --init" >&2
+    exit 1
+fi
+
+buck2 build -c ember.stoke=true //python:_ember --out python/ember/_ember.so
 
 rm -rf dist build/wheel
 uv build -q --wheel python/ -o build/wheel
