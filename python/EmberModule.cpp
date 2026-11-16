@@ -529,6 +529,11 @@ PYBIND11_MODULE(_ember, m) {
       .def_property_readonly(
           "parallelism",
           [](const Session& s) { return s.state().parallelism(); })
+      .def(
+          "stats",
+          &Session::stats,
+          "Sums of the tasks' stats since the session started, e.g. aiCalls "
+          "and aiInputTokens; take the difference around an action.")
       .def("stop", &Session::stop, py::call_guard<py::gil_scoped_release>());
 
   // functions.

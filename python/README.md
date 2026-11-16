@@ -83,6 +83,8 @@ for `&&`, `||` and `!`, `cast("double")` with a type name, and
 `Session.builder` and `session.read` as attributes. A `str` argument is a
 column name, except in operators, where it is a literal (`col("w") != ""`).
 Actions release the GIL while Ember runs.
+`session.stats()` returns the tasks' stats summed since the session started,
+e.g. `aiCalls` and `aiInputTokens`; take the difference around an action.
 
 Not bound yet: Python UDFs (UDFs are Velox functions registered from C++ and
 reachable with `functions.call`), `onStageCompleted`, and plan objects other

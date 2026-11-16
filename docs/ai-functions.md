@@ -1,8 +1,8 @@
 # AI functions
 
-Design for calling LLMs from Dataframe programs. Status: steps 1 to 3 of
+Design for calling LLMs from Dataframe programs. Status: steps 1 to 4 of
 the plan below are implemented (`ai.generate` with and without `output`,
-`getField`, `when`/`otherwise`, stage reuse; see
+`getField`, `when`/`otherwise`, stage reuse, statistics; see
 [../ember/ai/README.md](../ember/ai/README.md)); the rest is proposed.
 
 Agents in the discovery loop filter, label and score large experiment
@@ -215,11 +215,28 @@ memory for a per-process saving, where stage reuse needs no new mechanism.
 
 ## Statistics
 
-Calls, failures (`aiFailedRows`, there already for reuse), and input and
-output tokens are Velox runtime stats of the operator that evaluates the
-expression. They show up in the
-stage statistics and in Python, so an agent can read what an experiment
-cost.
+`ai_generate` keeps Velox runtime stats on the operator that evaluates it:
+
+| Stat | Counts |
+|---|---|
+| `aiCalls` | Prompts sent (distinct per batch), whether answered or not. |
+| `aiRetries` | Requests sent again after a 429, 5xx, timeout or connection error. |
+| `aiFailedRows` | Rows with a status: failed calls and answers that do not fit the schema. |
+| `aiInputTokens`, `aiOutputTokens` | Tokens of the answered prompts and of the answers, from the response's `usage` (0 if the endpoint sends none). |
+
+Each task sums them into its result (`TaskResult::stats`). The driver sums
+those per stage attempt (`StageAttemptInfo::stats`, seen by
+`onStageCompleted`) and for the session: `Session::stats()` in C++,
+`session.stats()` in Python, as a map from name to total since the session
+started. An agent takes the difference around an action to see what it cost:
+
+```python
+before = ember.stats()
+judged.write.parquet("judged/")
+cost = {k: v - before.get(k, 0) for k, v in ember.stats().items()}
+```
+
+A reused stage makes no calls and adds nothing.
 
 ## Later: models next to the data
 
@@ -248,7 +265,7 @@ not HTTP-specific, endpoints have a `kind`, and inputs are typed columns
 | 1 | Endpoint config, `AiBackend`, `HttpBackend`, `ai.generate` without `output`, `getField`, C++ and Python bindings. Tests against a mock OpenAI-compatible server: a call, a filter, nulls, retry after 429, a failed row. |
 | 2 | `output` schemas (typed `ROW` results), `when`/`otherwise`; tests that a branch sees only its rows and that answers parse into typed fields. |
 | 3 | Mark `ai.generate` deterministic; the endpoint's `kind`, `url` and `model` in stage keys; stages with failed rows are not kept; tests that a rerun makes no calls, that a new model changes the keys, and that a rerun asks again for failed rows. |
-| 4 | Runtime statistics. |
+| 4 | Runtime statistics: calls, retries, failed rows and tokens per task, summed per stage attempt and per session (`Session::stats()`, `session.stats()`). |
 | 5 | A manual check against a real endpoint. velox-dev has no GPU, so: llama.cpp's `llama-server` on CPU (OpenAI-compatible, JSON-schema output) with a small instruct model such as Qwen2.5-0.5B or 1.5B (GGUF), under a memory cap. |
 
 Left out for now: convenience functions such as `classify`, `score` or

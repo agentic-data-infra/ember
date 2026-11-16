@@ -16,7 +16,8 @@ namespace ember::ai::test {
 class MockChatServer {
  public:
   struct Reply {
-    /// 200 wraps 'content' in a chat completion; any other status sends
+    /// 200 wraps 'content' in a chat completion, whose usage counts a token
+    /// per byte of the prompt and of 'content'; any other status sends
     /// 'content' as the body.
     int status{200};
     std::string content;

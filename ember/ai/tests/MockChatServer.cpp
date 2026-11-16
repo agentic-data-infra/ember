@@ -137,7 +137,10 @@ void MockChatServer::handle(int connection) {
         folly::dynamic::array(folly::dynamic::object(
             "message",
             folly::dynamic::object("role", "assistant")(
-                "content", reply.content)))));
+                "content", reply.content))))(
+        "usage",
+        folly::dynamic::object("prompt_tokens", prompt.size())(
+            "completion_tokens", reply.content.size())));
   }
   const auto response = fmt::format(
       "HTTP/1.1 {} Mock\r\nContent-Type: application/json\r\n"

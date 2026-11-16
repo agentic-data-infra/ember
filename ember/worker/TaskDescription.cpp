@@ -97,7 +97,10 @@ std::string TaskResult::serialize() const {
   obj["numPages"] = resultPages.size();
   obj["outputRows"] = outputRows;
   obj["wallMicros"] = wallMicros;
-  obj["failedRows"] = failedRows;
+  obj["stats"] = folly::dynamic::object();
+  for (const auto& [name, value] : stats) {
+    obj["stats"][name] = value;
+  }
   auto header = folly::toJson(obj);
 
   std::string out;
@@ -148,7 +151,9 @@ TaskResult TaskResult::deserialize(const std::string& bytes) {
   }
   result.outputRows = obj["outputRows"].asInt();
   result.wallMicros = obj["wallMicros"].asInt();
-  result.failedRows = obj["failedRows"].asInt();
+  for (const auto& [name, value] : obj["stats"].items()) {
+    result.stats[name.asString()] = value.asInt();
+  }
   return result;
 }
 

@@ -71,9 +71,9 @@ struct TaskResult {
 
   int64_t outputRows{0};
   int64_t wallMicros{0};
-  /// Rows whose AI calls failed (ai::kFailedRowsStat). The driver does not
-  /// keep the output of a stage that has any for reuse.
-  int64_t failedRows{0};
+  /// Sums of the task's runtime stats that the driver collects (ai::kStats),
+  /// by name; stats that stayed 0 are left out.
+  std::map<std::string, int64_t> stats;
 
   std::string serialize() const;
   static TaskResult deserialize(const std::string& bytes);

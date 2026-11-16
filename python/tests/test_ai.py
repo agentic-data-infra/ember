@@ -25,7 +25,10 @@ class _ChatHandler(http.server.BaseHTTPRequestHandler):
         else:
             status = 200
             reply = json.dumps(
-                {"choices": [{"message": {"role": "assistant", "content": prompt.upper()}}]}
+                {
+                    "choices": [{"message": {"role": "assistant", "content": prompt.upper()}}],
+                    "usage": {"prompt_tokens": len(prompt), "completion_tokens": len(prompt)},
+                }
             ).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -67,6 +70,17 @@ class AiTest(unittest.TestCase):
         self.assertEqual(rows[0], ("a", "SAY A", ""))
         self.assertEqual(rows[1][1], None)
         self.assertTrue(rows[1][2].startswith("HTTP 400"))
+
+    def test_stats(self):
+        before = self.ember.stats()
+        df = self.ember.createDataFrame(pa.table({"p": ["x", "y", "x", "fail"]}))
+        df.select(ai.generate(concat(lit("say "), col("p")), endpoint="mock")).collect()
+        after = self.ember.stats()
+        change = {k: v - before.get(k, 0) for k, v in after.items() if v != before.get(k, 0)}
+        self.assertEqual(
+            change,
+            {"aiCalls": 3, "aiFailedRows": 1, "aiInputTokens": 10, "aiOutputTokens": 10},
+        )
 
     def test_output_schema(self):
         df = self.ember.createDataFrame(

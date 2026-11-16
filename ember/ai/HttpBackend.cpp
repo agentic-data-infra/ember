@@ -424,10 +424,11 @@ class Client : public folly::AsyncTimeout {
           static_cast<uint32_t>(backoff.count()));
       return;
     }
+    answer.attempts = transfer->attempts;
     complete(*transfer, std::move(answer));
   }
 
-  // The message content of a chat completion.
+  // The message content of a chat completion, and its token usage.
   AiAnswer parse(Transfer& transfer) {
     const auto body = transfer.body();
     std::string_view content;
@@ -442,7 +443,19 @@ class Client : public folly::AsyncTimeout {
         auto text = velox::AlignedBuffer::allocate<char>(
             content.size(), pool_.get());
         std::memcpy(text->asMutable<char>(), content.data(), content.size());
-        return {std::move(text), ""};
+        AiAnswer answer{.text = std::move(text)};
+        uint64_t tokens = 0;
+        if (!document.at_pointer("/usage/prompt_tokens")
+                 .get_uint64()
+                 .get(tokens)) {
+          answer.inputTokens = tokens;
+        }
+        if (!document.at_pointer("/usage/completion_tokens")
+                 .get_uint64()
+                 .get(tokens)) {
+          answer.outputTokens = tokens;
+        }
+        return answer;
       }
     }
     return {

@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <mutex>
 #include <optional>
 
 #include <fmt/format.h>
@@ -14,7 +16,9 @@
 
 #include "ember/Session.h"
 #include "ember/ai.h"
+#include "ember/ai/AiFunctions.h"
 #include "ember/ai/tests/MockChatServer.h"
+#include "ember/driver/DagScheduler.h"
 #include "ember/functions.h"
 
 namespace ember {
@@ -75,7 +79,7 @@ std::optional<MockChatServer::Reply> triage(const std::string& prompt) {
   return std::nullopt;
 }
 
-// "fail" gets a 400, "flaky..." a 400 the first time, "busy" a 429 the first time, "yes?" the answer "yes",
+// "fail" gets a 400, "flaky..." a 400 the first time, "busy..." a 429 the first time, "yes?" the answer "yes",
 // "json:<answer>" the answer, the triage prompts their answers; anything else
 // is echoed.
 MockChatServer::Reply reply(const std::string& prompt, int previous) {
@@ -91,7 +95,7 @@ MockChatServer::Reply reply(const std::string& prompt, int previous) {
   if (prompt.starts_with("flaky") && previous == 0) {
     return {400, R"({"error": "try later"})"};
   }
-  if (prompt == "busy" && previous == 0) {
+  if (prompt.starts_with("busy") && previous == 0) {
     return {429, R"({"error": "slow down"})"};
   }
   if (prompt == "yes?") {
@@ -115,6 +119,12 @@ class AiGenerateTest : public testing::Test {
                  .config("ember.ai.endpoint.carbon.model", "carbon-model")
                  .config("ember.ai.endpoint.hydrogen.url", server_->url())
                  .config("ember.ai.endpoint.hydrogen.model", "hydrogen-model")
+                 .onStageCompleted([](const driver::StageAttemptInfo& info) {
+                   std::lock_guard<std::mutex> l(stageStatsMutex_);
+                   for (const auto& [name, value] : info.stats) {
+                     stageStats_[name] += value;
+                   }
+                 })
                  .getOrCreate();
   }
 
@@ -152,6 +162,14 @@ class AiGenerateTest : public testing::Test {
     return result;
   }
 
+  // The stats of all stage attempts, from onStageCompleted.
+  static std::map<std::string, int64_t> stageStats() {
+    std::lock_guard<std::mutex> l(stageStatsMutex_);
+    return stageStats_;
+  }
+
+  static inline std::mutex stageStatsMutex_;
+  static inline std::map<std::string, int64_t> stageStats_;
   static inline std::unique_ptr<MockChatServer> server_;
   static inline std::optional<Session> ember_;
 };
@@ -519,6 +537,44 @@ TEST_F(AiGenerateTest, stagesAfterFailedRowsAreNotKept) {
   EXPECT_FALSE(second[0].get<bool>(0));
   EXPECT_EQ(server_->requests("flaky later"), 2);
   fs::remove_all(dir);
+}
+
+// The difference of two stats snapshots, without the zeros.
+std::map<std::string, int64_t> difference(
+    const std::map<std::string, int64_t>& before,
+    const std::map<std::string, int64_t>& after) {
+  std::map<std::string, int64_t> result;
+  for (const auto& [name, value] : after) {
+    const auto it = before.find(name);
+    if (const auto change = value - (it == before.end() ? 0 : it->second);
+        change != 0) {
+      result[name] = change;
+    }
+  }
+  return result;
+}
+
+// Calls, retries, failed rows and tokens add up per stage and per session.
+TEST_F(AiGenerateTest, statsCountCallsAndTokens) {
+  const auto before = ember_->stats();
+  const auto stagesBefore = stageStats();
+  auto rows = generate({"stats a", "stats a", "busy stats", "fail"});
+  ASSERT_EQ(rows.size(), 4);
+
+  // One call per distinct prompt; "busy stats" is retried once. Tokens count
+  // bytes of the answered prompts and answers.
+  const std::map<std::string, int64_t> expected{
+      {ai::kCallsStat, 3},
+      {ai::kRetriesStat, 1},
+      {ai::kFailedRowsStat, 1},
+      {ai::kInputTokensStat,
+       static_cast<int64_t>(std::string("stats a").size() +
+                            std::string("busy stats").size())},
+      {ai::kOutputTokensStat,
+       static_cast<int64_t>(std::string("echo: stats a").size() +
+                            std::string("echo: busy stats").size())}};
+  EXPECT_EQ(difference(before, ember_->stats()), expected);
+  EXPECT_EQ(difference(stagesBefore, stageStats()), expected);
 }
 
 // The stage keys of a program that asks the endpoint "mock" in sessions with

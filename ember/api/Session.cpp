@@ -335,6 +335,11 @@ void SessionState::uncache(const std::string& id) {
   }
 }
 
+std::map<std::string, int64_t> SessionState::stats() const {
+  VELOX_USER_CHECK_NOT_NULL(scheduler_, "Session {} is stopped", appName_);
+  return scheduler_->stats();
+}
+
 void SessionState::stop() {
   if (scheduler_ != nullptr) {
     scheduler_->backend().stop();
