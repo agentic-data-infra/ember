@@ -90,9 +90,10 @@ stage takes the stored shuffle's id instead of a new one and does not run:
 its consumers read the stored blocks, and stages only it reads do not run
 either. There is no check beyond the key; a key collision is not handled.
 
-A stage whose tasks report failed rows (`TaskResult::failedRows`, the AI
-calls that failed; [../ai/README.md](../ai/README.md)) is not kept, nor are
-the stages that read it, so a rerun runs it again. A cached table's output
+A stage whose tasks report failed rows (`aiFailedRows` in
+`TaskResult::stats`, the AI calls that failed;
+[../ai/README.md](../ai/README.md)) is not kept, nor are the stages that read
+it, so a rerun runs it again. A cached table's output
 is kept regardless.
 
 Stored shuffles stay registered with the `MapOutputTracker`, so outputs lost

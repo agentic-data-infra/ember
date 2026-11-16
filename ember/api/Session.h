@@ -128,6 +128,11 @@ class SessionState {
   /// Drops the stored output of cached table 'id' (Dataframe::unpersist).
   void uncache(const std::string& id);
 
+  /// Sums of the tasks' stats since the session started, by name; e.g. the
+  /// AI functions' calls and tokens (ember/ai/AiFunctions.h). Take the
+  /// difference around an action for what it cost.
+  std::map<std::string, int64_t> stats() const;
+
   void stop();
 
  private:
@@ -192,6 +197,11 @@ class Session {
 
   const SessionState& state() const {
     return *state_;
+  }
+
+  /// SessionState::stats().
+  std::map<std::string, int64_t> stats() const {
+    return state_->stats();
   }
 
   /// Ends the session; the next getOrCreate() creates a new one.

@@ -241,9 +241,11 @@ std::string Executor::runTask(const std::string& bytes) {
       int64_t spilledBytes = 0;
       for (const auto& [id, stats] : exec::toPlanStats(task->taskStats())) {
         spilledBytes += stats.spilledBytes;
-        if (auto it = stats.customStats.find(ai::kFailedRowsStat);
-            it != stats.customStats.end()) {
-          result.failedRows += it->second.sum;
+        for (const auto* name : ai::kStats) {
+          if (auto it = stats.customStats.find(name);
+              it != stats.customStats.end()) {
+            result.stats[name] += it->second.sum;
+          }
         }
       }
       if (spilledBytes > 0) {

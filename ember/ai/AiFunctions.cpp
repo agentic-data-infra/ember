@@ -1,5 +1,6 @@
 #include "ember/ai/AiFunctions.h"
 
+#include <algorithm>
 #include <mutex>
 
 #include <fmt/format.h>
@@ -113,9 +114,23 @@ class GenerateFunction : public exec::VectorFunction {
     rows.applyToSelected([&](velox::vector_size_t row) {
       failed += statuses->valueAt(row).size() > 0;
     });
-    if (failed > 0) {
-      velox::addThreadLocalRuntimeStat(
-          kFailedRowsStat, velox::RuntimeCounter(failed));
+    int64_t retries = 0;
+    int64_t inputTokens = 0;
+    int64_t outputTokens = 0;
+    for (const auto& answer : answers) {
+      retries += std::max(answer.attempts - 1, 0);
+      inputTokens += answer.inputTokens;
+      outputTokens += answer.outputTokens;
+    }
+    for (const auto& [name, value] :
+         {std::pair{kCallsStat, static_cast<int64_t>(answers.size())},
+          std::pair{kRetriesStat, retries},
+          std::pair{kFailedRowsStat, failed},
+          std::pair{kInputTokensStat, inputTokens},
+          std::pair{kOutputTokensStat, outputTokens}}) {
+      if (value > 0) {
+        velox::addThreadLocalRuntimeStat(name, velox::RuntimeCounter(value));
+      }
     }
     fields.push_back(statuses);
     auto output = std::make_shared<velox::RowVector>(

@@ -65,6 +65,8 @@ struct StageAttemptInfo {
   std::map<int32_t, std::string> outputLocations;
   /// Blocks its tasks could not fetch.
   std::vector<shuffle::FetchFailure> fetchFailures;
+  /// Sums of its tasks' stats (TaskResult::stats).
+  std::map<std::string, int64_t> stats;
 };
 
 struct DagSchedulerOptions {
@@ -146,6 +148,9 @@ class DagScheduler {
   /// Drops the stored output of cached table 'id'. Returns false if none was
   /// stored.
   bool uncache(const std::string& id);
+
+  /// Sums of the stats (TaskResult::stats) of all tasks run so far.
+  std::map<std::string, int64_t> stats() const;
 
   SchedulerBackend& backend() {
     return taskScheduler_.backend();
@@ -234,6 +239,9 @@ class DagScheduler {
   std::shared_ptr<facebook::velox::memory::MemoryPool> planPool_;
   std::atomic<int64_t> jobCounter_{0};
   std::atomic<int32_t> shuffleCounter_{0};
+
+  mutable std::mutex statsMutex_;
+  std::map<std::string, int64_t> stats_;
 
   // Stored shuffle outputs by stage key. They stay registered with the
   // tracker, so losses are tracked as for any shuffle.

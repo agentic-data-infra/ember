@@ -17,6 +17,7 @@
 #include "ember/ParquetConnector.h"
 #include "ember/RowPages.h"
 #include "ember/ai/AiEndpoint.h"
+#include "ember/ai/AiFunctions.h"
 #include "ember/driver/RangeBounds.h"
 #include "ember/shuffle/KilnShuffle.h"
 #include "ember/shuffle/ShuffleConfig.h"
@@ -115,8 +116,8 @@ struct DagScheduler::StageState {
   std::vector<std::vector<std::string>> resultPages;
   std::vector<int64_t> resultRows;
   // Some rows of this stage or of a stage it reads had failed AI calls
-  // (TaskResult::failedRows), so its output is not kept for reuse: a rerun
-  // asks again.
+  // (ai::kFailedRowsStat), so its output is not kept for reuse: a rerun asks
+  // again.
   bool failedRows{false};
 
   int32_t numTasks() const {
@@ -966,7 +967,10 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
           continue;
         }
         const auto p = partitions[i];
-        state.failedRows |= result->failedRows > 0;
+        for (const auto& [name, value] : result->stats) {
+          info.stats[name] += value;
+        }
+        state.failedRows |= result->stats.contains(ai::kFailedRowsStat);
         if (stage.shuffleId.has_value()) {
           VELOX_CHECK(result->mapStatus.has_value());
           auto location = result->mapStatus->location;
@@ -984,6 +988,10 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
       }
       removeFailedOutputs(taskSet.fetchFailures);
       info.fetchFailures = std::move(taskSet.fetchFailures);
+      std::lock_guard<std::mutex> l(statsMutex_);
+      for (const auto& [name, value] : info.stats) {
+        stats_[name] += value;
+      }
     }
     if (!missingPartitions().empty()) {
       ++state.incompleteAttempts;
@@ -992,6 +1000,11 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
       options_.onStageCompleted(info);
     }
   }
+}
+
+std::map<std::string, int64_t> DagScheduler::stats() const {
+  std::lock_guard<std::mutex> l(statsMutex_);
+  return stats_;
 }
 
 } // namespace ember::driver

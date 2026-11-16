@@ -17,19 +17,35 @@
 // any other: a rerun of an unchanged program makes no calls. The keys include
 // the endpoint's kind, url and model (AiEndpoint.h). Rows with a status count
 // in the runtime stat kFailedRowsStat; a stage with any is not kept for reuse,
-// so a rerun asks again. Models do not keep the promise of determinism: a
+// so a rerun asks again.
+//
+// Runtime stats of the operator that evaluates it (kStats), which tasks
+// report to the driver: calls (distinct prompts sent), retries, failed rows,
+// and input and output tokens as the endpoint reports them. Models do not keep the promise of determinism: a
 // recomputed lost map output may get different answers than the ones
 // downstream already read.
 
 #pragma once
 
+#include <array>
+
 namespace ember::ai {
 
 inline constexpr const char* kGenerateFunction = "ai_generate";
 
-/// Runtime stat of the operator that evaluates ai_generate: rows with a
-/// non-empty status.
+/// Runtime stats of the operator that evaluates ai_generate.
+inline constexpr const char* kCallsStat = "aiCalls";
+inline constexpr const char* kRetriesStat = "aiRetries";
+/// Rows with a non-empty status.
 inline constexpr const char* kFailedRowsStat = "aiFailedRows";
+inline constexpr const char* kInputTokensStat = "aiInputTokens";
+inline constexpr const char* kOutputTokensStat = "aiOutputTokens";
+inline constexpr std::array<const char*, 5> kStats{
+    kCallsStat,
+    kRetriesStat,
+    kFailedRowsStat,
+    kInputTokensStat,
+    kOutputTokensStat};
 
 /// Registers the AI functions. Safe to call more than once.
 void registerAiFunctions();

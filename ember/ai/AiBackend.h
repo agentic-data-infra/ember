@@ -23,6 +23,12 @@ struct AiAnswer {
   facebook::velox::BufferPtr text;
   /// Why the call failed, after retries; empty on success.
   std::string error;
+  /// Requests sent for it, retries included.
+  int32_t attempts{0};
+  /// Tokens of the prompt and the answer, as the endpoint reports them (0 if
+  /// it does not).
+  int64_t inputTokens{0};
+  int64_t outputTokens{0};
 };
 
 class AiBackend {

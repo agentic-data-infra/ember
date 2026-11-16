@@ -5,7 +5,7 @@ Ember's Dataframe API. Programs include `ember/Session.h` and
 
 | File | Contents |
 |------|----------|
-| `Session` | Entry point (`Session::builder().master("local[4]").getOrCreate()`), `read()`, `createDataframe`/`inlineTable`. Optimizes plans with Axiom and runs them. |
+| `Session` | Entry point (`Session::builder().master("local[4]").getOrCreate()`), `read()`, `createDataframe`/`inlineTable`, `stats()` (task stats such as AI calls and tokens, summed since the session started). Optimizes plans with Axiom and runs them. |
 | `Dataframe` | Immutable value over a chain of plan steps: `select`, `selectExpr`, `filter`, `withColumn`, `groupBy`, `agg`, `orderBy`, `limit`, `distinct`, `unionAll`, `join`; actions `collect`, `count`, `show`, `write()`; `cache`/`persist` and `unpersist` (keep a result on the executors, read by later actions); `compile` (cached plans), `schema`, `explain`. |
 | `Column`, `functions` | Typed expression builders (`col`, `lit`, `explode`, `split`, `lower`, `count`, ...), conditionals (`when(...).when(...).otherwise(...)`, each branch evaluated only on its rows), `expr("sql")`, and generic `call("fn", ...)` for any registered Velox function. `"x"_c` is `col("x")`. |
 | `DataframeReader` | `text(path)` (one `value` column per line), `gensort(path)` (binary `key` and `payload` of 100-byte sort benchmark records) and `parquet(path)`; a directory reads all its data files. A `kiln://<metadata>/data/<dataset>/` path reads a Kiln dataset's files. |
