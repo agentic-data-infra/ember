@@ -1,5 +1,6 @@
 #include "ember/functions.h"
 
+#include "velox/expression/ExprConstants.h"
 #include "velox/parse/Expressions.h"
 
 namespace ember::functions {
@@ -133,6 +134,10 @@ Column round(const Column& value, int32_t scale) {
 
 Column coalesce(const std::vector<Column>& columns) {
   return fn("coalesce", columns);
+}
+
+Column when(const Column& condition, const Column& value) {
+  return fn(facebook::velox::expression::kSwitch, {condition, value});
 }
 
 Column count(const Column& value) {

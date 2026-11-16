@@ -8,7 +8,7 @@ import unittest
 import pyarrow as pa
 
 from ember import Session, ai
-from ember.functions import col, concat, lit
+from ember.functions import col, concat, lit, when
 
 
 class _ChatHandler(http.server.BaseHTTPRequestHandler):
@@ -17,6 +17,11 @@ class _ChatHandler(http.server.BaseHTTPRequestHandler):
         prompt = body["messages"][0]["content"]
         if prompt == "say fail":
             status, reply = 400, b'{"error": "bad prompt"}'
+        elif prompt.startswith("json:"):
+            status = 200
+            reply = json.dumps(
+                {"choices": [{"message": {"role": "assistant", "content": prompt[5:]}}]}
+            ).encode()
         else:
             status = 200
             reply = json.dumps(
@@ -62,6 +67,33 @@ class AiTest(unittest.TestCase):
         self.assertEqual(rows[0], ("a", "SAY A", ""))
         self.assertEqual(rows[1][1], None)
         self.assertTrue(rows[1][2].startswith("HTTP 400"))
+
+    def test_output_schema(self):
+        df = self.ember.createDataFrame(
+            pa.table({"p": ['json:{"educational": true, "topic": "math", "where": {"page": 3}}']})
+        )
+        g = ai.generate(
+            "p",
+            endpoint="mock",
+            output={"educational": "boolean", "topic": "varchar", "where": {"page": "bigint"}},
+        )
+        rows = df.select(
+            g.getField("educational"),
+            g.getField("topic"),
+            g.getField("where").getField("page"),
+            g.getField("status"),
+        ).collect()
+        self.assertEqual(rows, [(True, "math", 3, "")])
+
+    def test_when_otherwise(self):
+        df = self.ember.createDataFrame(pa.table({"p": ["a", "b"]}))
+        answer = ai.generate("p", endpoint="mock").getField("result")
+        rows = (
+            df.select("p", when(col("p") == "a", answer).otherwise("skipped").alias("r"))
+            .orderBy("p")
+            .collect()
+        )
+        self.assertEqual(rows, [("a", "A"), ("b", "skipped")])
 
 
 if __name__ == "__main__":

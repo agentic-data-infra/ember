@@ -1,9 +1,37 @@
 #include "ember/Column.h"
 
+#include "velox/expression/ExprConstants.h"
+#include "velox/parse/Expressions.h"
+
 namespace ember {
 
 namespace lp = facebook::axiom::logical_plan;
+namespace core = facebook::velox::core;
 using facebook::velox::Variant;
+
+namespace {
+
+// The branches of a when(...) chain that has no otherwise() yet.
+std::vector<core::ExprPtr> openSwitch(
+    const lp::ExprApi& expr,
+    const char* method) {
+  const auto* call = dynamic_cast<const core::CallExpr*>(expr.expr().get());
+  VELOX_USER_CHECK(
+      call != nullptr && call->name() == facebook::velox::expression::kSwitch &&
+          call->inputs().size() % 2 == 0,
+      "{}() follows when(...), before otherwise()",
+      method);
+  return call->inputs();
+}
+
+Column switchOf(std::vector<core::ExprPtr> inputs) {
+  return Column(lp::ExprApi(
+      std::make_shared<core::CallExpr>(
+          facebook::velox::expression::kSwitch, std::move(inputs), std::nullopt),
+      std::nullopt));
+}
+
+} // namespace
 
 Column lit(const char* value) {
   return lit(std::string(value));
@@ -75,6 +103,19 @@ Column Column::cast(facebook::velox::TypePtr type) const {
 
 Column Column::getField(const std::string& name) const {
   return Column(lp::Col(name, expr_));
+}
+
+Column Column::when(const Column& condition, const Column& value) const {
+  auto inputs = openSwitch(expr_, "when");
+  inputs.push_back(condition.expr().expr());
+  inputs.push_back(value.expr().expr());
+  return switchOf(std::move(inputs));
+}
+
+Column Column::otherwise(const Column& value) const {
+  auto inputs = openSwitch(expr_, "otherwise");
+  inputs.push_back(value.expr().expr());
+  return switchOf(std::move(inputs));
 }
 
 Column Column::isNull() const {

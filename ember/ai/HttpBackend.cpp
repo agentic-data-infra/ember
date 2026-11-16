@@ -15,6 +15,7 @@
 #include <folly/io/async/AsyncTimeout.h>
 #include <folly/io/async/EventHandler.h>
 
+#include "ember/ai/OutputSchema.h"
 #include "ember/rpc/IoEventBases.h"
 #include "velox/common/base/Exceptions.h"
 #include "velox/common/memory/Memory.h"
@@ -87,26 +88,46 @@ char* write(std::string_view s, char* out) {
   return out + s.size();
 }
 
-// {"model":"<model>","messages":[{"role":"user","content":"<prompt>"}]}
+// {"model":"<model>","messages":[{"role":"user","content":"<prompt>"}]},
+// plus "response_format":<responseFormat> when there is one.
 velox::BufferPtr requestBody(
     std::string_view model,
     std::string_view prompt,
+    std::string_view responseFormat,
     velox::memory::MemoryPool& pool) {
   constexpr std::string_view kModel = R"({"model":")";
   constexpr std::string_view kMessages =
       R"(","messages":[{"role":"user","content":")";
-  constexpr std::string_view kEnd = R"("}]})";
+  constexpr std::string_view kMessagesEnd = R"("}])";
+  constexpr std::string_view kResponseFormat = R"(,"response_format":)";
+  constexpr std::string_view kEnd = "}";
   const auto size = kModel.size() + escapedSize(model) + kMessages.size() +
-      escapedSize(prompt) + kEnd.size();
+      escapedSize(prompt) + kMessagesEnd.size() +
+      (responseFormat.empty()
+           ? 0
+           : kResponseFormat.size() + responseFormat.size()) +
+      kEnd.size();
   auto body = velox::AlignedBuffer::allocate<char>(size, &pool);
   char* out = body->asMutable<char>();
   out = write(kModel, out);
   out = writeEscaped(model, out);
   out = write(kMessages, out);
   out = writeEscaped(prompt, out);
+  out = write(kMessagesEnd, out);
+  if (!responseFormat.empty()) {
+    out = write(kResponseFormat, out);
+    out = write(responseFormat, out);
+  }
   out = write(kEnd, out);
   VELOX_CHECK_EQ(out - body->as<char>(), size);
   return body;
+}
+
+// Asks for a JSON object of 'schema'.
+std::string responseFormatFor(const velox::RowType& schema) {
+  return fmt::format(
+      R"({{"type":"json_schema","json_schema":{{"name":"output","strict":true,"schema":{}}}}})",
+      jsonSchema(schema));
 }
 
 // One request, through its attempts.
@@ -458,10 +479,15 @@ class HttpBackend : public AiBackend {
   explicit HttpBackend(const AiEndpoint& endpoint)
       : client_{std::make_unique<Client>(endpoint, *rpc::nextIoEventBase())} {}
 
-  folly::coro::Task<AiAnswer> generate(std::string_view prompt) override {
+  folly::coro::Task<AiAnswer> generate(
+      std::string_view prompt,
+      velox::RowTypePtr schema) override {
     auto transfer = std::make_unique<Transfer>();
-    transfer->request =
-        requestBody(client_->endpoint().model, prompt, client_->pool());
+    transfer->request = requestBody(
+        client_->endpoint().model,
+        prompt,
+        schema == nullptr ? "" : responseFormatFor(*schema),
+        client_->pool());
     auto answer = transfer->promise.getSemiFuture();
     client_->submit(std::move(transfer));
     co_return co_await std::move(answer);

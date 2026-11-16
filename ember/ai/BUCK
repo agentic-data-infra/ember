@@ -9,6 +9,7 @@ cxx_library(
         "AiBackend.h",
         "AiEndpoint.h",
         "AiFunctions.h",
+        "OutputSchema.h",
     ],
     headers = ["HttpBackend.h"],
     exported_deps = ["//third-party:velox_axiom"],

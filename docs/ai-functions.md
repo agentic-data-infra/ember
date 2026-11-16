@@ -1,7 +1,8 @@
 # AI functions
 
-Design for calling LLMs from Dataframe programs. Status: step 1 of the
-plan below is implemented (`ai.generate` without `output`, `getField`; see
+Design for calling LLMs from Dataframe programs. Status: steps 1 and 2 of
+the plan below are implemented (`ai.generate` with and without `output`,
+`getField`, `when`/`otherwise`; see
 [../ember/ai/README.md](../ember/ai/README.md)); the rest is proposed.
 
 Agents in the discovery loop filter, label and score large experiment
@@ -128,9 +129,14 @@ The function is registered with a type variable, roughly
 `ai_generate(VARCHAR prompt, VARCHAR endpoint, T output) -> T`, so Velox's
 signature binding (and Axiom's type resolution, which uses the same
 signatures) fixes the return type from that argument's type. Without
-`output`, the argument is a null of `ROW(result VARCHAR, status VARCHAR)`.
-At run time the function derives the JSON schema it sends from the same
-type, and parses each answer into its fields.
+`output` the call has two arguments and a second signature,
+`ai_generate(VARCHAR, VARCHAR) -> ROW(result VARCHAR, status VARCHAR)`, so a
+schema with a single `result` field still means a JSON answer. The function
+does not use Velox's default null handling: the null argument would null
+every row. At run time it derives the JSON schema it sends from the same
+type, and parses the answers with Velox's cast from JSON to `ROW`
+(`try_cast`, fields matched by name), so there is no parser of its own; an
+answer the cast rejects gets null fields and a status.
 
 Rows vs batches: a vector function receives a batch of rows (about 1000).
 For `ai.generate` that is a batch of independent prompts, sent as

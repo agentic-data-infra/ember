@@ -70,6 +70,11 @@ ember = (Session.builder.master("local[*]")
          .getOrCreate())
 answer = ai.generate(concat(lit("Summarize: "), "text"), endpoint="small")
 df.select(answer.getField("result"), answer.getField("status"))
+
+# Typed fields: the model answers in this schema.
+judged = ai.generate("text", endpoint="small",
+                     output={"educational": "boolean", "topic": "varchar"})
+df.filter(judged.getField("educational")).groupBy(judged.getField("topic")).count()
 ```
 
 Names follow the C++ API (`groupBy`, `orderBy`, `withColumn`, ...), with
