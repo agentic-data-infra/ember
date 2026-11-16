@@ -5,7 +5,7 @@ Code shared by the api, driver and worker. Headers are included as `ember/<File>
 | File | Contents |
 |------|----------|
 | `Runtime` | `initializeRuntime()`: memory manager, file systems, Presto serde, functions, plan node and split serde, shuffle operators, the `ember_file` connector with its text and gensort formats, the `ember_parquet` connector, and the `ember_output` write connector. Idempotent. |
-| `FunctionRegistry` | Registers Presto functions (Axiom's base) plus a second Velox function package under the `ember_` prefix, and a rewrite hook that resolves scalar calls to those versions, so `split` takes a regex. |
+| `FunctionRegistry` | Registers Presto functions (Axiom's base) plus Velox's `sparksql` function package under the `ember_` prefix, and a rewrite hook that resolves scalar calls to those versions, so `split` takes a regex. |
 | `TextFileHandler` | Text format for Axiom's file connector: one `value` column per line. Reads a byte range of a file; a range owns the lines that start inside it. |
 | `GensortFileHandler` | gensort format (sortbenchmark.org): 100-byte records as binary `key` (10 bytes) and `payload` (90 bytes) columns. A range owns the records that start inside it. |
 | `ParquetConnector` | The `ember_parquet` connector behind `read().parquet(path)`: Velox's Hive connector under a small metadata that takes schemas from Parquet footers, so filters reach the reader (row group skipping, subfield pruning, dynamic join filters). Paths are files or directories on any registered file system, including `kiln://`. A table column read as two outputs is read once. |

@@ -47,8 +47,8 @@ sorts keep the merge task.
 
 The plan has no split points: before a stage writes a range shuffle,
 `DagScheduler` runs its tasks once more with the write replaced by a
-`reservoir_sample` of the key (`RangeBounds`) and fills the split points into
-the write. That balances any keys, but
+`reservoir_sample` of the key (`RangeBounds`), as Spark's `RangePartitioner`
+does, and fills the split points into the write. That balances any keys, but
 reads the stage's input one extra time: a 2 GB gensort sort with 16 ranges took
 about 15% longer. `ember.sort.sample=false` skips it and uses fixed slices of
 the key's first 8 bytes, which balance only uniformly random keys. The sort
