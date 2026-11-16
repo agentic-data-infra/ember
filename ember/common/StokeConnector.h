@@ -29,10 +29,12 @@
 // exist (stoke create, or stoke's create_stream); a write seals it when
 // committed only with kStokeSeal set.
 //
-// Session properties of the connector (Axiom ConnectorProperties["stoke"]):
-// kStokeKilnMetadata (required), kStokeChunkBytes, kStokeSeal, and for
-// "tokens" and "text" kStokePackBatch and kStokePackSequence (both
-// required).
+// Session properties of the connector (Axiom ConnectorProperties["stoke"],
+// the options of write().format("stoke").option(...).save(stream)):
+// kStokeKilnMetadata (required; save() sets it from the session's Kiln
+// cluster), kStokeChunkBytes, kStokeSeal, and for "tokens" and "text"
+// kStokePackBatch and kStokePackSequence (both required; without them a
+// write takes only "batch").
 
 #pragma once
 
@@ -43,6 +45,7 @@
 #include <string_view>
 
 #include "axiom/connectors/ConnectorMetadata.h"
+#include "ember/KilnFiles.h"
 #include "ember/Stoke.h"
 #include "velox/connectors/Connector.h"
 
@@ -51,7 +54,7 @@ namespace ember {
 inline constexpr std::string_view kStokeConnectorId = "stoke";
 
 /// Session property: the Kiln cluster of the streams (its metadata server).
-inline constexpr std::string_view kStokeKilnMetadata = "kiln_metadata";
+inline constexpr std::string_view kStokeKilnMetadata = kKilnMetadataProperty;
 /// Session property: bytes after which a chunk is put; default 16 MiB.
 inline constexpr std::string_view kStokeChunkBytes = "chunk_bytes";
 /// Session property: "true" to seal the stream when the write commits.
@@ -59,10 +62,18 @@ inline constexpr std::string_view kStokeSeal = "seal";
 
 /// Session properties of a write of "tokens" or "text": B and T of its
 /// batches.
-inline constexpr std::string_view kStokePackBatch = "pack_batch";
-inline constexpr std::string_view kStokePackSequence = "pack_sequence";
+inline constexpr std::string_view kStokePackBatch = "batch";
+inline constexpr std::string_view kStokePackSequence = "sequence";
 
 inline constexpr uint64_t kDefaultStokeChunkBytes = 16 << 20;
+
+/// How a write packs tokens into batches: int32 batches of 'batch' windows
+/// of 'sequence' + 1 tokens (inputs and shifted targets of 'sequence' each),
+/// as stoke's Packer makes them.
+struct StokePacking {
+  uint64_t batch;
+  uint64_t sequence;
+};
 
 /// What a write's tasks need: the stream and how to cut its chunks.
 class StokeInsertTableHandle

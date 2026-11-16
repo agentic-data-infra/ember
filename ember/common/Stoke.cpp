@@ -6,10 +6,6 @@ namespace ember {
 
 #if !EMBER_STOKE
 
-bool hasStoke() {
-  return false;
-}
-
 void registerStokeConnector() {}
 
 #endif

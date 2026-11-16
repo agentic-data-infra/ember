@@ -56,6 +56,13 @@ Column literal(py::handle value) {
       std::string(py::str(value.get_type())));
 }
 
+// A config or option value as a string: config("k", 4) and
+// option("k", True) work as "4" and "true".
+std::string configString(py::handle value) {
+  return py::isinstance<py::bool_>(value) ? (value.cast<bool>() ? "true" : "false")
+                                          : std::string(py::str(value));
+}
+
 // A column argument: a Column, or a str naming one.
 Column column(py::handle value) {
   if (py::isinstance<py::str>(value)) {
@@ -416,29 +423,24 @@ PYBIND11_MODULE(_ember, m) {
           py::arg("directory"),
           py::call_guard<py::gil_scoped_release>())
       .def(
-          "stream",
-          [](const DataframeWriter& writer,
-             const std::string& name,
-             bool seal,
-             std::optional<uint64_t> batch,
-             std::optional<uint64_t> sequence) {
-            if (batch.has_value() != sequence.has_value()) {
-              throw py::value_error("give both batch and sequence, or neither");
-            }
-            std::optional<StokePacking> packing;
-            if (batch.has_value()) {
-              packing = StokePacking{*batch, *sequence};
-            }
-            py::gil_scoped_release release;
-            return writer.stream(name, seal, packing);
-          },
-          "Writes batches into a stoke stream; with batch and sequence, "
-          "packs a column of tokens, or of text (byte tokens), into "
-          "batches of [batch, sequence + 1].",
+          "format",
+          &DataframeWriter::format,
+          py::arg("connector"),
+          py::return_value_policy::reference_internal)
+      .def(
+          "option",
+          [](DataframeWriter& w, const std::string& key, py::handle value)
+              -> DataframeWriter& { return w.option(key, configString(value)); },
+          py::arg("key"),
+          py::arg("value"),
+          py::return_value_policy::reference_internal)
+      .def(
+          "save",
+          &DataframeWriter::save,
           py::arg("name"),
-          py::arg("seal") = false,
-          py::arg("batch") = py::none(),
-          py::arg("sequence") = py::none());
+          "Writes the rows into the table 'name' of the connector of format(), "
+          "with the options as its properties; returns the rows written.",
+          py::call_guard<py::gil_scoped_release>());
 
   // Session.
 
@@ -468,11 +470,7 @@ PYBIND11_MODULE(_ember, m) {
           "config",
           [](Session::Builder& b, const std::string& key, py::handle value)
               -> Session::Builder& {
-            // PySpark style: config("k", 4) and config("k", True) work too.
-            std::string s = py::isinstance<py::bool_>(value)
-                ? (value.cast<bool>() ? "true" : "false")
-                : std::string(py::str(value));
-            return b.config(key, s);
+            return b.config(key, configString(value));
           },
           py::arg("key"),
           py::arg("value"),
