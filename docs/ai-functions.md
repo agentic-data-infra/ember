@@ -8,86 +8,109 @@ outputs. They should be able to use an LLM like any other function: in
 `select`, in `filter`, inside `when`/`otherwise`, next to ordinary
 expressions.
 
-Role models: the API follows BigQuery's `AI.GENERATE`, `AI.CLASSIFY`,
-`AI.SCORE` and `AI.IF`, which are functions inside SQL expressions, not
-separate operators. From Ray Data's LLM processors we take three lessons:
-self-hosted models (vLLM, SGLang) belong behind an endpoint, a failed row
-does not fail the job, and a rerun resumes where the last one stopped (here
-through the response cache).
+Role models: the API follows BigQuery's AI functions (`AI.GENERATE` and
+friends), which are functions inside SQL expressions, not separate
+operators. From Ray Data's LLM processors we take three lessons: self-hosted
+models (vLLM, SGLang) belong behind an endpoint, a failed row does not fail
+the job, and a rerun resumes where the last one stopped (here through the
+response cache).
 
 ## API
 
-`ember.ai` (Python) and `ember::ai` (C++) add four column functions. Each
-row is one prompt and one request; the result is typed.
+One AI function, plus two general Dataframe additions.
 
-| Function | Returns | Meaning |
-|---|---|---|
-| `ai.generate(prompt, endpoint=)` | `ROW(result VARCHAR, status VARCHAR)` | Free text. `status` is empty on success, the error otherwise. |
-| `ai.classify(text, categories, endpoint=)` | `VARCHAR` | One of `categories`. |
-| `ai.score(prompt, endpoint=)` | `DOUBLE` | A number, e.g. a rating on the scale the prompt asks for. |
-| `ai.if_(prompt, endpoint=)` | `BOOLEAN` | Whether the prompt's question holds. |
+| API | Meaning |
+|---|---|
+| `ai.generate(prompt, endpoint=, output=None)` | One request per row to the named endpoint, with `prompt` as the user message. Without `output` it returns `ROW(result VARCHAR, status VARCHAR)`. With `output`, a schema such as `{"label": "varchar", "score": "double"}`, the schema goes to the model as a JSON schema and the answer comes back typed: `ROW(label VARCHAR, score DOUBLE, status VARCHAR)`. `status` is empty on success; a failed row has null fields and the error in `status`. |
+| `Column.getField(name)` | A field of a `ROW` column, e.g. `ai.generate(...).getField("result")`. |
+| `when(cond, value).when(...).otherwise(value)` | A conditional expression (CASE WHEN). Velox evaluates each branch only on the rows that take it. |
 
-`prompt` and `text` are any `VARCHAR` expressions, usually built with
-`concat`; there is no templating language. A row
-whose call fails after retries gets `status` set (`generate`) or null (the
-others); the task does not fail. Failures are counted in the stage
-statistics.
+`ember.ai` is the Python module, `ember::ai` the C++ namespace. `prompt` is
+any `VARCHAR` expression, usually built with `concat`; there is no
+templating language. A failed row never fails the task; failures are
+counted in the stage statistics.
 
-BigQuery's log triage example in Ember:
+`getField` and `when`/`otherwise` are general: they are useful without any
+LLM and map to existing Velox expressions (field access and `switch`).
+
+Not in the first version: convenience functions such as `classify`,
+`score` or `if_`. Each is `generate` with a fixed prompt wrapper and output
+schema, so programs can write them as a few lines of their own.
+
+### Example
 
 ```python
+import ember
 from ember import ai
-from ember.functions import col, concat, lit, when
+from ember.functions import avg, col, concat, count, lit
 
-def prompt(text):
-    return concat(lit(text), col("log_entry"))
+session = (ember.Session.builder
+    .master("local[*]")
+    .config("ember.ai.endpoint.small.kind", "http")
+    .config("ember.ai.endpoint.small.url", "http://localhost:8080/v1")
+    .config("ember.ai.endpoint.small.model", "qwen2.5-1.5b-instruct")
+    .config("ember.ai.endpoint.small.api_key_env", "LLM_API_KEY")
+    .getOrCreate())
 
-triaged = (logs
-    .filter(ai.if_(prompt("Error or warning, not routine INFO or cron: "),
-                   endpoint="hydrogen"))
-    .select("service", "log_entry",
-        ai.classify(col("log_entry"),
-                    ["Database", "Auth / TLS", "Rate Limit", "Compute", "Streaming"],
-                    endpoint="hydrogen").alias("domain"),
-        ai.score(prompt("Score customer-facing outage blast radius 1-10: "),
-                 endpoint="hydrogen").alias("severity")))
+reviews = session.read.parquet("/data/reviews")   # id, product, text
 
-report = (triaged
-    .select("service", "domain", "severity",
-        when(col("severity") >= 8,
-             ai.generate(prompt("Plain text, <=14 words, root cause + fix: "),
-                         endpoint="carbon").getField("result"))
-        .otherwise(
-             ai.generate(prompt("Plain text, <=10 words, triage summary: "),
-                         endpoint="hydrogen").getField("result"))
-        .alias("diagnosis"))
-    .orderBy(col("severity").desc()))
+judged = reviews.withColumn("judgment", ai.generate(
+    concat(lit("Is this product review positive? "
+               "Rate its sentiment from 0 to 1. Review: "), col("text")),
+    endpoint="small",
+    output={"positive": "boolean", "sentiment": "double"}))
+
+summary = (judged
+    .filter(col("judgment").getField("status") == "")
+    .groupBy("product")
+    .agg(avg(col("judgment").getField("sentiment")).alias("avg_sentiment"),
+         count(col("id")).alias("reviews"))
+    .orderBy(col("avg_sentiment").desc()))
 ```
 
-The Dataframe API gains `when`/`otherwise` and `Column.getField` for this;
-both map to existing Velox expressions (`switch`, field access).
+Routing rows to different models, as in BigQuery's log triage example:
 
-## Why functions, not an operator
+```python
+from ember.functions import when
 
-The AI functions are Velox vector functions. Velox's expression evaluation
-already gives the semantics the example relies on:
+def ask(text, endpoint):
+    return ai.generate(concat(lit(text), col("log_entry")),
+                       endpoint=endpoint).getField("result")
+
+report = triaged.select("service", "severity",
+    when(col("severity") >= 8,
+         ask("Plain text, <=14 words, root cause + fix: ", "carbon"))
+    .otherwise(ask("Plain text, <=10 words, triage summary: ", "hydrogen"))
+    .alias("diagnosis"))
+```
+
+Only rows with `severity >= 8` reach `carbon`; the rest go to `hydrogen`.
+
+## Why a function, not an operator
+
+`ai.generate` is a Velox vector function. Velox's expression evaluation
+already gives the semantics programs rely on:
 
 - **Conditionals:** `when`/`otherwise` (`SwitchExpr`) evaluates each branch
-  only on the rows that take it, so `carbon` sees only rows with
-  `severity >= 8`.
+  only on the rows that take it.
 - **Filters:** `AND` (`ConjunctExpr`) evaluates a conjunct only on rows that
   passed the earlier ones and reorders conjuncts by measured cost, so an
-  expensive `ai.if_` runs after cheap filters.
-- **Struct results:** `getField("result")` is ordinary field access.
+  expensive AI condition runs after cheap filters.
+- **Struct results:** `getField` is ordinary field access.
 - **Duplicates:** common subexpression elimination calls an identical AI
   expression once per row.
 
-Axiom plans them as ordinary function calls, so the optimizer needs no
+Axiom plans it as an ordinary function call, so the optimizer needs no
 changes. A dedicated operator would have to pull the calls out of their
 expressions and reimplement the conditional masking.
 
+The return type must be known when the plan is built. The `output` schema
+is a constant argument whose type is the result's `ROW` type, so the
+function's signature binds its return type to that argument. Step 2 settles
+the details against Velox's signatures.
+
 Rows vs batches: a vector function receives a batch of rows (about 1000).
-For an AI function that is a batch of independent prompts, sent as
+For `ai.generate` that is a batch of independent prompts, sent as
 concurrent requests. Rows are never packed into one prompt; GPU batching is
 the inference server's job, and Ember's job is to keep enough requests in
 flight. A worker with 16 driver threads and 64 requests in flight per batch
@@ -102,7 +125,7 @@ name. This is the one way to configure an endpoint:
 | Key | Meaning |
 |---|---|
 | `ember.ai.endpoint.<name>.kind` | Backend: `http` (the only kind at first). |
-| `ember.ai.endpoint.<name>.url` | Base URL of an OpenAI-compatible API, e.g. `https://api.openai.com/v1` or a vLLM server. |
+| `ember.ai.endpoint.<name>.url` | Base URL of an OpenAI-compatible API, e.g. `https://api.openai.com/v1` or a vLLM or llama.cpp server. |
 | `ember.ai.endpoint.<name>.model` | Model name sent with each request. |
 | `ember.ai.endpoint.<name>.api_key_env` | Environment variable that holds the API key on the driver and workers. |
 | `ember.ai.endpoint.<name>.max_concurrency` | Requests in flight per process. |
@@ -114,14 +137,13 @@ logs and stage keys.
 
 ## Execution
 
-- **Backend interface.** The functions do not speak HTTP. They call an
+- **Backend interface.** The function does not speak HTTP. It calls an
   `AiBackend` (submit requests, get futures), one per endpoint per process.
   `HttpBackend` is the first implementation.
 - **HttpBackend.** OpenAI-compatible chat completions over libcurl (a new
   dependency) on folly futures, driven by Ember's existing IO executor (no
-  new background threads). Structured output through a JSON schema
-  (`classify` sends an enum of the categories, `score` a number, `if_` a
-  boolean). Retries with backoff on 429 and 5xx. A per-request timeout below
+  new background threads). Structured output through the request's JSON
+  schema. Retries with backoff on 429 and 5xx. A per-request timeout below
   `ember.cluster.heartbeat_timeout_ms`, so a slow model never looks like a
   hung worker. `max_concurrency` and `qps` limit each process.
 - **Per batch.** The function takes the rows Velox selects, drops duplicate
@@ -138,7 +160,7 @@ prompt). The cache lives in Kiln when the session has Kiln metadata
 The first answer for a prompt becomes the answer. That makes task retries
 and reruns consistent and free: a rerun pays only for prompts that never got
 an answer, and an agent that adds rows pays only for the new ones. It also
-lets the AI functions be marked deterministic, so stage keys
+lets `ai.generate` be marked deterministic, so stage keys
 ([../ember/driver/StageKey.h](../ember/driver/StageKey.h)) and stage reuse
 work as for any other function. The endpoint's model and parameters go into
 the stage keys like other config that changes results.
@@ -153,10 +175,10 @@ cost.
 ## Later: models next to the data
 
 Some workloads want the model on the same GPUs as the job, e.g. to avoid
-sending images over HTTP. The API does not change; these are additions. Three choices in the first
-version keep them open: the backend interface is not HTTP-specific,
-endpoints have a `kind`, and inputs are typed columns (images can later come
-in as `VARBINARY` or path columns).
+sending images over HTTP. The API does not change; these are additions.
+Three choices in the first version keep them open: the backend interface is
+not HTTP-specific, endpoints have a `kind`, and inputs are typed columns
+(images can later come in as `VARBINARY` or path columns).
 
 1. **Node-local server.** vLLM or SGLang on each node's GPUs; an endpoint of
    kind `local` resolves on each worker to its node's server. Large inputs
@@ -174,12 +196,13 @@ in as `VARBINARY` or path columns).
 
 | Step | Contents |
 |---|---|
-| 1 | Endpoint config, `AiBackend`, `HttpBackend`, `ai.generate`, `getField`, C++ and Python bindings. Tests against a mock OpenAI-compatible server: a call, a filter, nulls, retry after 429, a failed row. |
-| 2 | `ai.classify`, `ai.score`, `ai.if_`, `when`/`otherwise`; tests that a branch sees only its rows; the triage example as a test. |
-| 3 | Response cache (Kiln, local fallback); mark the functions deterministic; tests for reruns and added rows. |
+| 1 | Endpoint config, `AiBackend`, `HttpBackend`, `ai.generate` without `output`, `getField`, C++ and Python bindings. Tests against a mock OpenAI-compatible server: a call, a filter, nulls, retry after 429, a failed row. |
+| 2 | `output` schemas (typed `ROW` results), `when`/`otherwise`; tests that a branch sees only its rows and that answers parse into typed fields. |
+| 3 | Response cache (Kiln, local fallback); mark `ai.generate` deterministic; tests for reruns and added rows. |
 | 4 | Runtime statistics. |
 | 5 | A manual check against a real endpoint. velox-dev has no GPU, so: llama.cpp's `llama-server` on CPU (OpenAI-compatible, JSON-schema output) with a small instruct model such as Qwen2.5-0.5B or 1.5B (GGUF), under a memory cap. |
 
-Left out for now: adapters other than OpenAI-compatible, rate limits shared
-across the job, Python callbacks for prompts or parsing, embeddings,
-multimodal inputs, providers' batch APIs, and the GPU steps above.
+Left out for now: convenience functions (`classify`, `score`, `if_`),
+adapters other than OpenAI-compatible, rate limits shared across the job,
+Python callbacks for prompts or parsing, embeddings, multimodal inputs,
+providers' batch APIs, and the GPU steps above.
