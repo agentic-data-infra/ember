@@ -2,21 +2,15 @@
 
 #include <optional>
 
-#include <folly/executors/IOThreadPoolExecutor.h>
 #include <folly/io/async/AsyncSocket.h>
 #include <folly/synchronization/Baton.h>
 #include <thrift/lib/cpp2/async/RocketClientChannel.h>
 
+#include "ember/rpc/IoEventBases.h"
+
 namespace ember::rpc::detail {
 
 namespace {
-
-// The event base threads of every connection in the process.
-folly::EventBase* nextEventBase() {
-  static auto* pool = new folly::IOThreadPoolExecutor(
-      4, std::make_shared<folly::NamedThreadFactory>("EmberRpcIO"));
-  return pool->getEventBase();
-}
 
 class ConnectCallback : public folly::AsyncSocket::ConnectCallback {
  public:
@@ -45,7 +39,7 @@ class ConnectCallback : public folly::AsyncSocket::ConnectCallback {
 Connection::Connection(
     const HostAndPort& address,
     std::chrono::milliseconds timeout)
-    : address_{address}, eventBase_{nextEventBase()} {
+    : address_{address}, eventBase_{nextIoEventBase()} {
   folly::SocketAddress socketAddress;
   try {
     socketAddress.setFromHostPort(address.host, address.port);

@@ -21,6 +21,7 @@
 #include "ember/ParquetConnector.h"
 #include "ember/Stoke.h"
 #include "ember/TextFileHandler.h"
+#include "ember/ai/AiFunctions.h"
 #include "ember/shuffle/KilnShuffle.h"
 #include "ember/shuffle/Shuffle.h"
 #include "velox/common/file/FileSystems.h"
@@ -119,6 +120,7 @@ void initializeRuntime(int64_t memoryBytes) {
       velox::serializer::presto::PrestoVectorSerde::registerNamedVectorSerde();
     }
     registerFunctions();
+    ai::registerAiFunctions();
 
     // Plan fragments, expressions and splits travel as JSON.
     velox::Type::registerSerDe();

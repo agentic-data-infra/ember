@@ -1,0 +1,19 @@
+cxx_library(
+    name = "mock_chat_server",
+    srcs = ["MockChatServer.cpp"],
+    exported_headers = ["MockChatServer.h"],
+    header_namespace = "ember/ai/tests",
+    exported_deps = ["//third-party:velox_axiom"],
+)
+
+cxx_test(
+    name = "ai_generate_test",
+    srcs = ["AiGenerateTest.cpp"],
+    deps = [
+        ":mock_chat_server",
+        "//ember/api:api",
+        "//ember/tests:test_main",
+    ],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+)

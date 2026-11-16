@@ -55,3 +55,12 @@ prebuilt_cxx_library(
     exported_preprocessor_flags = PYTHON_PREPROCESSOR_FLAGS,
     visibility = ["PUBLIC"],
 )
+
+# libcurl from the system (libcurl4-openssl-dev): the HTTP client behind the
+# AI functions' HttpBackend (ember/ai).
+prebuilt_cxx_library(
+    name = "curl",
+    header_only = True,
+    exported_post_linker_flags = ["-lcurl"],
+    visibility = ["PUBLIC"],
+)
