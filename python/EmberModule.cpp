@@ -14,6 +14,7 @@
 #include <unordered_map>
 
 #include "ember/DataframeWriter.h"
+#include "ember/ai.h"
 #include "ember/Session.h"
 #include "ember/functions.h"
 #include "velox/common/memory/Memory.h"
@@ -265,6 +266,7 @@ PYBIND11_MODULE(_ember, m) {
             return c.cast(parseType(type));
           },
           py::arg("type"))
+      .def("getField", &Column::getField, py::arg("name"))
       .def("isNull", &Column::isNull)
       .def("isNotNull", &Column::isNotNull)
       .def(
@@ -581,4 +583,13 @@ PYBIND11_MODULE(_ember, m) {
       .def("max", [](py::handle c) { return f::max(column(c)); })
       .def("first", [](py::handle c) { return f::first(column(c)); })
       .def("collect_list", [](py::handle c) { return f::collect_list(column(c)); });
+
+  auto ai = m.def_submodule("ai", "AI functions: LLM calls per row.");
+  ai.def(
+      "generate",
+      [](py::handle prompt, const std::string& endpoint) {
+        return ember::ai::generate(column(prompt), endpoint);
+      },
+      py::arg("prompt"),
+      py::arg("endpoint"));
 }

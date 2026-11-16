@@ -79,6 +79,9 @@ class Column {
   }
 
   Column cast(facebook::velox::TypePtr type) const;
+  /// The field 'name' of this struct (ROW) column, e.g.
+  /// ai::generate(...).getField("result").
+  Column getField(const std::string& name) const;
   Column isNull() const;
   Column isNotNull() const;
   Column isin(const std::vector<Column>& values) const;

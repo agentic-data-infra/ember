@@ -73,6 +73,10 @@ Column Column::cast(facebook::velox::TypePtr type) const {
   return Column(lp::Cast(std::move(type), expr_));
 }
 
+Column Column::getField(const std::string& name) const {
+  return Column(lp::Col(name, expr_));
+}
+
 Column Column::isNull() const {
   return Column(lp::Call("is_null", expr_));
 }

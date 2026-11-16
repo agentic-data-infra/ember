@@ -6,7 +6,7 @@ only builds plans and reads results.
 
 | File | Contents |
 |------|----------|
-| `EmberModule.cpp` | The extension module `ember._ember`: `Session`, `Dataframe`, `GroupedData`, `Column`, `DataframeReader` and `functions`. |
+| `EmberModule.cpp` | The extension module `ember._ember`: `Session`, `Dataframe`, `GroupedData`, `Column`, `DataframeReader`, `functions` and `ai`. |
 | `ember/` | The Python package: re-exports the module and adds `collect`, `show`, `explain` and friends on top of `toArrow`. |
 | `exports.map` | Linker version script: the module exports only `PyInit__ember`. |
 | `tests/` | Tests of the binding. |
@@ -55,6 +55,21 @@ table = by_score.toArrow()          # pyarrow.Table
 rows = by_score.collect()           # list of tuples
 by_score.cache()                    # as in C++: use the returned Dataframe
 ember.createDataFrame(table)        # a Dataframe over a pyarrow Table
+```
+
+`ember.ai.generate(prompt, endpoint=...)` calls an LLM per row (see
+`docs/ai-functions.md`); the endpoint comes from the session config:
+
+```python
+from ember import ai
+from ember.functions import concat, lit
+
+ember = (Session.builder.master("local[*]")
+         .config("ember.ai.endpoint.small.url", "http://localhost:8080/v1")
+         .config("ember.ai.endpoint.small.model", "qwen2.5-1.5b-instruct")
+         .getOrCreate())
+answer = ai.generate(concat(lit("Summarize: "), "text"), endpoint="small")
+df.select(answer.getField("result"), answer.getField("status"))
 ```
 
 Names follow the C++ API (`groupBy`, `orderBy`, `withColumn`, ...), with

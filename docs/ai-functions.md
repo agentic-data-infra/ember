@@ -1,7 +1,8 @@
 # AI functions
 
-Design for calling LLMs from Dataframe programs. Status: proposal; nothing
-here is implemented yet.
+Design for calling LLMs from Dataframe programs. Status: step 1 of the
+plan below is implemented (`ai.generate` without `output`, `getField`; see
+[../ember/ai/README.md](../ember/ai/README.md)); the rest is proposed.
 
 Agents in the discovery loop filter, label and score large experiment
 outputs. They should be able to use an LLM like any other function: in
@@ -165,9 +166,9 @@ logs and stage keys.
 - **HttpBackend.** OpenAI-compatible chat completions over libcurl (a new
   dependency) on folly futures, driven by Ember's existing IO executor (no
   new background threads). Structured output: when a call has an `output`
-  schema, the request carries it as a JSON schema (`response_format`). Retries with backoff on 429 and 5xx. A per-request timeout below
-  `ember.cluster.heartbeat_timeout_ms`, so a slow model never looks like a
-  hung worker. `max_concurrency` and `qps` limit each process.
+  schema, the request carries it as a JSON schema (`response_format`). Retries with backoff on 429, 5xx, timeouts and connection errors. Each
+  attempt times out after 120 s; worker heartbeats run on their own thread,
+  so a slow model never makes a worker look lost. `max_concurrency` and `qps` limit each process.
 - **Per batch.** The function takes the rows Velox selects, drops duplicate
   prompts, looks them up in the cache, sends the misses concurrently, waits,
   and fills the result vector.

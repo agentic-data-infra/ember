@@ -21,6 +21,7 @@ cxx_library(
     exported_headers = [
         "Clients.h",
         "Handlers.h",
+        "IoEventBases.h",
         "Messages.h",
         "Rpc.h",
         "RpcServer.h",

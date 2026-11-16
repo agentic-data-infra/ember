@@ -1,0 +1,20 @@
+# The AI functions (ai_generate) and their backends. Headers are exported
+# under "ember/ai/". See README.md and docs/ai-functions.md.
+
+cxx_library(
+    name = "ai",
+    srcs = glob(["*.cpp"]),
+    header_namespace = "ember/ai",
+    exported_headers = [
+        "AiBackend.h",
+        "AiEndpoint.h",
+        "AiFunctions.h",
+    ],
+    headers = ["HttpBackend.h"],
+    exported_deps = ["//third-party:velox_axiom"],
+    deps = [
+        "//ember/rpc:rpc",
+        "//third-party:curl",
+    ],
+    visibility = ["PUBLIC"],
+)
