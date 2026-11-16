@@ -86,7 +86,18 @@ Then set `AXIOM_REF`, check out the Velox commit in `~/source/velox`, run
 `scripts/build_deps.sh` and `buck2 clean`, and run the tests. Old tags stay, so
 that older Ember commits still build.
 
-## Python: install and run locally
+## Running locally
+
+By default (master `local[*]`, or `local[N]`), the driver and one executor
+run inside the program's own process: no `ember_worker`, Kiln or cluster is
+needed, and shuffle files go to `ember.local.dir` (default `$TMPDIR/ember`,
+so `/tmp/ember`). WordCount in C++:
+
+```
+buck2 run //examples:word_count -- path/to/text/file/or/directory
+```
+
+### Python
 
 `python/` binds the same API for Python, with results as pyarrow tables. It
 ships as a wheel for Linux x86-64 (glibc 2.35 or newer) and CPython 3.10.
@@ -105,10 +116,7 @@ stays 0.1.0, so after a rebuild add `--force-reinstall`. For development,
 `pip install -e python/` uses the module built in place instead (see
 [python/README.md](python/README.md)).
 
-By default (master `local[*]`, or `local[N]`), the driver and one executor
-run inside the Python process: no `ember_worker`, Kiln or cluster is needed,
-and shuffle files go to `ember.local.dir` (default `$TMPDIR/ember`, so
-`/tmp/ember`). That makes small queries a few lines:
+Small queries are a few lines:
 
 ```python
 import pyarrow as pa
@@ -123,7 +131,7 @@ ember.read.parquet("data.parquet").selectExpr("model", "loss * 2 AS doubled").co
 
 `toArrow()` returns a pyarrow Table and `explain()` prints the plan.
 `examples/word_count.py` and `examples/threshold_sweep.py` are the Python
-versions of the examples below, and `examples/check_python_examples.py`
+versions of the C++ examples, and `examples/check_python_examples.py`
 checks that they print the same results:
 
 ```
@@ -135,16 +143,16 @@ directory that holds an `ember` directory, such as the repository root or
 `/tmp` (the local directory), imports that directory instead of the
 package. Scripts and wheel installs are not affected.
 
-## Running WordCount
+## Running on a cluster
 
-```
-buck2 run //examples:word_count -- path/to/text/file/or/directory
-```
+On a cluster, the program is the driver and `ember_worker` processes run its
+tasks: the program connects with master `ember://host:port` and waits for
+`ember.cluster.workers` workers.
 
-That runs in one process (`local[*]`). To run it as a driver with separate
-worker processes, start the workers pointed at the driver's address, then the
-program with master `ember://host:port` and the number of workers to wait
-for. Workers keep retrying until the driver is up, so the order does not
+### Running manually
+
+Start the workers pointed at the driver's address, then the program with
+its master and the number of workers. Workers keep retrying until the driver is up, so the order does not
 matter, and they exit when the program ends.
 
 ```
@@ -159,7 +167,12 @@ Input paths must be readable from every worker under the same name. If a
 worker dies or hangs mid-job, its tasks, and the shuffle output it held, run
 again on the remaining workers.
 `scripts/run_local_cluster.sh -n 3 -- word_count path {master} {workers}`
-does all of this on one machine.
+does all of this on one machine. A Python program connects the same way,
+with `.master("ember://driver-host:7077")` and
+`.config("ember.cluster.workers", "3")` on `Session.builder`;
+`examples/word_count.py` takes the same arguments as `word_count`.
+
+#### Shuffle in Kiln
 
 To keep shuffle outputs in [Kiln](https://github.com/agentic-data-infra/kiln)
 instead of on the workers, so that they survive a worker, start a Kiln
@@ -178,7 +191,7 @@ See [ember/shuffle/README.md](ember/shuffle/README.md). Adding
 second run of the same program reuses what the first one computed (see
 [ember/driver/README.md](ember/driver/README.md)).
 
-### Datasets in Kiln
+#### Datasets in Kiln
 
 Programs can also read their input from Kiln datasets (Kiln's catalog: a
 name pointing at a manifest of named files) and write their output as new
@@ -204,7 +217,7 @@ there), into a bucket of the job's; the driver publishes the dataset when the
 job succeeds, with all its parts, and deletes the bucket when it fails. See
 [ember/common/KilnFiles.h](ember/common/KilnFiles.h).
 
-### Kiln over RDMA
+#### Kiln over RDMA
 
 Kiln can move shuffle data and its metadata calls over RDMA; Ember just
 passes Kiln's metadata URL list through. RDMA is a build option, off by
@@ -239,58 +252,27 @@ of its own with shared memory off (`shuffle::setKilnUseShm(false)`). With
 `$EMBER_TEST_KILN_METADATA`, `kiln_shuffle_test` and `scheduler_test` run
 their other tests against an external cluster.
 
-### stoke
+### Running on Kubernetes
 
-[stoke](https://github.com/agentic-data-infra/stoke) is a distributed
-PyTorch dataloader for data preprocessed by Ember. Ember's side of it is a
-build option, off by default: `-c ember.stoke=true` builds against the
-`third-party/stoke` submodule (the Buck cell `stoke//`) and adds two
-functions that turn text into training batches in stoke's format:
+`deploy/` runs Ember on Kubernetes from one container image
+(`deploy/build_image.sh`, TCP only): Kiln (`kiln-meta` and a `kiln-server`
+DaemonSet), an `ember-worker` DaemonSet, and the driver as a Job (the sort
+benchmark, `ember-sort`). A local cluster with [kind](https://kind.sigs.k8s.io)
+(needs Docker, kind and kubectl):
 
-- `stoke_tokenize(text)`: byte-level tokens, each UTF-8 byte (0 to 255) and
-  then the end-of-text token 256.
-- `stoke_pack(tokens, B, T)`: one int32 batch of `[b, T + 1]`, with `b` at
-  most `B` whole windows of the tokens; NULL if there is no whole window.
-
-```
-git submodule update --init --recursive
-buck2 test -c ember.stoke=true //...
+```sh
+deploy/build_image.sh                       # ember:dev
+deploy/kind/up.sh                           # cluster, image, Kiln, workers
+deploy/kubernetes/sort_demo.sh 10000000     # 10M records (1 GB) per node
+deploy/kubernetes/sort_demo.sh --kiln       # input, shuffle and output in Kiln
 ```
 
-The build also writes a Dataframe of such batches into a stoke stream:
+See [deploy/README.md](deploy/README.md).
 
-```python
-batches = df.selectExpr("stoke_pack(stoke_tokenize(text), 8, 256) AS batch")
-batches.write.stream("train", seal=True)
-```
+## Reading files in random order
 
-`write.stream(name, seal=False)` takes one VARBINARY column, one batch per
-row, and returns the number of batches written. With `batch=B` and
-`sequence=T` it instead takes one ARRAY<INTEGER> column of tokens and packs
-them itself, across rows: each task concatenates its rows' tokens and cuts
-them into windows of T + 1, B windows per batch (the last batch of a task
-may hold fewer, and tokens short of a whole window at its end are
-dropped), so documents need no padding. It then returns the number of
-rows written:
-
-```python
-docs = df.filter("int_score >= 3").select("tokens")
-docs.write.stream("train", seal=True, batch=32, sequence=4096)
-```
-
-Either way, each scan task frames its
-batches into chunks of `ember.stoke.chunk_bytes` (16 MiB by default) in the
-stream's Kiln bucket and puts every chunk into the stream as soon as it is
-written, so trainers start while the job still runs. A stream created
-with `stoke create --task_budget N` bounds each task to N chunks not yet
-consumed: past that, the task waits for the trainers, and it ends only
-once its chunks were consumed, so a worker holds at most slots × N. The stream must exist
-(`stoke create`); with `seal=True` the stream is sealed once the job
-finishes. The Kiln cluster is the one of `ember.kiln.metadata`, else
-of the Kiln shuffle (`ember.shuffle.kiln.metadata`).
-
-Training usually wants its data in random order. A file scan can hand
-its splits to tasks shuffled, with `ember.files.shuffle`:
+Consumers such as training often want rows in random order. A file scan can
+hand its splits to tasks shuffled, with `ember.files.shuffle`:
 
 - `none` (default): files and their byte ranges in order.
 - `file`: files one after another (sorted by path), each file's ranges
@@ -300,12 +282,12 @@ its splits to tasks shuffled, with `ember.files.shuffle`:
 `ember.files.shuffle_seed` (default 0) seeds the shuffle: the same seed and
 files give the same order, so each epoch takes a new seed. A split is a byte
 range of a file, and rows inside a range keep their order (a Parquet range
-reads the row groups that start in it). Splits follow Ember's split sizing:
-total bytes / parallelism, between 4 and 128 MB, or
-`ember.files.max_split_bytes`. So `file` reorders only files cut into
-several ranges. A smaller `ember.files.max_split_bytes` gives a finer order,
-but more and smaller tasks and Kiln chunks, which costs throughput (4-38%
-in our dataloader runs with 4 MiB splits):
+reads the row groups that start in it). Splits are total bytes /
+parallelism, between 4 and 128 MB, or `ember.files.max_split_bytes`, so
+`file` reorders only files cut into several ranges. A smaller
+`ember.files.max_split_bytes` gives a finer order, but more and smaller
+tasks, which costs throughput (4-38% in our dataloader runs with 4 MiB
+splits):
 
 ```python
 ember = (
@@ -315,9 +297,6 @@ ember = (
     .getOrCreate()
 )
 ```
-
-See [ember/common/StokeFunctions.cpp](ember/common/StokeFunctions.cpp) and
-[ember/common/StokeConnector.h](ember/common/StokeConnector.h).
 
 ## More examples
 
@@ -356,8 +335,7 @@ buck2 run //examples:sort_benchmark -- /data/sort-input /data/sorted
 scripts/gensort.sh validate /data/sorted /data/sort-input
 ```
 
-To run it on Kubernetes (a local kind cluster for now), see
-[deploy/README.md](deploy/README.md).
+To run it on Kubernetes, see [Running on Kubernetes](#running-on-kubernetes).
 
 ## Layout
 
