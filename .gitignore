@@ -3,3 +3,7 @@
 /.venv/
 /python/ember/_ember.so
 __pycache__/
+/dist/
+/build/
+/python/build/
+*.egg-info/
