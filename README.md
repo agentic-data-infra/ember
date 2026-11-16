@@ -1,6 +1,8 @@
 # ember
 Large-scale data processing for agents -- not humans!
 
+## Overview
+
 Ember is a C++ framework for large-scale data processing, built to be used by
 AI agents rather than humans. It particularly targets continuous exploration: AI systems that propose a
 hypothesis, run an experiment, evaluate it, refine the hypothesis, and repeat,
@@ -12,8 +14,8 @@ queries, so Ember aims for these properties (✅ implemented today, ⬜ planned)
 - ✅ Reuse of identical stages across jobs in a session.
 - ✅ Memoization with `cache()`/`persist()`/`unpersist()`.
 - ✅ Fault tolerance through task retry and lineage recompute.
-- ✅ RDMA-based shuffle: map outputs in Kiln outlive their workers and move over one-sided RDMA (`ember.shuffle.store=kiln`, see [Kiln over RDMA](#kiln-over-rdma)).
-- ✅ Input and output datasets in Kiln: `kiln://<metadata>/data/<dataset>/` paths (see [Datasets in Kiln](#datasets-in-kiln)).
+- ✅ RDMA-based shuffle: map outputs in Kiln outlive their workers and move over one-sided RDMA (`ember.shuffle.store=kiln`, see [Shuffle](docs/user-guide.md#shuffle)).
+- ✅ Input and output datasets in Kiln: `kiln://<metadata>/data/<dataset>/` paths (see [Reading data](docs/user-guide.md#reading-data)).
 - ⬜ Cost-based materialization: decide what to keep from predicted reuse.
 - ✅ Reuse across programs of the same build, through Kiln's catalog (`ember.reuse.kiln`).
 - ⬜ Reuse across sessions and agents, through a persistent driver and catalog.
@@ -28,8 +30,14 @@ Ember offers a Dataframe API, uses
 [Axiom](https://github.com/facebookincubator/axiom) for query compilation and
 [Velox](https://github.com/facebookincubator/velox) for query execution. Dataframe
 programs compile into multi-stage Velox plans that run on a driver and a set of
-workers. [docs/comparison.md](docs/comparison.md) compares Ember with other
-data processing systems.
+workers.
+
+- [docs/user-guide.md](docs/user-guide.md): writing Ember programs: reading
+  and writing data, transformations, reuse and caching, and every config
+  key.
+- [docs/ai-functions.md](docs/ai-functions.md): LLM calls per row.
+- [docs/comparison.md](docs/comparison.md): Ember and other data processing
+  systems.
 
 ## Building
 
@@ -130,10 +138,10 @@ runs.filter(col("loss") < 0.8).groupBy("model").agg(countAll().alias("runs"), av
 ember.read.parquet("data.parquet").selectExpr("model", "loss * 2 AS doubled").collect()  # list of tuples
 ```
 
-`toArrow()` returns a pyarrow Table and `explain()` prints the plan.
+`toArrow()` returns a pyarrow Table and `explain()` prints the plan; the
+[user guide](docs/user-guide.md) covers the rest of the API.
 `examples/word_count.py` and `examples/threshold_sweep.py` are the Python
-versions of the C++ examples, and `examples/check_python_examples.py`
-checks that they print the same results:
+versions of the C++ examples:
 
 ```
 GLOG_minloglevel=2 python3 examples/word_count.py path/to/text   # GLOG_minloglevel=2 hides the info logs
@@ -188,48 +196,10 @@ EMBER_CONF="ember.shuffle.store=kiln ember.shuffle.kiln.metadata=localhost:7470"
   buck2 run //examples:word_count -- path/to/text
 ```
 
-See [ember/shuffle/README.md](ember/shuffle/README.md). Adding
-`ember.reuse.kiln=true` also keeps stage outputs in Kiln's catalog, so a
-second run of the same program reuses what the first one computed (see
-[ember/driver/README.md](ember/driver/README.md)).
-
-#### Datasets in Kiln
-
-Programs can also read their input from Kiln datasets (Kiln's catalog: a
-name pointing at a manifest of named files; see Kiln's README for putting
-and getting them with the `kiln` CLI) and write their output as new ones,
-with paths `kiln://<metadata>/data/<dataset>/`. With no `<metadata>`
-(`kiln:///data/<dataset>/`) they use the cluster of `ember.kiln.metadata`,
-or else of `ember.shuffle.kiln.metadata`:
-
-```bash
-EMBER_CONF="ember.kiln.metadata=localhost:7470" \
-  buck2 run //examples:sort_benchmark -- kiln:///data/sort-input/ kiln:///data/sorted
-```
-
-`write().parquet(path)` writes the rows as Parquet files, to a local or
-shared directory or to a Kiln dataset alike; `read().parquet(path)` reads
-them back, and `write().gensort(path)` does the same with gensort records.
-`write()` to a dataset that exists already fails. Each task writes its
-part as one chunk, in Kiln's DRAM tier by default (`ember.kiln.files.tier=localfs`
-for local disks, `ember.kiln.files.write_through=localfs` to keep a copy
-there), into a bucket of the job's; the driver publishes the dataset when the
-job succeeds, with all its parts, and deletes the bucket when it fails. See
-[ember/common/KilnFiles.h](ember/common/KilnFiles.h).
-
-#### Kiln over RDMA
-
-Kiln can move shuffle data and its metadata calls over RDMA; Ember just
-passes Kiln's metadata URL list through, e.g.
-`ember.shuffle.kiln.metadata=tcp://meta:7470,rdma://10.0.0.1:7471`.
-RDMA is Kiln's build option, off by default: build Ember with
-`-c kiln.rdma=true` after linking rlib into the Kiln submodule, as Kiln's
-README describes (`third-party/kiln/scripts/link_rlib.sh`). Without an RDMA
-device, or in a default build, everything goes over TCP. In an RDMA build on
-a host with an RDMA device, `kiln_shuffle_test` checks that reads and writes
-go over RDMA without copies. With `$EMBER_TEST_KILN_METADATA`,
-`kiln_shuffle_test` and `scheduler_test` run their other tests against an
-external cluster.
+The user guide covers the rest: reading and writing
+[datasets in Kiln](docs/user-guide.md#reading-data), reuse across programs
+([`ember.reuse.kiln`](docs/user-guide.md#reuse-and-caching)), and
+[RDMA](docs/user-guide.md#shuffle).
 
 ### Running on Kubernetes
 
@@ -247,74 +217,6 @@ deploy/kubernetes/sort_demo.sh --kiln       # input, shuffle and output in Kiln
 ```
 
 See [deploy/README.md](deploy/README.md).
-
-## Reading files in random order
-
-Consumers such as training often want rows in random order. A file scan can
-hand its splits to tasks shuffled, with `ember.files.shuffle`:
-
-- `none` (default): files and their byte ranges in order.
-- `file`: files one after another (sorted by path), each file's ranges
-  shuffled.
-- `global`: the ranges of all files shuffled together.
-
-`ember.files.shuffle_seed` (default 0) seeds the shuffle: the same seed and
-files give the same order, so each epoch takes a new seed. A split is a byte
-range of a file, and rows inside a range keep their order (a Parquet range
-reads the row groups that start in it). Splits are total bytes /
-parallelism, between 4 and 128 MB, or `ember.files.max_split_bytes`, so
-`file` reorders only files cut into several ranges. A smaller
-`ember.files.max_split_bytes` gives a finer order, but more and smaller
-tasks, which costs throughput (4-38% in our dataloader runs with 4 MiB
-splits):
-
-```python
-ember = (
-    Session.builder.appName("Feed")
-    .config("ember.files.shuffle", "global")
-    .config("ember.files.shuffle_seed", str(epoch))
-    .getOrCreate()
-)
-```
-
-## More examples
-
-`examples/DomainReport.cpp` reads FineWeb-Edu style parquet (`url`, `score`,
-`int_score`, `token_count`) and reports, per web domain, how many documents
-and tokens a stricter quality filter (`int_score >= 4`) keeps. It joins two
-aggregations over the same input. `examples/check_domain_report.py` checks
-its full output against DuckDB:
-
-```
-buck2 run //examples:domain_report -- data.parquet 'local[*]' 1 100000000 > report.txt
-python3 examples/check_domain_report.py data.parquet report.txt
-```
-
-`examples/ThresholdSweep.cpp` sweeps a quality threshold over a per-document
-feature computed with a regex over the text. It caches the features with
-`Dataframe::cache()`, so only the first threshold computes them:
-
-```
-buck2 run //examples:threshold_sweep -- docs/ cache     # or nocache
-```
-
-`examples/SortBenchmark.cpp` sorts the 100-byte records of
-[sortbenchmark.org](https://sortbenchmark.org)'s gensort by their 10-byte key
-(`read().gensort(path)`: binary `key` and `payload` columns) and writes them
-back as files, `write().gensort(path)`, without passing through the driver. It
-runs as one merge task, or as N range tasks with
-`ember.sort.range_partitions=N`. Range sorts sample the key to pick their split
-points, which reads the input one extra time; gensort's keys are uniform, so the
-benchmark sets `ember.sort.sample=false` and uses fixed ranges. `scripts/gensort.sh`
-downloads gensort and valsort, writes the input and checks the output:
-
-```
-scripts/gensort.sh generate 10000000 /data/sort-input 8     # 1 GB in 8 files
-buck2 run //examples:sort_benchmark -- /data/sort-input /data/sorted
-scripts/gensort.sh validate /data/sorted /data/sort-input
-```
-
-To run it on Kubernetes, see [Running on Kubernetes](#running-on-kubernetes).
 
 ## Layout
 
