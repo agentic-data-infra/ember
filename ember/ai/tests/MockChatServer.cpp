@@ -49,6 +49,17 @@ int MockChatServer::requests(const std::string& prompt) const {
   return it == requests_.end() ? 0 : it->second;
 }
 
+std::string MockChatServer::modelOf(const std::string& prompt) const {
+  std::lock_guard<std::mutex> l(mutex_);
+  auto it = models_.find(prompt);
+  return it == models_.end() ? "" : it->second;
+}
+
+std::string MockChatServer::lastResponseFormat() const {
+  std::lock_guard<std::mutex> l(mutex_);
+  return lastResponseFormat_;
+}
+
 std::string MockChatServer::lastModel() const {
   std::lock_guard<std::mutex> l(mutex_);
   return lastModel_;
@@ -113,6 +124,10 @@ void MockChatServer::handle(int connection) {
     std::lock_guard<std::mutex> l(mutex_);
     previous = requests_[prompt]++;
     lastModel_ = body["model"].asString();
+    models_[prompt] = lastModel_;
+    lastResponseFormat_ = body.count("response_format")
+        ? folly::toJson(body["response_format"])
+        : "";
   }
   const auto reply = handler_(prompt, previous);
   std::string content = reply.content;

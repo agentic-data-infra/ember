@@ -82,6 +82,12 @@ class Column {
   /// The field 'name' of this struct (ROW) column, e.g.
   /// ai::generate(...).getField("result").
   Column getField(const std::string& name) const;
+  /// On a functions::when(...) column: another branch, tried after the ones
+  /// before it.
+  Column when(const Column& condition, const Column& value) const;
+  /// On a functions::when(...) column: the value of rows that take no branch
+  /// (null without otherwise()). Ends the chain.
+  Column otherwise(const Column& value) const;
   Column isNull() const;
   Column isNotNull() const;
   Column isin(const std::vector<Column>& values) const;

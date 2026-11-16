@@ -12,6 +12,7 @@
 
 #include "ember/ai/AiEndpoint.h"
 #include "velox/buffer/Buffer.h"
+#include "velox/type/Type.h"
 
 namespace ember::ai {
 
@@ -28,9 +29,13 @@ class AiBackend {
  public:
   virtual ~AiBackend() = default;
 
-  /// Sends 'prompt' as a user message and returns the model's answer. Never
-  /// throws for a failed call: the answer carries the error.
-  virtual folly::coro::Task<AiAnswer> generate(std::string_view prompt) = 0;
+  /// Sends 'prompt' as a user message and returns the model's answer. With
+  /// a 'schema' (OutputSchema.h), the model is asked to answer with a JSON
+  /// object of that schema; without one (null), in free text. Never throws
+  /// for a failed call: the answer carries the error.
+  virtual folly::coro::Task<AiAnswer> generate(
+      std::string_view prompt,
+      facebook::velox::RowTypePtr schema) = 0;
 };
 
 /// The process's backend for 'endpoint', created on first use. Backends live

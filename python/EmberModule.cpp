@@ -134,6 +134,21 @@ velox::TypePtr parseType(const std::string& name) {
   return it->second;
 }
 
+// An AI output schema: field names to type names, or to dicts for nested
+// rows, e.g. {"label": "varchar", "where": {"line": "bigint"}}.
+velox::RowTypePtr schemaType(const py::dict& fields) {
+  std::vector<std::string> names;
+  std::vector<velox::TypePtr> types;
+  for (const auto& [name, type] : fields) {
+    names.push_back(name.cast<std::string>());
+    types.push_back(
+        py::isinstance<py::dict>(type)
+            ? velox::TypePtr(schemaType(type.cast<py::dict>()))
+            : parseType(type.cast<std::string>()));
+  }
+  return velox::ROW(std::move(names), std::move(types));
+}
+
 // Result batches as a pyarrow Table with schema 'schema'.
 py::object toArrow(
     const std::vector<velox::RowVectorPtr>& batches,
@@ -267,6 +282,19 @@ PYBIND11_MODULE(_ember, m) {
           },
           py::arg("type"))
       .def("getField", &Column::getField, py::arg("name"))
+      .def(
+          "when",
+          [](const Column& c, py::handle condition, py::handle value) {
+            return c.when(column(condition), literal(value));
+          },
+          py::arg("condition"),
+          py::arg("value"))
+      .def(
+          "otherwise",
+          [](const Column& c, py::handle value) {
+            return c.otherwise(literal(value));
+          },
+          py::arg("value"))
       .def("isNull", &Column::isNull)
       .def("isNotNull", &Column::isNotNull)
       .def(
@@ -573,6 +601,13 @@ PYBIND11_MODULE(_ember, m) {
           py::arg("col"),
           py::arg("scale") = 0)
       .def("coalesce", [](const py::args& cols) { return f::coalesce(columns(cols)); })
+      .def(
+          "when",
+          [](py::handle condition, py::handle value) {
+            return f::when(column(condition), literal(value));
+          },
+          py::arg("condition"),
+          py::arg("value"))
       .def("count", [](py::handle c) { return f::count(column(c)); })
       .def("countAll", &f::countAll)
       .def("countDistinct", [](py::handle c) { return f::countDistinct(column(c)); })
@@ -587,9 +622,14 @@ PYBIND11_MODULE(_ember, m) {
   auto ai = m.def_submodule("ai", "AI functions: LLM calls per row.");
   ai.def(
       "generate",
-      [](py::handle prompt, const std::string& endpoint) {
-        return ember::ai::generate(column(prompt), endpoint);
+      [](py::handle prompt, const std::string& endpoint, py::handle output) {
+        if (output.is_none()) {
+          return ember::ai::generate(column(prompt), endpoint);
+        }
+        return ember::ai::generate(
+            column(prompt), endpoint, schemaType(output.cast<py::dict>()));
       },
       py::arg("prompt"),
-      py::arg("endpoint"));
+      py::arg("endpoint"),
+      py::arg("output") = py::none());
 }

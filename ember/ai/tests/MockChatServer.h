@@ -34,9 +34,14 @@ class MockChatServer {
   /// How many requests carried 'prompt'.
   int requests(const std::string& prompt) const;
 
-  /// The model and Authorization header of the last request.
+  /// The model of the last request that carried 'prompt'.
+  std::string modelOf(const std::string& prompt) const;
+
+  /// The model, Authorization header and response_format (as JSON, empty
+  /// when there was none) of the last request.
   std::string lastModel() const;
   std::string lastAuthorization() const;
+  std::string lastResponseFormat() const;
 
  private:
   void serve();
@@ -48,6 +53,8 @@ class MockChatServer {
   std::atomic<bool> stopping_{false};
   mutable std::mutex mutex_;
   std::map<std::string, int> requests_;
+  std::map<std::string, std::string> models_;
+  std::string lastResponseFormat_;
   std::string lastModel_;
   std::string lastAuthorization_;
   std::thread thread_;

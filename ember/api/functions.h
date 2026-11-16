@@ -65,6 +65,13 @@ Column round(const Column& value, int32_t scale = 0);
 // Conditionals.
 Column coalesce(const std::vector<Column>& columns);
 
+/// A conditional: 'value' where 'condition' holds; chain further branches
+/// with Column::when and the default with Column::otherwise, e.g.
+/// when(col("x") > 8, lit("high")).when(col("x") > 3, lit("mid"))
+///     .otherwise(lit("low")). Each branch is evaluated only on the rows that
+/// take it.
+Column when(const Column& condition, const Column& value);
+
 // Aggregates.
 Column count(const Column& value);
 /// count(*); count(col("*")) means the same.
