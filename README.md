@@ -28,7 +28,8 @@ Ember offers a Dataframe API, uses
 [Axiom](https://github.com/facebookincubator/axiom) for query compilation and
 [Velox](https://github.com/facebookincubator/velox) for query execution. Dataframe
 programs compile into multi-stage Velox plans that run on a driver and a set of
-workers.
+workers. [docs/comparison.md](docs/comparison.md) compares Ember with other
+data processing systems.
 
 ## Building
 
