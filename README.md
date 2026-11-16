@@ -174,14 +174,15 @@ with `.master("ember://driver-host:7077")` and
 
 #### Shuffle in Kiln
 
-To keep shuffle outputs in [Kiln](https://github.com/agentic-data-infra/kiln)
-instead of on the workers, so that they survive a worker, start a Kiln
-cluster and set `ember.shuffle.store=kiln` and
+Ember can keep shuffle outputs in [Kiln](https://github.com/agentic-data-infra/kiln)
+instead of on the workers, so that they survive a worker. How to build and
+start a Kiln cluster, on one machine or many, is in
+[Kiln's README](https://github.com/agentic-data-infra/kiln#readme). Point
+Ember at its metadata server with `ember.shuffle.store=kiln` and
 `ember.shuffle.kiln.metadata=<kiln metadata host:port>`; the examples take
 extra config from `$EMBER_CONF`:
 
 ```
-third-party/kiln/scripts/start_local_cluster.sh -d 1 -l 0 -r 4   # prints localhost:7470
 EMBER_CONF="ember.shuffle.store=kiln ember.shuffle.kiln.metadata=localhost:7470" \
   buck2 run //examples:word_count -- path/to/text
 ```
@@ -194,17 +195,15 @@ second run of the same program reuses what the first one computed (see
 #### Datasets in Kiln
 
 Programs can also read their input from Kiln datasets (Kiln's catalog: a
-name pointing at a manifest of named files) and write their output as new
-ones, with paths `kiln://<metadata>/data/<dataset>/`; with no `<metadata>`
-(`kiln:///data/<dataset>/`) they use the cluster of `ember.kiln.metadata`, or
-else of `ember.shuffle.kiln.metadata`:
+name pointing at a manifest of named files; see Kiln's README for putting
+and getting them with the `kiln` CLI) and write their output as new ones,
+with paths `kiln://<metadata>/data/<dataset>/`. With no `<metadata>`
+(`kiln:///data/<dataset>/`) they use the cluster of `ember.kiln.metadata`,
+or else of `ember.shuffle.kiln.metadata`:
 
 ```bash
-third-party/kiln/scripts/start_local_cluster.sh -d 1 -l 1 -r 4   # prints localhost:7470
-buck2 run kiln//bin:kiln -- --metadata=localhost:7470 data put ~/data/sort-input sort-input
 EMBER_CONF="ember.kiln.metadata=localhost:7470" \
   buck2 run //examples:sort_benchmark -- kiln:///data/sort-input/ kiln:///data/sorted
-buck2 run kiln//bin:kiln -- --metadata=localhost:7470 data ls sorted
 ```
 
 `write().parquet(path)` writes the rows as Parquet files, to a local or
@@ -220,37 +219,16 @@ job succeeds, with all its parts, and deletes the bucket when it fails. See
 #### Kiln over RDMA
 
 Kiln can move shuffle data and its metadata calls over RDMA; Ember just
-passes Kiln's metadata URL list through. RDMA is a build option, off by
-default: the default build does not depend on rdma-core or
-[rlib](https://github.com/agentic-data-infra/rlib). To build with it, link an
-rlib checkout into the Kiln submodule (it becomes the Buck cell `rlib//`) and
-pass `-c kiln.rdma=true`, which the `kiln//` cell reads:
-
-```
-third-party/kiln/scripts/link_rlib.sh ~/source/rlib   # needs libibverbs-dev, librdmacm-dev
-buck2 build -c kiln.rdma=true //...
-buck2 test -c kiln.rdma=true //...
-```
-
-(`buck2 --isolation-dir rdma ...` keeps a second build tree, so switching
-modes does not rebuild everything.) Then start Kiln with RDMA
-(`kiln_meta --rdma`, `kiln_server --rdma`, or
-`third-party/kiln/scripts/start_local_cluster.sh -R`) and give Ember the URL
-list kiln_meta prints:
-
-```
-EMBER_CONF="ember.shuffle.store=kiln ember.shuffle.kiln.metadata=tcp://meta:7470,rdma://10.0.0.1:7471" \
-  word_count path/to/text ember://driver-host:7077 3
-```
-
-Clients use shared memory for storage servers on their own host and RDMA for
-the others; without an RDMA device, or in a default build, everything goes
-over TCP. See Kiln's README for Soft-RoCE (no RDMA NIC) and the transport
-rules. In an RDMA build on a host with an RDMA device, `kiln_shuffle_test`
-checks that reads and writes go over RDMA without copies, against a cluster
-of its own with shared memory off (`shuffle::setKilnUseShm(false)`). With
-`$EMBER_TEST_KILN_METADATA`, `kiln_shuffle_test` and `scheduler_test` run
-their other tests against an external cluster.
+passes Kiln's metadata URL list through, e.g.
+`ember.shuffle.kiln.metadata=tcp://meta:7470,rdma://10.0.0.1:7471`.
+RDMA is Kiln's build option, off by default: build Ember with
+`-c kiln.rdma=true` after linking rlib into the Kiln submodule, as Kiln's
+README describes (`third-party/kiln/scripts/link_rlib.sh`). Without an RDMA
+device, or in a default build, everything goes over TCP. In an RDMA build on
+a host with an RDMA device, `kiln_shuffle_test` checks that reads and writes
+go over RDMA without copies. With `$EMBER_TEST_KILN_METADATA`,
+`kiln_shuffle_test` and `scheduler_test` run their other tests against an
+external cluster.
 
 ### Running on Kubernetes
 
