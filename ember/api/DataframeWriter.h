@@ -1,5 +1,5 @@
 // DataframeWriter: dataframe.write().parquet(directory), .gensort(directory)
-// or .stream(name).
+// or .format(connector).option(key, value).save(name).
 //
 // parquet and gensort: an Axiom table write into the "ember_output" connector
 // (OutputConnector.h): every task of the stage that makes the rows writes
@@ -11,27 +11,20 @@
 // (KilnFiles.h), published when the job is done. Writing fails if the
 // directory holds part files, or the dataset exists, already.
 //
-// stream: in builds with stoke (-c ember.stoke=true), writes training
-// batches into a stoke stream through Axiom's table write into the "stoke"
-// connector (StokeConnector.h): every task of the stage that makes the rows
-// puts its chunks into the stream while it runs, and the driver commits the
-// write at the end of the job.
+// format(connector).option(key, value).save(name): an Axiom table write into
+// the table 'name' of any connector, e.g. "stoke" (StokeConnector.h) in
+// builds with stoke. Ember passes the options to the connector as they are.
 
 #pragma once
 
 #include <cstdint>
-#include <optional>
+#include <map>
 #include <string>
 #include <string_view>
 
 #include "ember/Dataframe.h"
-#include "ember/Stoke.h"
 
 namespace ember {
-
-/// Config key: bytes after which a stream's chunk is put; default 16 MiB.
-inline constexpr std::string_view kStokeChunkBytesConfig =
-    "ember.stoke.chunk_bytes";
 
 class DataframeWriter {
  public:
@@ -46,26 +39,32 @@ class DataframeWriter {
   /// number of records written.
   int64_t gensort(const std::string& directory) const;
 
-  /// Writes the rows, one VARBINARY column of batches in stoke's format,
-  /// into the stoke stream 'name' of the Kiln cluster ember.kiln.metadata
-  /// (or ember.shuffle.kiln.metadata), in chunks of ember.stoke.chunk_bytes
-  /// (default 16 MiB). With 'packing', the column is ARRAY<INTEGER> tokens
-  /// or VARCHAR text instead, tokenized by bytes with an end-of-text token
-  /// after each text: each task concatenates its rows' tokens in order and
-  /// cuts them into batches of 'packing' (stoke's Packer); its last batch
-  /// holds the whole windows left, and fewer tokens than a window are
-  /// dropped. With 'seal', seals the stream once
-  /// the write is committed. Returns the number of rows written, NULLs
-  /// included.
-  int64_t stream(
-      const std::string& name,
-      bool seal = false,
-      std::optional<StokePacking> packing = std::nullopt) const;
+  /// The connector save() writes into.
+  DataframeWriter& format(std::string connector) {
+    connector_ = std::move(connector);
+    return *this;
+  }
+
+  /// A session property of the connector for save(), passed as it is.
+  DataframeWriter& option(std::string key, std::string value) {
+    options_[std::move(key)] = std::move(value);
+    return *this;
+  }
+
+  /// Writes the rows into the table 'name' of the connector of format(),
+  /// each column into the table's column of the same name, with the
+  /// options as the connector's session properties. A session with a Kiln
+  /// cluster (ember.kiln.metadata, or else the Kiln shuffle's) also passes
+  /// it as kKilnMetadataProperty, unless an option sets that. Returns the
+  /// number of rows written.
+  int64_t save(const std::string& name) const;
 
  private:
   int64_t files(const std::string& directory, const std::string& format) const;
 
   Dataframe df_;
+  std::string connector_;
+  std::map<std::string, std::string> options_;
 };
 
 } // namespace ember

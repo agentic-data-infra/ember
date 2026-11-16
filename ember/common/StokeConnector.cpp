@@ -85,9 +85,14 @@ class StokeDataSink : public velox::connector::DataSink {
 
   void appendData(velox::RowVectorPtr input) override {
     if (packer_.has_value()) {
+      checkNull(
+          *input->childAt(0), "Batches are written without batch and sequence");
       pack(*input->childAt(1), *input->childAt(2));
       return;
     }
+    checkNull(
+        *input->childAt(1), "Tokens are written with batch and sequence");
+    checkNull(*input->childAt(2), "Text is written with batch and sequence");
     decoded_.decode(*input->childAt(0));
     for (velox::vector_size_t i = 0; i < input->size(); ++i) {
       if (!decoded_.isNullAt(i)) {
@@ -152,6 +157,15 @@ class StokeDataSink : public velox::connector::DataSink {
     chunkSize_ += length.size() + size;
     if (chunkSize_ >= chunkBytes_) {
       put();
+    }
+  }
+
+  // A column the write does not take must be all NULL: the table write
+  // gives the stream's columns that the Dataframe has no column for as
+  // NULLs.
+  static void checkNull(const velox::BaseVector& column, const char* error) {
+    for (velox::vector_size_t i = 0; i < column.size(); ++i) {
+      VELOX_USER_CHECK(column.isNullAt(i), "{}", error);
     }
   }
 
@@ -497,10 +511,6 @@ std::vector<std::string> StokeConnectorMetadata::listTableNames(
     const axiom_connector::ConnectorSessionPtr& /*session*/,
     const std::string& /*schemaName*/) {
   VELOX_UNSUPPORTED("stoke streams are listed by stoke ls");
-}
-
-bool hasStoke() {
-  return true;
 }
 
 void registerStokeConnector() {

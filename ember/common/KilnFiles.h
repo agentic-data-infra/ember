@@ -27,6 +27,10 @@ namespace ember {
 /// Config key: the Kiln cluster of kiln:// paths without one; default
 /// ember.shuffle.kiln.metadata.
 inline constexpr std::string_view kKilnFilesMetadata = "ember.kiln.metadata";
+
+/// Connector session property: the Kiln cluster (its metadata server) of a
+/// connector that keeps data in Kiln; write().save() sets it.
+inline constexpr std::string_view kKilnMetadataProperty = "kiln_metadata";
 /// Config key: the Kiln tier written parts go to: "dram" (default) or
 /// "localfs".
 inline constexpr std::string_view kKilnFilesTier = "ember.kiln.files.tier";

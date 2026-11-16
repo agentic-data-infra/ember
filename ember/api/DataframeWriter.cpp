@@ -6,8 +6,6 @@
 #include "ember/KilnFiles.h"
 #include "ember/OutputConnector.h"
 #include "ember/Session.h"
-#include "ember/Stoke.h"
-#include "ember/StokeConnector.h"
 #include "ember/shuffle/ShuffleConfig.h"
 
 namespace ember {
@@ -92,66 +90,35 @@ int64_t DataframeWriter::files(
       makeOutputTable(output, schema));
 }
 
-int64_t DataframeWriter::stream(
-    const std::string& name,
-    bool seal,
-    std::optional<StokePacking> packing) const {
-  VELOX_USER_CHECK(
-      hasStoke(), "Writing to a stoke stream needs a build with stoke");
-  const auto schema = df_.schema();
-  if (packing.has_value()) {
-    VELOX_USER_CHECK(
-        schema->size() == 1 &&
-            (*schema->childAt(0) == *velox::ARRAY(velox::INTEGER()) ||
-             schema->childAt(0)->isVarchar()),
-        "Packing into a stoke stream takes one ARRAY<INTEGER> column of "
-        "tokens or one VARCHAR column of text, not {}",
-        schema->toString());
-  } else {
-    VELOX_USER_CHECK(
-        schema->size() == 1 && schema->childAt(0)->isVarbinary(),
-        "A stoke stream takes one VARBINARY column of batches, not {}",
-        schema->toString());
-  }
+int64_t DataframeWriter::save(const std::string& name) const {
+  VELOX_USER_CHECK(!connector_.empty(), "save() needs a format(connector)");
+  facebook::axiom::connector::Properties properties{
+      options_.begin(), options_.end()};
   const auto& config = df_.session()->config();
   auto metadata = config.find(std::string(kKilnFilesMetadata));
   if (metadata == config.end()) {
     metadata = config.find(std::string(shuffle::kKilnMetadata));
   }
-  VELOX_USER_CHECK(
-      metadata != config.end(),
-      "Writing to a stoke stream needs a Kiln cluster: set {} or {}",
-      kKilnFilesMetadata,
-      shuffle::kKilnMetadata);
-
-  facebook::axiom::connector::Properties properties{
-      {std::string(kStokeKilnMetadata), metadata->second},
-      {std::string(kStokeSeal), seal ? "true" : "false"}};
-  if (auto chunkBytes = config.find(std::string(kStokeChunkBytesConfig));
-      chunkBytes != config.end()) {
-    properties[std::string(kStokeChunkBytes)] = chunkBytes->second;
+  if (metadata != config.end()) {
+    properties.emplace(std::string(kKilnMetadataProperty), metadata->second);
   }
-  if (packing.has_value()) {
-    properties[std::string(kStokePackBatch)] = std::to_string(packing->batch);
-    properties[std::string(kStokePackSequence)] =
-        std::to_string(packing->sequence);
-  }
-  const auto* target = !packing.has_value() ? "batch"
-      : schema->childAt(0)->isVarchar()     ? "text"
-                                            : "tokens";
-  auto plan = df_.then([name, column = schema->nameOf(0), target](
+  const auto schema = df_.schema();
+  auto plan = df_.then([connector = connector_, name, schema](
                            auto& builder, const auto& /*context*/) {
+                   std::vector<lp::ExprApi> columns;
+                   for (const auto& column : schema->names()) {
+                     columns.push_back(lp::Col(column));
+                   }
                    builder.tableWrite(
-                       std::string(kStokeConnectorId),
+                       connector,
                        "default",
                        name,
                        lp::WriteKind::kInsert,
-                       {target},
-                       std::vector<lp::ExprApi>{lp::Col(column)});
+                       schema->names(),
+                       columns);
                  })
                   .logicalPlan();
-  return df_.session()->writeTable(
-      plan, {{std::string(kStokeConnectorId), std::move(properties)}});
+  return df_.session()->writeTable(plan, {{connector_, std::move(properties)}});
 }
 
 } // namespace ember

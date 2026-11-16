@@ -1,4 +1,5 @@
-// write().stream() (DataframeWriter.h), in builds with stoke: a job
+// write().format("stoke").save() (DataframeWriter.h, StokeConnector.h), in
+// builds with stoke: a job
 // packs text or tokens into batches, or takes batches as they are, and
 // writes them into a stoke stream
 // through Axiom's table write, which stoke's dataloader reads; against an
@@ -39,7 +40,6 @@ namespace velox = facebook::velox;
 constexpr std::string_view kStream = "train";
 constexpr int64_t kBatch = 2;
 constexpr int64_t kSequence = 7;
-constexpr StokePacking kPacking{.batch = kBatch, .sequence = kSequence};
 
 class StreamWriteTest : public testing::Test {
  protected:
@@ -120,9 +120,30 @@ class StreamWriteTest : public testing::Test {
     return input.string();
   }
 
-  // The lines of 'input'.
+  // The lines of 'input', as the stream's column "text".
   Dataframe text(const std::string& input) {
-    return session().read().text(input);
+    return session().read().text(input).select(col("value").alias("text"));
+  }
+
+  // Writes 'df' into 'stream': packed into batches of kBatch x
+  // (kSequence + 1) if 'packed', sealed if 'seal', in chunks of
+  // 'chunkBytes' if set. Returns the rows written.
+  static int64_t write(
+      const Dataframe& df,
+      bool seal,
+      bool packed = true,
+      const std::string& chunkBytes = "",
+      const std::string& stream = std::string(kStream)) {
+    auto writer = df.write();
+    writer.format("stoke").option("seal", seal ? "true" : "false");
+    if (packed) {
+      writer.option("batch", std::to_string(kBatch))
+          .option("sequence", std::to_string(kSequence));
+    }
+    if (!chunkBytes.empty()) {
+      writer.option("chunk_bytes", chunkBytes);
+    }
+    return writer.save(stream);
   }
 
   // The batches packed from 'all' in windows of kSequence + 1: kBatch
@@ -200,7 +221,7 @@ TEST_F(StreamWriteTest, writesEveryScanTasksChunks) {
   // 4 files, one split and task each; each task's batches fit one chunk.
   auto df = text(writeText(4, 5));
   EXPECT_EQ(
-      df.write().stream(std::string(kStream), /*seal=*/true, kPacking), 20);
+      write(df, /*seal=*/true), 20);
   // A chunk per scan task: the rows were not gathered into one task.
   EXPECT_EQ(chunksPut(), 4);
   EXPECT_EQ(consume(), lineBatches(4, 5));
@@ -216,8 +237,7 @@ TEST_F(StreamWriteTest, writesBatchesAsTheyAre) {
   }
   rows.push_back({velox::Variant::null(velox::TypeKind::VARBINARY)});
   EXPECT_EQ(
-      session().createDataframe(type, rows).write().stream(
-          std::string(kStream), /*seal=*/true),
+      write(session().createDataframe(type, rows), true, /*packed=*/false),
       4);
   EXPECT_EQ(consume(), expected);
 }
@@ -225,23 +245,22 @@ TEST_F(StreamWriteTest, writesBatchesAsTheyAre) {
 TEST_F(StreamWriteTest, cutsChunksAtTheConfiguredSize) {
   // A batch is 64 + 2 * 8 * 4 bytes, 136 framed; a chunk is put once it
   // reaches 300 bytes, i.e. every 3 batches: 2 chunks for each file's 5.
-  session({{std::string(kStokeChunkBytesConfig), "300"}});
   auto df = text(writeText(2, 5));
   EXPECT_EQ(
-      df.write().stream(std::string(kStream), /*seal=*/true, kPacking), 10);
+      write(df, /*seal=*/true, true, /*chunkBytes=*/"300"), 10);
   EXPECT_EQ(chunksPut(), 4);
   EXPECT_EQ(consume(), lineBatches(2, 5));
 }
 
 TEST_F(StreamWriteTest, leavesTheStreamOpenUnlessSealed) {
   auto df = text(writeText(2, 3));
-  EXPECT_EQ(df.write().stream(std::string(kStream), false, kPacking), 6);
+  EXPECT_EQ(write(df, /*seal=*/false), 6);
   EXPECT_EQ(
       blockingWait(registry_->co_get(std::string(kStream)))->state,
       stoke::StreamState::kOpen);
   // A second job feeds the same stream, then seals it.
   EXPECT_EQ(
-      df.write().stream(std::string(kStream), /*seal=*/true, kPacking), 6);
+      write(df, /*seal=*/true), 6);
   EXPECT_EQ(
       blockingWait(registry_->co_get(std::string(kStream)))->state,
       stoke::StreamState::kSealed);
@@ -257,13 +276,12 @@ TEST_F(StreamWriteTest, waitsForTheConsumerAtTheTaskBudget) {
   blockingWait(registry_->co_create(
       std::string(kStream), endpoints_, 1.0, /*taskBudget=*/1));
   // 2 files, a task each; 2 chunks a task, as in cutsChunksAtTheConfiguredSize.
-  session({{std::string(kStokeChunkBytesConfig), "300"}});
   auto df = text(writeText(2, 5));
   const auto expected = lineBatches(2, 5);
 
   std::atomic<int64_t> written{-1};
   std::thread job([&] {
-    written = df.write().stream(std::string(kStream), /*seal=*/true, kPacking);
+    written = write(df, /*seal=*/true, true, /*chunkBytes=*/"300");
   });
   // Nobody consumes yet: each task put its first chunk and waits.
   std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -288,7 +306,6 @@ TEST_F(StreamWriteTest, boundsUnconsumedChunksWhileATrainerReads) {
   blockingWait(registry_->co_create(
       std::string(kStream), endpoints_, 1.0, kBudget));
   // 9 batches a file, 3 to a chunk of 300 bytes.
-  session({{std::string(kStokeChunkBytesConfig), "300"}});
   auto df = text(writeText(8, 9));
   const auto expected = lineBatches(8, 9);
 
@@ -308,7 +325,7 @@ TEST_F(StreamWriteTest, boundsUnconsumedChunksWhileATrainerReads) {
   });
   std::atomic<int64_t> written{-1};
   std::thread job([&] {
-    written = df.write().stream(std::string(kStream), /*seal=*/true, kPacking);
+    written = write(df, /*seal=*/true, true, /*chunkBytes=*/"300");
   });
 
   stoke::Loader loader(
@@ -349,7 +366,7 @@ TEST_F(StreamWriteTest, packsTextAcrossRows) {
   // task, 6 batches of 2 x 8 and a last one of 1 x 8, 1 token dropped.
   const auto input = writeText(2, 5, 20);
   EXPECT_EQ(
-      text(input).write().stream(std::string(kStream), true, kPacking), 10);
+      write(text(input), /*seal=*/true), 10);
 
   std::multiset<std::string> expected;
   for (int32_t f = 0; f < 2; ++f) {
@@ -374,7 +391,7 @@ TEST_F(StreamWriteTest, packsTokensAcrossRows) {
            "AS INTEGER[])")
           .alias("tokens"));
   EXPECT_EQ(
-      tokens.write().stream(std::string(kStream), true, kPacking), 5);
+      write(tokens, /*seal=*/true), 5);
 
   std::vector<int32_t> all;
   for (int32_t i = 0; i < 5; ++i) {
@@ -390,17 +407,17 @@ TEST_F(StreamWriteTest, packsTokensAcrossRows) {
 
 TEST_F(StreamWriteTest, rejectsOtherColumnsAndMissingStreams) {
   auto input = writeText(1, 2);
-  EXPECT_ANY_THROW(text(input).write().stream("missing", false, kPacking));
+  EXPECT_ANY_THROW(write(text(input), false, true, "", "missing"));
   // Text and tokens are only written packed, batches are not packed.
-  EXPECT_ANY_THROW(text(input).write().stream(std::string(kStream)));
-  EXPECT_ANY_THROW(text(input)
-                       .select(expr("CAST(ARRAY[1, 2] AS INTEGER[])").alias("tokens"))
-                       .write()
-                       .stream(std::string(kStream)));
-  EXPECT_ANY_THROW(text(input)
-                       .select(expr("to_utf8(value)").alias("batch"))
-                       .write()
-                       .stream(std::string(kStream), false, kPacking));
+  EXPECT_ANY_THROW(write(text(input), false, /*packed=*/false));
+  EXPECT_ANY_THROW(write(
+      text(input).select(expr("CAST(ARRAY[1, 2] AS INTEGER[])").alias("tokens")),
+      false,
+      /*packed=*/false));
+  EXPECT_ANY_THROW(write(
+      text(input).select(expr("to_utf8(text)").alias("batch")), false));
+  // Only the stream's columns.
+  EXPECT_ANY_THROW(write(session().read().text(input), false));
   EXPECT_EQ(chunksPut(), 0);
 }
 
