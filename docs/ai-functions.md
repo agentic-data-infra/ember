@@ -227,8 +227,11 @@ A throwaway echo `AsyncRPCFunction`, registered in Ember and run in
 - **Not supported:** a call inside `when`/`otherwise` (also `if`,
   `coalesce` and `try`) is rejected: "Inference function is not supported
   under SWITCH". And in `filter(cheap & ai)` the call runs on every row,
-  not only on rows where `cheap` holds; as two filters it runs only on
-  those rows. Velox's `AND` gave that for free before.
+  not only on rows where `cheap` holds: the RPC node goes below the whole
+  filter, and even on Parquet nothing of the filter is pushed into the
+  scan. As two filters, the cheap one goes below the RPC node and the call
+  runs only on its rows. Before, the scan took `cheap` and Velox's `AND`
+  skipped the rest.
 
 ### Design
 
@@ -240,8 +243,12 @@ A throwaway echo `AsyncRPCFunction`, registered in Ember and run in
    `ROW(..., status)` as today. It gets no evaluation context, so the
    function builds its own for the JSON cast. A null prompt gets an
    immediate null-input response and never reaches the model.
-2. **Guards.** Before Ember hands a projection or filter to Axiom, it
-   rewrites every AI call that sits under a condition. The call moves into
+2. **Filter split.** Ember splits a filter's top-level `&` into a filter of
+   the conditions without AI calls, followed by a filter of the rest. The
+   optimizer then pushes the cheap filter into the scan as before, and the
+   model sees only its rows.
+3. **Guards.** Before Ember hands a projection or filter to Axiom, it
+   rewrites every AI call that is still under a condition. The call moves into
    a projection of its own, and its prompt is wrapped as
    `if(guard, prompt, null)`. The guard is the condition under which Velox
    would have evaluated the call:
@@ -261,17 +268,17 @@ A throwaway echo `AsyncRPCFunction`, registered in Ember and run in
    conditions run after the cheap ones, in a fixed order; Velox's adaptive
    reordering of `AND` no longer applies to them. `try` stays unsupported:
    a failed call is already a status, not an error.
-3. **Admission.** `admissionKey()` is the endpoint name and
+4. **Admission.** `admissionKey()` is the endpoint name and
    `configuredCeiling()` is its `max_concurrency`, so all operators of a
    process share one limit per endpoint. A 429 answer reports
    `kOverloaded`, so the operator's window backs off; `qps` stays in
    `HttpBackend`. Retries stay in `HttpBackend` and are reported through
    `numRetriesAttempted()`.
-4. **Statistics.** The `ai*` runtime stats keep their names and meaning,
+5. **Statistics.** The `ai*` runtime stats keep their names and meaning,
    added in `buildOutput` on the driver thread, so `TaskResult::stats`,
    `StageAttemptInfo::stats` and `session.stats()` do not change. The RPC
    operator's own stats (requests, errors, latency) come on top.
-5. **Registration.** The RPC plan node translator and the function are
+6. **Registration.** The RPC plan node translator and the function are
    registered where Ember registers its functions today, on the driver and
    on workers.
 
@@ -376,7 +383,7 @@ not HTTP-specific, endpoints have a `kind`, and inputs are typed columns
 | 3 | Mark `ai.generate` deterministic; the endpoint's `kind`, `url` and `model` in stage keys; stages with failed rows are not kept; tests that a rerun makes no calls, that a new model changes the keys, and that a rerun asks again for failed rows. |
 | 4 | Runtime statistics: calls, retries, failed rows and tokens per task, summed per stage attempt and per session (`Session::stats()`, `session.stats()`). |
 | 5 | A manual check against a real endpoint. velox-dev has no GPU, so: llama.cpp's `llama-server` on CPU (OpenAI-compatible, JSON-schema output) with a small instruct model such as Qwen2.5-0.5B or 1.5B (GGUF), under a memory cap. |
-| 6 | The guard rewrite for AI calls under `when`/`otherwise`, `&`, `\|` and `coalesce`. It already works with the vector function, so the existing tests show it keeps calls to the same rows. |
+| 6 | The filter split, and the guard rewrite for AI calls under `when`/`otherwise`, `&`, `\|` and `coalesce`. It already works with the vector function, so the existing tests show it keeps calls to the same rows. |
 | 7 | `ai_generate` as an `AsyncRPCFunction` on the RPC operator: admission per endpoint, statistics, registration; the vector function and the Axiom metadata go away. All existing tests pass unchanged, plus a cluster test with an AI stage on separate worker processes, and a repeat of step 5's manual check. |
 
 Left out for now: convenience functions such as `classify`, `score` or
