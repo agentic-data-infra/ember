@@ -10,6 +10,7 @@ only builds plans and reads results.
 | `ember/` | The Python package: re-exports the module and adds `collect`, `show`, `explain` and friends on top of `toArrow`. |
 | `exports.map` | Linker version script: the module exports only `PyInit__ember`. |
 | `tests/` | Tests of the binding. |
+| `pyproject.toml` | Package metadata for `pip install -e python/` and `scripts/build_wheel.sh`. |
 
 ## Building
 
@@ -22,6 +23,16 @@ uv venv -p python3.10 .venv && uv pip install -p .venv/bin/python pybind11 pyarr
 scripts/build_deps.sh          # or scripts/gen_third_party.py after a venv change
 buck2 build //python:_ember --out python/ember/_ember.so
 PYTHONPATH=python .venv/bin/python -m unittest discover -s python/tests
+```
+
+For development, `pip install -e python/` (after the `buck2 build` above)
+puts the package on the path without `PYTHONPATH`. To ship it, build a
+manylinux wheel for the `.venv` Python into `dist/`, with the shared
+libraries the module links bundled in:
+
+```
+scripts/build_wheel.sh
+pip install dist/ember-*.whl         # pulls in pyarrow
 ```
 
 The module is one shared object (~350 MB) that holds Ember, Axiom, Velox and
