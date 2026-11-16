@@ -86,6 +86,55 @@ Then set `AXIOM_REF`, check out the Velox commit in `~/source/velox`, run
 `scripts/build_deps.sh` and `buck2 clean`, and run the tests. Old tags stay, so
 that older Ember commits still build.
 
+## Python: install and run locally
+
+`python/` binds the same API for Python, with results as pyarrow tables. It
+ships as a wheel for Linux x86-64 (glibc 2.35 or newer) and CPython 3.10.
+`scripts/build_wheel.sh` builds the module and the wheel, with the shared
+libraries it links bundled in, into `dist/`:
+
+```
+scripts/build_wheel.sh                                  # dist/ember-0.1.0-cp310-cp310-manylinux_2_35_x86_64.whl
+python3 -m pip install --user dist/ember-*.whl          # pulls in pyarrow
+python3 -m pip show ember                               # is it installed, and where?
+```
+
+Any Python 3.10 with pip works; for the repository's `.venv`, which has no
+pip, use `uv pip install -p .venv/bin/python dist/ember-*.whl`. The version
+stays 0.1.0, so after a rebuild add `--force-reinstall`. For development,
+`pip install -e python/` uses the module built in place instead (see
+[python/README.md](python/README.md)).
+
+By default (master `local[*]`, or `local[N]`), the driver and one executor
+run inside the Python process: no `ember_worker`, Kiln or cluster is needed,
+and shuffle files go to `ember.local.dir` (default `$TMPDIR/ember`, so
+`/tmp/ember`). That makes small queries a few lines:
+
+```python
+import pyarrow as pa
+from ember import Session
+from ember.functions import avg, col, countAll
+
+ember = Session.builder.appName("Local").master("local[4]").getOrCreate()
+runs = ember.createDataFrame(pa.table({"model": ["a", "a", "b"], "loss": [0.9, 0.7, 0.6]}))
+runs.filter(col("loss") < 0.8).groupBy("model").agg(countAll().alias("runs"), avg("loss")).show()
+ember.read.parquet("data.parquet").selectExpr("model", "loss * 2 AS doubled").collect()  # list of tuples
+```
+
+`toArrow()` returns a pyarrow Table and `explain()` prints the plan.
+`examples/word_count.py` and `examples/threshold_sweep.py` are the Python
+versions of the examples below, and `examples/check_python_examples.py`
+checks that they print the same results:
+
+```
+GLOG_minloglevel=2 python3 examples/word_count.py path/to/text   # GLOG_minloglevel=2 hides the info logs
+```
+
+With an editable install, `python3 -c` or the interpreter started in a
+directory that holds an `ember` directory, such as the repository root or
+`/tmp` (the local directory), imports that directory instead of the
+package. Scripts and wheel installs are not affected.
+
 ## Running WordCount
 
 ```
@@ -309,24 +358,6 @@ scripts/gensort.sh validate /data/sorted /data/sort-input
 
 To run it on Kubernetes (a local kind cluster for now), see
 [deploy/README.md](deploy/README.md).
-
-## Python
-
-`python/` binds the same API for Python, with results as pyarrow tables:
-
-```python
-from ember import Session
-from ember.functions import col, explode, lower, split
-
-ember = Session.builder.appName("WordCount").getOrCreate()
-words = ember.read.text(path).select(explode(split(lower(col("value")), r"\W+")).alias("word"))
-words.groupBy("word").count().orderBy(col("count").desc()).show()
-```
-
-See [python/README.md](python/README.md) for building it.
-`examples/word_count.py` and `examples/threshold_sweep.py` are the Python
-versions of the examples above, and `examples/check_python_examples.py`
-checks that they print the same results.
 
 ## Layout
 
