@@ -35,7 +35,6 @@ workers.
 - [docs/user-guide.md](docs/user-guide.md): writing Ember programs: reading
   and writing data, transformations, reuse and caching, and every config
   key.
-- [docs/ai-functions.md](docs/ai-functions.md): LLM calls per row.
 - [docs/comparison.md](docs/comparison.md): Ember and other data processing
   systems.
 
