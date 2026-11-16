@@ -1,5 +1,4 @@
-// Stoke.h in builds without stoke; StokeFunctions.cpp and StokeConnector.cpp
-// have it otherwise.
+// Stoke.h in builds without stoke; StokeConnector.cpp has it otherwise.
 
 #include "ember/Stoke.h"
 
@@ -10,8 +9,6 @@ namespace ember {
 bool hasStoke() {
   return false;
 }
-
-void registerStokeFunctions() {}
 
 void registerStokeConnector() {}
 

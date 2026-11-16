@@ -3,11 +3,8 @@
 
 load("//ember:options.bzl", "EMBER_STOKE", "OPTION_FLAGS")
 
-# The stoke functions and connector only with -c ember.stoke=true.
-STOKE_SRCS = [
-    "StokeConnector.cpp",
-    "StokeFunctions.cpp",
-]
+# The stoke connector only with -c ember.stoke=true.
+STOKE_SRCS = ["StokeConnector.cpp"]
 
 cxx_library(
     name = "common",

@@ -1,14 +1,15 @@
 // The "stoke" connector, in builds with stoke: stoke streams as tables that
 // Ember writes training batches into through Axiom's table write.
 //
-// A stream <stream> is the table <stream> (any schema) with two columns, of
-// which a write gives one: "batch", VARBINARY, each value one batch in
-// stoke's format (e.g. stoke_pack's output); or "tokens", ARRAY<INTEGER>,
-// which the sink packs (kStokePackBatch, kStokePackSequence): it
-// concatenates the tokens of its rows in order and cuts them into int32
-// batches of [B, T + 1] windows, as stoke_pack does for one row. A task's
-// last batch holds its whole windows left, and fewer tokens than a window
-// are dropped. Axiom plans the write as a Velox TableWriter in the
+// A stream <stream> is the table <stream> (any schema) with three columns,
+// of which a write gives one: "batch", VARBINARY, each value one batch in
+// stoke's format; or "tokens", ARRAY<INTEGER>, or "text", VARCHAR, which
+// the sink packs with stoke's Packer (stoke/format/Packer.h;
+// kStokePackBatch, kStokePackSequence): it concatenates the tokens of its
+// rows in order, a text's being its bytes and an end-of-text token, and
+// cuts them into int32 batches of [B, T + 1] windows. A task's last batch
+// holds its whole windows left, and fewer tokens than a window are
+// dropped. Axiom plans the write as a Velox TableWriter in the
 // fragment that produces the rows, so every task of that stage writes its
 // own rows: its StokeDataSink frames them into chunks of about
 // kStokeChunkBytes in the stream's Kiln bucket and puts each chunk into the
@@ -30,7 +31,8 @@
 //
 // Session properties of the connector (Axiom ConnectorProperties["stoke"]):
 // kStokeKilnMetadata (required), kStokeChunkBytes, kStokeSeal, and for
-// "tokens" kStokePackBatch and kStokePackSequence (both required).
+// "tokens" and "text" kStokePackBatch and kStokePackSequence (both
+// required).
 
 #pragma once
 
@@ -55,7 +57,8 @@ inline constexpr std::string_view kStokeChunkBytes = "chunk_bytes";
 /// Session property: "true" to seal the stream when the write commits.
 inline constexpr std::string_view kStokeSeal = "seal";
 
-/// Session properties of a write of "tokens": B and T of its batches.
+/// Session properties of a write of "tokens" or "text": B and T of its
+/// batches.
 inline constexpr std::string_view kStokePackBatch = "pack_batch";
 inline constexpr std::string_view kStokePackSequence = "pack_sequence";
 
@@ -83,7 +86,7 @@ class StokeInsertTableHandle
     return chunkBytes_;
   }
 
-  /// Set for a write of "tokens".
+  /// Set for a write of "tokens" or "text".
   const std::optional<StokePacking>& packing() const {
     return packing_;
   }

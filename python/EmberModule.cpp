@@ -433,7 +433,8 @@ PYBIND11_MODULE(_ember, m) {
             return writer.stream(name, seal, packing);
           },
           "Writes batches into a stoke stream; with batch and sequence, "
-          "packs a column of tokens into batches of [batch, sequence + 1].",
+          "packs a column of tokens, or of text (byte tokens), into "
+          "batches of [batch, sequence + 1].",
           py::arg("name"),
           py::arg("seal") = false,
           py::arg("batch") = py::none(),

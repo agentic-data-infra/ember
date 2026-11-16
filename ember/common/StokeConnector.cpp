@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cstring>
 #include <optional>
+#include <span>
+#include <vector>
 
 #include <folly/coro/BlockingWait.h>
 #include <folly/executors/GlobalExecutor.h>
@@ -19,6 +21,7 @@
 #include "stoke/client/Registry.h"
 #include "stoke/client/StreamClient.h"
 #include "stoke/format/Batch.h"
+#include "stoke/format/Packer.h"
 #include "velox/core/TableWriteTraits.h"
 #include "velox/vector/ComplexVector.h"
 #include "velox/vector/DecodedVector.h"
@@ -33,13 +36,15 @@ namespace {
 
 constexpr std::string_view kBatchColumn = "batch";
 constexpr std::string_view kTokensColumn = "tokens";
+constexpr std::string_view kTextColumn = "text";
 
 // Frames each batch straight into the chunk being written, through two
 // buffers of the process's Kiln write pool (shuffle::ChunkAppender), and
 // commits and puts the chunk once it has 'chunkBytes'. NULL rows are no
-// batch. With packing, it packs the "tokens" of its rows into a batch in a
-// buffer of the task's pool instead, and frames that once it is full; NULL
-// rows add no tokens, NULL tokens are 0. The stream is opened per sink:
+// batch. With packing, stoke's Packer packs the "tokens" of its rows, or
+// the byte tokens of their "text", into a batch in a buffer of the task's
+// pool instead, and it frames each batch once it is full; NULL rows add no
+// tokens, NULL tokens are 0. The stream is opened per sink:
 // a stream removed and created again under the same name gets a new bucket
 // and maybe other shards.
 class StokeDataSink : public velox::connector::DataSink {
@@ -57,11 +62,16 @@ class StokeDataSink : public velox::connector::DataSink {
             shuffle::kilnClient(handle.kilnMetadata())},
         pool_{shuffle::kilnWritePool(handle.kilnMetadata())} {
     if (packing_.has_value()) {
-      window_ = packing_->sequence + 1;
-      batch_ = velox::AlignedBuffer::allocate<uint8_t>(
-          stoke::format::kHeaderSize +
-              packing_->batch * window_ * sizeof(int32_t),
-          &pool);
+      const auto size =
+          stoke::format::Packer::bufferSize(packing_->batch, packing_->sequence);
+      batch_ = velox::AlignedBuffer::allocate<uint8_t>(size, &pool);
+      packer_.emplace(
+          packing_->batch,
+          packing_->sequence,
+          std::span<uint8_t>(batch_->asMutable<uint8_t>(), size),
+          [this](std::span<const uint8_t> batch) {
+            write(reinterpret_cast<const char*>(batch.data()), batch.size());
+          });
     }
   }
 
@@ -74,8 +84,8 @@ class StokeDataSink : public velox::connector::DataSink {
   }
 
   void appendData(velox::RowVectorPtr input) override {
-    if (packing_.has_value()) {
-      pack(*input->childAt(1));
+    if (packer_.has_value()) {
+      pack(*input->childAt(1), *input->childAt(2));
       return;
     }
     decoded_.decode(*input->childAt(0));
@@ -93,10 +103,9 @@ class StokeDataSink : public velox::connector::DataSink {
   // waits.
   bool finish() override {
     // The last batch: the whole windows left.
-    if (filled_ >= window_ && window_ > 0) {
-      writePacked(filled_ / window_);
+    if (packer_.has_value()) {
+      packer_->finish();
     }
-    filled_ = 0;
     put();
     if (!drain_.valid()) {
       drain_ =
@@ -146,54 +155,38 @@ class StokeDataSink : public velox::connector::DataSink {
     }
   }
 
-  // Appends the tokens of each row to 'batch_', and writes it when full.
-  void pack(const velox::BaseVector& tokens) {
+  // Packs each row's tokens, or else the byte tokens of its text.
+  void pack(const velox::BaseVector& tokens, const velox::BaseVector& text) {
     decoded_.decode(tokens);
+    text_.decode(text);
     const auto* arrays = decoded_.base()->as<velox::ArrayVector>();
     elements_.decode(*arrays->elements());
     const auto* flat = elements_.isIdentityMapping() && !elements_.mayHaveNulls()
         ? elements_.data<int32_t>()
         : nullptr;
-    auto* payload = reinterpret_cast<int32_t*>(
-        batch_->asMutable<uint8_t>() + stoke::format::kHeaderSize);
-    const auto capacity = packing_->batch * window_;
     for (velox::vector_size_t i = 0; i < decoded_.size(); ++i) {
       if (decoded_.isNullAt(i)) {
+        if (!text_.isNullAt(i)) {
+          const auto text = text_.valueAt<velox::StringView>(i);
+          packer_->addText({text.data(), text.size()});
+        }
         continue;
       }
       const auto row = decoded_.index(i);
-      uint64_t offset = arrays->offsetAt(row);
-      uint64_t size = arrays->sizeAt(row);
-      while (size > 0) {
-        const auto n = std::min(size, capacity - filled_);
-        if (flat != nullptr) {
-          std::memcpy(payload + filled_, flat + offset, n * sizeof(int32_t));
-        } else {
-          for (uint64_t k = 0; k < n; ++k) {
-            const auto element = static_cast<velox::vector_size_t>(offset + k);
-            payload[filled_ + k] = elements_.isNullAt(element)
-                ? 0
-                : elements_.valueAt<int32_t>(element);
-          }
-        }
-        filled_ += n;
-        offset += n;
-        size -= n;
-        if (filled_ == capacity) {
-          writePacked(packing_->batch);
-          filled_ = 0;
-        }
+      const auto offset = arrays->offsetAt(row);
+      const auto size = arrays->sizeAt(row);
+      if (flat != nullptr) {
+        packer_->add({flat + offset, static_cast<size_t>(size)});
+        continue;
       }
+      tokens_.resize(size);
+      for (velox::vector_size_t k = 0; k < size; ++k) {
+        tokens_[k] = elements_.isNullAt(offset + k)
+            ? 0
+            : elements_.valueAt<int32_t>(offset + k);
+      }
+      packer_->add(tokens_);
     }
-  }
-
-  // Writes the first 'rows' windows of 'batch_' as a batch.
-  void writePacked(uint64_t rows) {
-    const stoke::format::BatchHeader header{
-        .dtype = stoke::format::DType::kInt32, .shape = {rows, window_}};
-    const auto size = stoke::format::encodedSize(header);
-    stoke::format::encodeHeader(header, {batch_->asMutable<uint8_t>(), size});
-    write(batch_->as<char>(), size);
   }
 
   void put() {
@@ -217,11 +210,12 @@ class StokeDataSink : public velox::connector::DataSink {
   const std::shared_ptr<kiln::client::BufferPool> pool_;
   velox::DecodedVector decoded_;
   velox::DecodedVector elements_;
-  // With packing: the batch being packed, its tokens so far and the tokens
-  // in a window.
+  velox::DecodedVector text_;
+  // With packing: the buffer of the batch being packed, its packer, and a
+  // row's tokens when they are not flat.
   velox::BufferPtr batch_;
-  uint64_t filled_{0};
-  uint64_t window_{0};
+  std::optional<stoke::format::Packer> packer_;
+  std::vector<int32_t> tokens_;
   // The chunk being written, if any, and its bytes so far.
   std::unique_ptr<kiln::client::ChunkWriter> writer_;
   std::optional<shuffle::ChunkAppender> appender_;
@@ -277,8 +271,12 @@ class StokeTable : public axiom_connector::Table {
       : Table(
             std::move(name),
             makeColumns(velox::ROW(
-                {std::string(kBatchColumn), std::string(kTokensColumn)},
-                {velox::VARBINARY(), velox::ARRAY(velox::INTEGER())}))),
+                {std::string(kBatchColumn),
+                 std::string(kTokensColumn),
+                 std::string(kTextColumn)},
+                {velox::VARBINARY(),
+                 velox::ARRAY(velox::INTEGER()),
+                 velox::VARCHAR()}))),
         layout_{this, connector, allColumns()},
         layouts_{&layout_} {}
 
@@ -307,7 +305,7 @@ std::string requiredProperty(
   return std::string(*value);
 }
 
-// B and T of a write of "tokens", if set.
+// B and T of a write of "tokens" or "text", if set.
 std::optional<StokePacking> packing(
     const axiom_connector::ConnectorSessionPtr& session) {
   auto batch = session ? session->property(kStokePackBatch) : std::nullopt;
@@ -413,10 +411,11 @@ std::unique_ptr<velox::connector::DataSink> StokeConnector::createDataSink(
     velox::connector::ConnectorQueryCtx* connectorQueryCtx,
     velox::connector::CommitStrategy /*commitStrategy*/) {
   VELOX_USER_CHECK(
-      inputType->size() == 2 && inputType->childAt(0)->isVarbinary() &&
-          *inputType->childAt(1) == *velox::ARRAY(velox::INTEGER()),
-      "A stoke stream takes batches (VARBINARY) or tokens (ARRAY<INTEGER>), "
-      "not {}",
+      inputType->size() == 3 && inputType->childAt(0)->isVarbinary() &&
+          *inputType->childAt(1) == *velox::ARRAY(velox::INTEGER()) &&
+          inputType->childAt(2)->isVarchar(),
+      "A stoke stream takes batches (VARBINARY), tokens (ARRAY<INTEGER>) or "
+      "text (VARCHAR), not {}",
       inputType->toString());
   return std::make_unique<StokeDataSink>(
       *handle->asChecked<StokeInsertTableHandle>(),
@@ -498,6 +497,10 @@ std::vector<std::string> StokeConnectorMetadata::listTableNames(
     const axiom_connector::ConnectorSessionPtr& /*session*/,
     const std::string& /*schemaName*/) {
   VELOX_UNSUPPORTED("stoke streams are listed by stoke ls");
+}
+
+bool hasStoke() {
+  return true;
 }
 
 void registerStokeConnector() {

@@ -99,10 +99,12 @@ class StokeConnectorTest : public velox::exec::test::OperatorTestBase {
                             : std::nullopt);
     }
     auto input = makeRowVector(
-        {"batch", "tokens"},
+        {"batch", "tokens", "text"},
         {makeNullableFlatVector<velox::StringView>(values, velox::VARBINARY()),
          velox::BaseVector::createNullConstant(
-             velox::ARRAY(velox::INTEGER()), values.size(), pool())});
+             velox::ARRAY(velox::INTEGER()), values.size(), pool()),
+         velox::BaseVector::createNullConstant(
+             velox::VARCHAR(), values.size(), pool())});
     auto handle = std::make_shared<velox::core::InsertTableHandle>(
         std::string(kStokeConnectorId),
         std::make_shared<StokeInsertTableHandle>(
@@ -112,7 +114,7 @@ class StokeConnectorTest : public velox::exec::test::OperatorTestBase {
     auto plan = std::make_shared<velox::core::TableWriteNode>(
         "write",
         asRowType(input->type()),
-        std::vector<std::string>{"batch", "tokens"},
+        std::vector<std::string>{"batch", "tokens", "text"},
         std::nullopt,
         handle,
         /*hasPartitioningScheme=*/false,
@@ -231,7 +233,7 @@ TEST_F(StokeConnectorTest, beginsWritesIntoOpenStreams) {
   auto table = metadata.findTable({"default", std::string(kStream)});
   EXPECT_EQ(
       table->type()->toString(),
-      "ROW<batch:VARBINARY,tokens:ARRAY<INTEGER>>");
+      "ROW<batch:VARBINARY,tokens:ARRAY<INTEGER>,text:VARCHAR>");
 
   auto handle = metadata.beginWrite(
       session({{std::string(kStokeKilnMetadata), this->metadata()},
