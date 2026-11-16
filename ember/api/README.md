@@ -40,7 +40,7 @@ not move work across it, so a sweep of filters over a cached projection
 computes the projection once. Cached results live as long as the session (or
 until `unpersist()`), and are recomputed if an executor loses them.
 
-Known gaps: aggregates use Presto semantics (the `sparksql` ones are registered
-with the `ember_` prefix but not yet mapped); parquet files are one split per
+Known gaps: aggregates use Presto semantics (the ones of Velox's other function
+package are registered with the `ember_` prefix but not yet mapped); parquet files are one split per
 file; stages run one after another; driver and workers share one process
 until the RPC step.
