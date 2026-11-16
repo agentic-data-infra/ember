@@ -539,6 +539,36 @@ TEST_F(AiGenerateTest, stagesAfterFailedRowsAreNotKept) {
   fs::remove_all(dir);
 }
 
+// A filter on an answer runs with the call, not copied into the scan, so each
+// row calls the model once; a cheap condition still goes into the scan, so
+// its rows never call it. Parquet scans take filters; text scans do not.
+TEST_F(AiGenerateTest, filterOnAnswerCallsOncePerRow) {
+  const std::string kept = R"(json:{"keep": true, "label": "kept once"})";
+  const std::string dropped = R"(json:{"keep": false, "label": "dropped once"})";
+  const std::string skipped = "skipped before the model";
+  const auto dir = writePrompts("filter", {kept, skipped}, {dropped});
+  const auto parquet = dir.substr(0, dir.size() - 1) + "_parquet/";
+  ember_->read().text(dir).write().parquet(parquet);
+  auto rows = ember_->read()
+                  .parquet(parquet)
+                  .withColumn(
+                      "j",
+                      ai::generate(
+                          col("value"),
+                          "mock",
+                          ROW({"keep", "label"}, {BOOLEAN(), VARCHAR()})))
+                  .filter(col("value") != skipped && col("j").getField("keep"))
+                  .select(col("j").getField("label").as("label"))
+                  .collect();
+  ASSERT_EQ(rows.size(), 1);
+  EXPECT_EQ(rows[0].getString(0), "kept once");
+  EXPECT_EQ(server_->requests(kept), 1);
+  EXPECT_EQ(server_->requests(dropped), 1);
+  EXPECT_EQ(server_->requests(skipped), 0);
+  fs::remove_all(parquet);
+  fs::remove_all(dir);
+}
+
 // The difference of two stats snapshots, without the zeros.
 std::map<std::string, int64_t> difference(
     const std::map<std::string, int64_t>& before,

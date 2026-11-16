@@ -13,17 +13,21 @@
 // the task. A null prompt gives a null row. A batch's distinct prompts go out
 // concurrently, and the driver thread waits for their answers.
 //
-// Deterministic, so stages that call it get stage keys and are reused like
-// any other: a rerun of an unchanged program makes no calls. The keys include
-// the endpoint's kind, url and model (AiEndpoint.h). Rows with a status count
-// in the runtime stat kFailedRowsStat; a stage with any is not kept for reuse,
-// so a rerun asks again.
+// Deterministic to Velox, so stages that call it get stage keys and are
+// reused like any other: a rerun of an unchanged program makes no calls. The
+// keys include the endpoint's kind, url and model (AiEndpoint.h). Rows with a
+// status count in the runtime stat kFailedRowsStat; a stage with any is not
+// kept for reuse, so a rerun asks again. Models do not keep the promise of
+// determinism: a recomputed lost map output may get different answers than
+// the ones downstream already read.
+//
+// Nondeterministic to Axiom's optimizer, so the call stays where the program
+// puts it and runs once per row: a filter on its answer is not pushed into a
+// scan with the call copied into it. Cheaper conditions still are.
 //
 // Runtime stats of the operator that evaluates it (kStats), which tasks
 // report to the driver: calls (distinct prompts sent), retries, failed rows,
-// and input and output tokens as the endpoint reports them. Models do not keep the promise of determinism: a
-// recomputed lost map output may get different answers than the ones
-// downstream already read.
+// and input and output tokens as the endpoint reports them.
 
 #pragma once
 

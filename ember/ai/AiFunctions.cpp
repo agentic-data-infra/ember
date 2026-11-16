@@ -8,6 +8,7 @@
 #include <folly/coro/BlockingWait.h>
 #include <folly/coro/Collect.h>
 
+#include "axiom/optimizer/FunctionRegistry.h"
 #include "ember/ai/AiBackend.h"
 #include "ember/ai/OutputSchema.h"
 #include "velox/common/base/RuntimeMetrics.h"
@@ -22,6 +23,7 @@ namespace ember::ai {
 namespace velox = facebook::velox;
 namespace core = facebook::velox::core;
 namespace exec = facebook::velox::exec;
+namespace optimizer = facebook::axiom::optimizer;
 
 namespace {
 
@@ -226,6 +228,16 @@ void registerAiFunctions() {
             .deterministic(true)
             .defaultNullBehavior(false)
             .build());
+    // Velox sees a deterministic function, so stages that call it are
+    // reused. Axiom's optimizer sees a nondeterministic one, so it neither
+    // moves nor copies the call: inlined into a filter it pushes into a scan,
+    // the call would run twice per row, and the answers could disagree.
+    auto metadata = std::make_unique<optimizer::FunctionMetadata>();
+    metadata->functionSet = optimizer::FunctionSet(
+        optimizer::FunctionSet::kNonDeterministic |
+        optimizer::FunctionSet::kNonDefaultNullBehavior);
+    VELOX_CHECK(optimizer::FunctionRegistry::instance()->registerFunction(
+        kGenerateFunction, std::move(metadata)));
   });
 }
 
