@@ -33,10 +33,6 @@ counted in the stage statistics.
 `getField` and `when`/`otherwise` are general: they are useful without any
 LLM and map to existing Velox expressions (field access and `switch`).
 
-Not in the first version: convenience functions such as `classify`,
-`score` or `if_`. Each is `generate` with a fixed prompt wrapper and output
-schema, so programs can write them as a few lines of their own.
-
 ### Example
 
 ```python
@@ -68,23 +64,43 @@ summary = (judged
     .orderBy(col("avg_sentiment").desc()))
 ```
 
-Routing rows to different models, as in BigQuery's log triage example:
+BigQuery's log triage example with the same API: an LLM filter, typed
+labels, and routing rows to different models:
 
 ```python
 from ember.functions import when
 
-def ask(text, endpoint):
-    return ai.generate(concat(lit(text), col("log_entry")),
-                       endpoint=endpoint).getField("result")
+def prompt(text):
+    return concat(lit(text), col("log_entry"))
 
-report = triaged.select("service", "severity",
-    when(col("severity") >= 8,
-         ask("Plain text, <=14 words, root cause + fix: ", "carbon"))
-    .otherwise(ask("Plain text, <=10 words, triage summary: ", "hydrogen"))
-    .alias("diagnosis"))
+def ask(text, endpoint):
+    return ai.generate(prompt(text), endpoint=endpoint).getField("result")
+
+triaged = (logs
+    .filter(ai.generate(
+        prompt("Is this an error or warning, not routine INFO or cron? "),
+        endpoint="hydrogen", output={"relevant": "boolean"})
+        .getField("relevant"))
+    .withColumn("t", ai.generate(
+        prompt("Domain (one of Database, Auth / TLS, Rate Limit, Compute, "
+               "Streaming) and customer-facing outage blast radius 1-10: "),
+        endpoint="hydrogen",
+        output={"domain": "varchar", "severity": "double"}))
+    .select("service", "log_entry",
+            col("t").getField("domain").alias("domain"),
+            col("t").getField("severity").alias("severity")))
+
+report = (triaged
+    .select("service", "domain", "severity",
+        when(col("severity") >= 8,
+             ask("Plain text, <=14 words, root cause + fix: ", "carbon"))
+        .otherwise(ask("Plain text, <=10 words, triage summary: ", "hydrogen"))
+        .alias("diagnosis"))
+    .orderBy(col("severity").desc()))
 ```
 
-Only rows with `severity >= 8` reach `carbon`; the rest go to `hydrogen`.
+A row whose filter call fails has a null `relevant` and is dropped. Only
+rows with `severity >= 8` reach `carbon`; the rest go to `hydrogen`.
 
 ## Why a function, not an operator
 
@@ -104,10 +120,16 @@ Axiom plans it as an ordinary function call, so the optimizer needs no
 changes. A dedicated operator would have to pull the calls out of their
 expressions and reimplement the conditional masking.
 
-The return type must be known when the plan is built. The `output` schema
-is a constant argument whose type is the result's `ROW` type, so the
-function's signature binds its return type to that argument. Step 2 settles
-the details against Velox's signatures.
+The return type must be known when the plan is built. The API turns the
+`output` schema into the result's `ROW` type (the schema's fields plus
+`status`) and passes it as a constant argument: a typed null of that type.
+The function is registered with a type variable, roughly
+`ai_generate(VARCHAR prompt, VARCHAR endpoint, T output) -> T`, so Velox's
+signature binding (and Axiom's type resolution, which uses the same
+signatures) fixes the return type from that argument's type. Without
+`output`, the argument is a null of `ROW(result VARCHAR, status VARCHAR)`.
+At run time the function derives the JSON schema it sends from the same
+type, and parses each answer into its fields.
 
 Rows vs batches: a vector function receives a batch of rows (about 1000).
 For `ai.generate` that is a batch of independent prompts, sent as
@@ -142,8 +164,8 @@ logs and stage keys.
   `HttpBackend` is the first implementation.
 - **HttpBackend.** OpenAI-compatible chat completions over libcurl (a new
   dependency) on folly futures, driven by Ember's existing IO executor (no
-  new background threads). Structured output through the request's JSON
-  schema. Retries with backoff on 429 and 5xx. A per-request timeout below
+  new background threads). Structured output: when a call has an `output`
+  schema, the request carries it as a JSON schema (`response_format`). Retries with backoff on 429 and 5xx. A per-request timeout below
   `ember.cluster.heartbeat_timeout_ms`, so a slow model never looks like a
   hung worker. `max_concurrency` and `qps` limit each process.
 - **Per batch.** The function takes the rows Velox selects, drops duplicate
@@ -202,7 +224,8 @@ not HTTP-specific, endpoints have a `kind`, and inputs are typed columns
 | 4 | Runtime statistics. |
 | 5 | A manual check against a real endpoint. velox-dev has no GPU, so: llama.cpp's `llama-server` on CPU (OpenAI-compatible, JSON-schema output) with a small instruct model such as Qwen2.5-0.5B or 1.5B (GGUF), under a memory cap. |
 
-Left out for now: convenience functions (`classify`, `score`, `if_`),
-adapters other than OpenAI-compatible, rate limits shared across the job,
+Left out for now: convenience functions such as `classify`, `score` or
+`if_` (thin helpers over `generate` with a fixed prompt and output schema,
+easy to add later), adapters other than OpenAI-compatible, rate limits shared across the job,
 Python callbacks for prompts or parsing, embeddings, multimodal inputs,
 providers' batch APIs, and the GPU steps above.
