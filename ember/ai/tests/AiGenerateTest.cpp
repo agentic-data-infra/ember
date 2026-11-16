@@ -1,7 +1,11 @@
 // ai::generate through the Dataframe API, against a mock OpenAI-compatible
 // server.
 
+#include <unistd.h>
+
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 
 #include <fmt/format.h>
@@ -15,6 +19,8 @@
 
 namespace ember {
 namespace {
+
+namespace fs = std::filesystem;
 
 using namespace ember::functions;
 using ai::test::MockChatServer;
@@ -421,6 +427,86 @@ TEST_F(AiGenerateTest, logTriage) {
   EXPECT_EQ(server_->modelOf(std::string(kSummary) + oom), "hydrogen-model");
   EXPECT_EQ(
       server_->requests(std::string(kTriage) + "INFO cron heartbeat ok"), 0);
+}
+
+
+// ai_generate is deterministic: stages that call it are reused. The prompts
+// come from two files, so the AI call runs in a map stage, whose output the
+// session keeps.
+TEST_F(AiGenerateTest, rerunReusesTheAiStage) {
+  const auto dir = fs::temp_directory_path() /
+      fmt::format("ai_generate_test_{}", ::getpid());
+  fs::create_directories(dir);
+  std::ofstream(dir / "part-0.txt") << "again 1\nagain 2\n";
+  std::ofstream(dir / "part-1.txt") << "again 1\n";
+  auto program = [&] {
+    return ember_->read()
+        .text(dir.string() + "/")
+        .withColumn(
+            "answer", ai::generate(col("value"), "mock").getField("result"))
+        .groupBy("answer")
+        .count()
+        .orderBy("answer");
+  };
+  auto first = program().collect();
+  ASSERT_EQ(first.size(), 2);
+  EXPECT_EQ(first[0].getString(0), "echo: again 1");
+  EXPECT_EQ(first[0].get<int64_t>(1), 2);
+  const auto calls = server_->requests("again 1");
+  EXPECT_GE(calls, 1);
+
+  auto second = program().collect();
+  EXPECT_EQ(second, first);
+  EXPECT_EQ(server_->requests("again 1"), calls);
+  fs::remove_all(dir);
+}
+
+// The stage keys of a program that asks the endpoint "mock" in sessions with
+// these settings for it.
+std::vector<std::string> stageKeys(
+    const std::map<std::string, std::string>& endpoint) {
+  auto builder = Session::builder().appName("AiStageKeyTest").master("local[2]");
+  for (const auto& [field, value] : endpoint) {
+    builder.config("ember.ai.endpoint.mock." + field, value);
+  }
+  auto session = builder.getOrCreate();
+  const auto explain =
+      session
+          .createDataframe(ROW({"p"}, {VARCHAR()}), {{Variant("a")}})
+          .withColumn("answer", ai::generate(col("p"), "mock").getField("result"))
+          .groupBy("answer")
+          .count()
+          .explainString();
+  session.stop();
+  std::vector<std::string> keys;
+  for (auto pos = explain.find("[key "); pos != std::string::npos;
+       pos = explain.find("[key ", pos + 1)) {
+    keys.push_back(explain.substr(pos, explain.find(']', pos) - pos));
+  }
+  EXPECT_FALSE(keys.empty()) << explain;
+  return keys;
+}
+
+TEST(AiStageKeyTest, keysFollowTheModel) {
+  const std::map<std::string, std::string> base{
+      {"url", "http://localhost:1/v1"}, {"model", "small"}};
+  const auto keys = stageKeys(base);
+  EXPECT_EQ(stageKeys(base), keys);
+
+  // Answers may change with the url, model or kind.
+  auto bigger = base;
+  bigger["model"] = "big";
+  EXPECT_NE(stageKeys(bigger), keys);
+  auto moved = base;
+  moved["url"] = "http://localhost:2/v1";
+  EXPECT_NE(stageKeys(moved), keys);
+
+  // They do not change with the API key, concurrency or qps.
+  auto tuned = base;
+  tuned["api_key_env"] = "SOME_KEY";
+  tuned["max_concurrency"] = "4";
+  tuned["qps"] = "10";
+  EXPECT_EQ(stageKeys(tuned), keys);
 }
 
 } // namespace

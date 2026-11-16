@@ -8,6 +8,12 @@ namespace ember::ai {
 
 namespace velox = facebook::velox;
 
+bool changesAnswers(std::string_view key) {
+  return key.starts_with(kEndpointPrefix) &&
+      (key.ends_with(".kind") || key.ends_with(".url") ||
+       key.ends_with(".model"));
+}
+
 AiEndpoint AiEndpoint::fromConfig(
     const std::string& name,
     const velox::core::QueryConfig& config) {

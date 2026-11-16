@@ -1,8 +1,8 @@
 # AI functions
 
-Design for calling LLMs from Dataframe programs. Status: steps 1 and 2 of
+Design for calling LLMs from Dataframe programs. Status: steps 1 to 3 of
 the plan below are implemented (`ai.generate` with and without `output`,
-`getField`, `when`/`otherwise`; see
+`getField`, `when`/`otherwise`, stage reuse; see
 [../ember/ai/README.md](../ember/ai/README.md)); the rest is proposed.
 
 Agents in the discovery loop filter, label and score large experiment
@@ -14,8 +14,8 @@ Role models: the API follows BigQuery's AI functions (`AI.GENERATE` and
 friends), which are functions inside SQL expressions, not separate
 operators. From Ray Data's LLM processors we take three lessons: self-hosted
 models (vLLM, SGLang) belong behind an endpoint, a failed row does not fail
-the job, and a rerun resumes where the last one stopped (here through the
-response cache).
+the job, and a rerun does not pay again for work that is done (here through
+stage reuse).
 
 ## API
 
@@ -176,27 +176,42 @@ logs and stage keys.
   attempt times out after 120 s; worker heartbeats run on their own thread,
   so a slow model never makes a worker look lost. `max_concurrency` and `qps` limit each process.
 - **Per batch.** The function takes the rows Velox selects, drops duplicate
-  prompts, looks them up in the cache, sends the misses concurrently, waits,
-  and fills the result vector.
+  prompts, sends the rest concurrently, waits, and fills the result vector.
 
-## Cache and reuse
+## Reuse
 
-Responses are cached by a hash of (model, parameters, output schema,
-prompt). The cache lives in Kiln when the session has Kiln metadata
-(`ember.kiln.metadata`), shared by workers and sessions, and in
-`ember.local.dir` otherwise. Only successful answers are cached.
+`ai_generate` is marked deterministic, so stages that call it get stage keys
+([../ember/driver/StageKey.h](../ember/driver/StageKey.h)) and are reused like
+any other stage: through `ember.reuse.outputs` within a session, `cache()`,
+and the Kiln stage memo (`ember.reuse.kiln`) across sessions. A rerun of an
+unchanged program makes no calls. The endpoint's `kind`, `url` and `model`
+go into the stage keys like other config that changes results, so a new
+model invalidates reuse; `api_key_env`, `max_concurrency` and `qps` do not.
 
-The first answer for a prompt becomes the answer. That makes task retries
-and reruns consistent and free: a rerun pays only for prompts that never got
-an answer, and an agent that adds rows pays only for the new ones. It also
-lets `ai.generate` be marked deterministic, so stage keys
-([../ember/driver/StageKey.h](../ember/driver/StageKey.h)) and stage reuse
-work as for any other function. The endpoint's model and parameters go into
-the stage keys like other config that changes results.
+Models do not keep the promise of determinism. That leaves two open
+problems:
+
+- **Lost map outputs.** When a worker dies after some consumers have read a
+  map output of an AI stage, the recomputed task may get different answers,
+  so downstream can see a mix of old and new answers, e.g. a row counted
+  under two labels. It takes a lost worker in the middle of a job. A fix
+  would treat such stages as indeterminate and rerun all tasks of their
+  consumers when one of their outputs is lost.
+- **Reused failures.** A reused stage keeps its failed rows: a rerun of the
+  same program after an outage returns the same statuses instead of
+  retrying. Changing the program or the endpoint's config runs it again. A
+  fix would not keep stages that had failed rows.
+
+Dropped: a cache of answers per prompt in Kiln, which would make answers
+consistent across task retries and let an agent that adds rows pay only for
+the new ones. Its per-row writes from a large cluster would contend on Kiln
+(many compare-and-swaps on the same refs, one winner each). An answer cache
+inside each process was dropped too: it would add a new kind of worker
+memory for a per-process saving, where stage reuse needs no new mechanism.
 
 ## Statistics
 
-Calls, cache hits, failures, and input and output tokens are Velox runtime
+Calls, failures, and input and output tokens are Velox runtime
 stats of the operator that evaluates the expression. They show up in the
 stage statistics and in Python, so an agent can read what an experiment
 cost.
@@ -227,7 +242,7 @@ not HTTP-specific, endpoints have a `kind`, and inputs are typed columns
 |---|---|
 | 1 | Endpoint config, `AiBackend`, `HttpBackend`, `ai.generate` without `output`, `getField`, C++ and Python bindings. Tests against a mock OpenAI-compatible server: a call, a filter, nulls, retry after 429, a failed row. |
 | 2 | `output` schemas (typed `ROW` results), `when`/`otherwise`; tests that a branch sees only its rows and that answers parse into typed fields. |
-| 3 | Response cache (Kiln, local fallback); mark `ai.generate` deterministic; tests for reruns and added rows. |
+| 3 | Mark `ai.generate` deterministic; the endpoint's `kind`, `url` and `model` in stage keys; tests that a rerun makes no calls and that a new model changes the keys. |
 | 4 | Runtime statistics. |
 | 5 | A manual check against a real endpoint. velox-dev has no GPU, so: llama.cpp's `llama-server` on CPU (OpenAI-compatible, JSON-schema output) with a small instruct model such as Qwen2.5-0.5B or 1.5B (GGUF), under a memory cap. |
 

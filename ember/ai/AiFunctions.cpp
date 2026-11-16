@@ -199,7 +199,7 @@ void registerAiFunctions() {
              .build()},
         std::make_unique<GenerateFunction>(),
         exec::VectorFunctionMetadataBuilder()
-            .deterministic(false)
+            .deterministic(true)
             .defaultNullBehavior(false)
             .build());
   });

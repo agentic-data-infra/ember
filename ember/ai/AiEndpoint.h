@@ -14,17 +14,24 @@
 //
 // Plans carry only the name; every process resolves it from the session
 // config its tasks run with, and reads the API key from its own environment.
+// Stage keys include kind, url and model (changesAnswers), so changing the
+// model invalidates reuse of stages that call it.
 
 #pragma once
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 #include "velox/core/QueryConfig.h"
 
 namespace ember::ai {
 
 inline constexpr const char* kEndpointPrefix = "ember.ai.endpoint.";
+
+/// Whether session config 'key' can change an endpoint's answers: its kind,
+/// url or model. The API key, concurrency and qps cannot.
+bool changesAnswers(std::string_view key);
 
 struct AiEndpoint {
   std::string name;
