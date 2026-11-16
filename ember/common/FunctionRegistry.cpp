@@ -4,7 +4,6 @@
 
 #include <folly/container/F14Set.h>
 
-#include "ember/Stoke.h"
 
 #include "axiom/optimizer/FunctionRegistry.h"
 #include "velox/functions/FunctionRegistry.h"
@@ -67,7 +66,6 @@ void registerFunctions() {
     velox::functions::aggregate::sparksql::registerAggregateFunctions(
         kFunctionPrefix);
     facebook::axiom::optimizer::FunctionRegistry::registerPrestoFunctions();
-    registerStokeFunctions();
   });
 }
 

@@ -102,9 +102,10 @@ int64_t DataframeWriter::stream(
   if (packing.has_value()) {
     VELOX_USER_CHECK(
         schema->size() == 1 &&
-            *schema->childAt(0) == *velox::ARRAY(velox::INTEGER()),
+            (*schema->childAt(0) == *velox::ARRAY(velox::INTEGER()) ||
+             schema->childAt(0)->isVarchar()),
         "Packing into a stoke stream takes one ARRAY<INTEGER> column of "
-        "tokens, not {}",
+        "tokens or one VARCHAR column of text, not {}",
         schema->toString());
   } else {
     VELOX_USER_CHECK(
@@ -135,9 +136,10 @@ int64_t DataframeWriter::stream(
     properties[std::string(kStokePackSequence)] =
         std::to_string(packing->sequence);
   }
-  auto plan = df_.then([name,
-                        column = schema->nameOf(0),
-                        target = packing.has_value() ? "tokens" : "batch"](
+  const auto* target = !packing.has_value() ? "batch"
+      : schema->childAt(0)->isVarchar()     ? "text"
+                                            : "tokens";
+  auto plan = df_.then([name, column = schema->nameOf(0), target](
                            auto& builder, const auto& /*context*/) {
                    builder.tableWrite(
                        std::string(kStokeConnectorId),
