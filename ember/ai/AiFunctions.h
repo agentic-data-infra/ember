@@ -15,15 +15,21 @@
 //
 // Deterministic, so stages that call it get stage keys and are reused like
 // any other: a rerun of an unchanged program makes no calls. The keys include
-// the endpoint's kind, url and model (AiEndpoint.h). Models do not keep the
-// promise: a recomputed lost map output may get different answers than the
-// ones downstream already read, and a reused stage keeps its failed rows.
+// the endpoint's kind, url and model (AiEndpoint.h). Rows with a status count
+// in the runtime stat kFailedRowsStat; a stage with any is not kept for reuse,
+// so a rerun asks again. Models do not keep the promise of determinism: a
+// recomputed lost map output may get different answers than the ones
+// downstream already read.
 
 #pragma once
 
 namespace ember::ai {
 
 inline constexpr const char* kGenerateFunction = "ai_generate";
+
+/// Runtime stat of the operator that evaluates ai_generate: rows with a
+/// non-empty status.
+inline constexpr const char* kFailedRowsStat = "aiFailedRows";
 
 /// Registers the AI functions. Safe to call more than once.
 void registerAiFunctions();

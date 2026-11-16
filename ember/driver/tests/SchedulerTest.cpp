@@ -460,6 +460,7 @@ TEST_F(SchedulerTest, taskMessagesRoundTrip) {
   result.mapStatus = shuffle::MapStatus{"executor-1", {{10, 0, 7}, {1, 2, 0}}};
   result.resultPages = {"page one", std::string("\0binary\0", 8)};
   result.outputRows = 42;
+  result.failedRows = 3;
   auto resultCopy = TaskResult::deserialize(result.serialize());
   EXPECT_EQ(resultCopy.taskId, result.taskId);
   EXPECT_EQ(resultCopy.state, TaskState::kFailed);
@@ -469,6 +470,7 @@ TEST_F(SchedulerTest, taskMessagesRoundTrip) {
   EXPECT_EQ(resultCopy.mapStatus->segments, result.mapStatus->segments);
   EXPECT_EQ(resultCopy.resultPages, result.resultPages);
   EXPECT_EQ(resultCopy.outputRows, 42);
+  EXPECT_EQ(resultCopy.failedRows, 3);
 }
 
 TEST_F(SchedulerTest, matchesLocalRunner) {

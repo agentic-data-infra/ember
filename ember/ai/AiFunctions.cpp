@@ -9,6 +9,7 @@
 
 #include "ember/ai/AiBackend.h"
 #include "ember/ai/OutputSchema.h"
+#include "velox/common/base/RuntimeMetrics.h"
 #include "velox/core/Expressions.h"
 #include "velox/expression/DecodedArgs.h"
 #include "velox/expression/Expr.h"
@@ -107,6 +108,14 @@ class GenerateFunction : public exec::VectorFunction {
       fields.push_back(texts);
     } else {
       fields = parse(texts, schema, answered, *statuses, context)->children();
+    }
+    int64_t failed = 0;
+    rows.applyToSelected([&](velox::vector_size_t row) {
+      failed += statuses->valueAt(row).size() > 0;
+    });
+    if (failed > 0) {
+      velox::addThreadLocalRuntimeStat(
+          kFailedRowsStat, velox::RuntimeCounter(failed));
     }
     fields.push_back(statuses);
     auto output = std::make_shared<velox::RowVector>(

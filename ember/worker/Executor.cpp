@@ -9,6 +9,7 @@
 #include "ember/OutputConnector.h"
 #include "ember/RowPages.h"
 #include "ember/Runtime.h"
+#include "ember/ai/AiFunctions.h"
 #include "ember/shuffle/KilnShuffle.h"
 #include "ember/shuffle/ShuffleWrite.h"
 #include "ember/worker/TaskDescription.h"
@@ -240,6 +241,10 @@ std::string Executor::runTask(const std::string& bytes) {
       int64_t spilledBytes = 0;
       for (const auto& [id, stats] : exec::toPlanStats(task->taskStats())) {
         spilledBytes += stats.spilledBytes;
+        if (auto it = stats.customStats.find(ai::kFailedRowsStat);
+            it != stats.customStats.end()) {
+          result.failedRows += it->second.sum;
+        }
       }
       if (spilledBytes > 0) {
         LOG(INFO) << "Task " << result.taskId << " spilled " << spilledBytes
