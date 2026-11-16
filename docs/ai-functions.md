@@ -177,6 +177,13 @@ logs and stage keys.
   so a slow model never makes a worker look lost. `max_concurrency` and `qps` limit each process.
 - **Per batch.** The function takes the rows Velox selects, drops duplicate
   prompts, sends the rest concurrently, waits, and fills the result vector.
+- **Planning.** Axiom's optimizer treats `ai_generate` as nondeterministic
+  (its own function metadata), while Velox treats it as deterministic (see
+  Reuse). So the optimizer neither moves nor copies the call. Otherwise it
+  would push a filter on an answer into the table scan with the call copied
+  into it, and the projection above would call the model again: two calls
+  per row, whose answers could disagree. Cheaper conditions of the same
+  filter still go into the scan, so their rows never reach the model.
 
 ## Reuse
 
