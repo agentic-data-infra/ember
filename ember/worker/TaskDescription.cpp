@@ -97,6 +97,7 @@ std::string TaskResult::serialize() const {
   obj["numPages"] = resultPages.size();
   obj["outputRows"] = outputRows;
   obj["wallMicros"] = wallMicros;
+  obj["failedRows"] = failedRows;
   auto header = folly::toJson(obj);
 
   std::string out;
@@ -147,6 +148,7 @@ TaskResult TaskResult::deserialize(const std::string& bytes) {
   }
   result.outputRows = obj["outputRows"].asInt();
   result.wallMicros = obj["wallMicros"].asInt();
+  result.failedRows = obj["failedRows"].asInt();
   return result;
 }
 

@@ -188,8 +188,16 @@ unchanged program makes no calls. The endpoint's `kind`, `url` and `model`
 go into the stage keys like other config that changes results, so a new
 model invalidates reuse; `api_key_env`, `max_concurrency` and `qps` do not.
 
-Models do not keep the promise of determinism. That leaves two open
-problems:
+Failed rows are not reused. `ai_generate` counts the rows it gives a status
+(a failed call, or an answer that does not fit the schema) in the runtime
+stat `aiFailedRows`; each task reports the sum in its result. The driver does
+not keep the output of a stage with any failed rows, nor of the stages that
+read it, so a rerun of the same program asks the model again, e.g. after an
+outage. The current job still uses the output. An explicit `cache()` keeps
+its result either way, until `unpersist()`.
+
+Models do not keep the promise of determinism. That leaves one open
+problem:
 
 - **Lost map outputs.** When a worker dies after some consumers have read a
   map output of an AI stage, the recomputed task may get different answers,
@@ -197,10 +205,6 @@ problems:
   under two labels. It takes a lost worker in the middle of a job. A fix
   would treat such stages as indeterminate and rerun all tasks of their
   consumers when one of their outputs is lost.
-- **Reused failures.** A reused stage keeps its failed rows: a rerun of the
-  same program after an outage returns the same statuses instead of
-  retrying. Changing the program or the endpoint's config runs it again. A
-  fix would not keep stages that had failed rows.
 
 Dropped: a cache of answers per prompt in Kiln, which would make answers
 consistent across task retries and let an agent that adds rows pay only for
@@ -211,8 +215,9 @@ memory for a per-process saving, where stage reuse needs no new mechanism.
 
 ## Statistics
 
-Calls, failures, and input and output tokens are Velox runtime
-stats of the operator that evaluates the expression. They show up in the
+Calls, failures (`aiFailedRows`, there already for reuse), and input and
+output tokens are Velox runtime stats of the operator that evaluates the
+expression. They show up in the
 stage statistics and in Python, so an agent can read what an experiment
 cost.
 
@@ -242,7 +247,7 @@ not HTTP-specific, endpoints have a `kind`, and inputs are typed columns
 |---|---|
 | 1 | Endpoint config, `AiBackend`, `HttpBackend`, `ai.generate` without `output`, `getField`, C++ and Python bindings. Tests against a mock OpenAI-compatible server: a call, a filter, nulls, retry after 429, a failed row. |
 | 2 | `output` schemas (typed `ROW` results), `when`/`otherwise`; tests that a branch sees only its rows and that answers parse into typed fields. |
-| 3 | Mark `ai.generate` deterministic; the endpoint's `kind`, `url` and `model` in stage keys; tests that a rerun makes no calls and that a new model changes the keys. |
+| 3 | Mark `ai.generate` deterministic; the endpoint's `kind`, `url` and `model` in stage keys; stages with failed rows are not kept; tests that a rerun makes no calls, that a new model changes the keys, and that a rerun asks again for failed rows. |
 | 4 | Runtime statistics. |
 | 5 | A manual check against a real endpoint. velox-dev has no GPU, so: llama.cpp's `llama-server` on CPU (OpenAI-compatible, JSON-schema output) with a small instruct model such as Qwen2.5-0.5B or 1.5B (GGUF), under a memory cap. |
 

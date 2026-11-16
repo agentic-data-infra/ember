@@ -75,7 +75,7 @@ std::optional<MockChatServer::Reply> triage(const std::string& prompt) {
   return std::nullopt;
 }
 
-// "fail" gets a 400, "busy" a 429 the first time, "yes?" the answer "yes",
+// "fail" gets a 400, "flaky..." a 400 the first time, "busy" a 429 the first time, "yes?" the answer "yes",
 // "json:<answer>" the answer, the triage prompts their answers; anything else
 // is echoed.
 MockChatServer::Reply reply(const std::string& prompt, int previous) {
@@ -87,6 +87,9 @@ MockChatServer::Reply reply(const std::string& prompt, int previous) {
   }
   if (prompt == "fail") {
     return {400, R"({"error": "bad prompt"})"};
+  }
+  if (prompt.starts_with("flaky") && previous == 0) {
+    return {400, R"({"error": "try later"})"};
   }
   if (prompt == "busy" && previous == 0) {
     return {429, R"({"error": "slow down"})"};
@@ -430,34 +433,91 @@ TEST_F(AiGenerateTest, logTriage) {
 }
 
 
-// ai_generate is deterministic: stages that call it are reused. The prompts
-// come from two files, so the AI call runs in a map stage, whose output the
-// session keeps.
-TEST_F(AiGenerateTest, rerunReusesTheAiStage) {
+// The prompts in two files, so that the AI call runs in a map stage, whose
+// output the session keeps.
+std::string writePrompts(
+    const std::string& name,
+    const std::vector<std::string>& first,
+    const std::vector<std::string>& second) {
   const auto dir = fs::temp_directory_path() /
-      fmt::format("ai_generate_test_{}", ::getpid());
+      fmt::format("ai_generate_test_{}_{}", name, ::getpid());
+  fs::remove_all(dir);
   fs::create_directories(dir);
-  std::ofstream(dir / "part-0.txt") << "again 1\nagain 2\n";
-  std::ofstream(dir / "part-1.txt") << "again 1\n";
-  auto program = [&] {
-    return ember_->read()
-        .text(dir.string() + "/")
-        .withColumn(
-            "answer", ai::generate(col("value"), "mock").getField("result"))
-        .groupBy("answer")
-        .count()
-        .orderBy("answer");
-  };
-  auto first = program().collect();
+  for (const auto& [file, lines] :
+       {std::pair{"part-0.txt", first}, std::pair{"part-1.txt", second}}) {
+    std::ofstream out(dir / file);
+    for (const auto& line : lines) {
+      out << line << "\n";
+    }
+  }
+  return dir.string() + "/";
+}
+
+// The answers to the prompts in 'dir' and their counts.
+Dataframe countAnswers(Session& session, const std::string& dir) {
+  return session.read()
+      .text(dir)
+      .withColumn("g", ai::generate(col("value"), "mock"))
+      .groupBy(col("g").getField("result").as("answer"))
+      .count()
+      .orderBy("answer");
+}
+
+// ai_generate is deterministic: stages that call it are reused.
+TEST_F(AiGenerateTest, rerunReusesTheAiStage) {
+  const auto dir = writePrompts("rerun", {"again 1", "again 2"}, {"again 1"});
+  auto first = countAnswers(*ember_, dir).collect();
   ASSERT_EQ(first.size(), 2);
   EXPECT_EQ(first[0].getString(0), "echo: again 1");
   EXPECT_EQ(first[0].get<int64_t>(1), 2);
   const auto calls = server_->requests("again 1");
   EXPECT_GE(calls, 1);
 
-  auto second = program().collect();
-  EXPECT_EQ(second, first);
+  EXPECT_EQ(countAnswers(*ember_, dir).collect(), first);
   EXPECT_EQ(server_->requests("again 1"), calls);
+  fs::remove_all(dir);
+}
+
+// A stage with failed rows is not kept, so a rerun asks again; once all rows
+// have answers, the stage is kept.
+TEST_F(AiGenerateTest, rerunAsksAgainForFailedRows) {
+  const auto dir = writePrompts("failed", {"flaky", "steady"}, {"steady"});
+  auto first = countAnswers(*ember_, dir).collect();
+  ASSERT_EQ(first.size(), 2);
+  EXPECT_TRUE(first[0].isNullAt(0));
+  EXPECT_EQ(first[1].getString(0), "echo: steady");
+  EXPECT_EQ(server_->requests("flaky"), 1);
+  const auto steady = server_->requests("steady");
+
+  auto second = countAnswers(*ember_, dir).collect();
+  ASSERT_EQ(second.size(), 2);
+  EXPECT_EQ(second[0].getString(0), "echo: flaky");
+  EXPECT_EQ(server_->requests("flaky"), 2);
+  EXPECT_GT(server_->requests("steady"), steady);
+
+  EXPECT_EQ(countAnswers(*ember_, dir).collect(), second);
+  EXPECT_EQ(server_->requests("flaky"), 2);
+  fs::remove_all(dir);
+}
+
+// Nor are the stages that read a stage with failed rows: the second
+// aggregation's stage would otherwise keep the failure.
+TEST_F(AiGenerateTest, stagesAfterFailedRowsAreNotKept) {
+  const auto dir = writePrompts("downstream", {"flaky later", "a"}, {"b"});
+  auto histogram = [&] {
+    return countAnswers(*ember_, dir)
+        .groupBy(col("answer").isNull().as("failed"))
+        .count()
+        .orderBy("failed");
+  };
+  auto first = histogram().collect();
+  ASSERT_EQ(first.size(), 2);
+  EXPECT_EQ(server_->requests("flaky later"), 1);
+
+  auto second = histogram().collect();
+  ASSERT_EQ(second.size(), 1);
+  EXPECT_FALSE(second[0].get<bool>(0));
+  EXPECT_EQ(server_->requests("flaky later"), 2);
   fs::remove_all(dir);
 }
 

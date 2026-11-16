@@ -114,6 +114,10 @@ struct DagScheduler::StageState {
   // A result stage's pages and rows, per partition.
   std::vector<std::vector<std::string>> resultPages;
   std::vector<int64_t> resultRows;
+  // Some rows of this stage or of a stage it reads had failed AI calls
+  // (TaskResult::failedRows), so its output is not kept for reuse: a rerun
+  // asks again.
+  bool failedRows{false};
 
   int32_t numTasks() const {
     return static_cast<int32_t>(splits.size());
@@ -638,14 +642,15 @@ DagScheduler::JobResult DagScheduler::runStages(
   }
   stages.renumberShuffles(newIds);
 
-  // The job's own shuffles: kept for reuse if keyed, otherwise removed. A
-  // cached table's output is always kept.
+  // The job's own shuffles: kept for reuse if keyed and without failed rows,
+  // otherwise removed. A cached table's output is always kept.
   std::map<int32_t, const StageState*> written;
   SCOPE_EXIT {
     for (const auto& [shuffleId, state] : written) {
       const auto key = memoKey(*state);
       const bool isOutput = outputKey.has_value() && state == &states.back();
-      if ((reuseOutputs_ || isOutput) && key.has_value()) {
+      if (((reuseOutputs_ && !state->failedRows) || isOutput) &&
+          key.has_value()) {
         std::lock_guard<std::mutex> l(memoMutex_);
         auto [it, inserted] = memo_.emplace(*key, shuffleId);
         if (inserted) {
@@ -890,6 +895,12 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
         inputsReady = false;
       }
     }
+    for (const auto& input : stage.shuffleInputs) {
+      if (auto it = job.producers.find(input.shuffleId);
+          it != job.producers.end() && it->second->failedRows) {
+        state.failedRows = true;
+      }
+    }
 
     // A range shuffle keeps its split points when tasks run again, so that
     // the partitions of old and new map outputs match.
@@ -955,6 +966,7 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
           continue;
         }
         const auto p = partitions[i];
+        state.failedRows |= result->failedRows > 0;
         if (stage.shuffleId.has_value()) {
           VELOX_CHECK(result->mapStatus.has_value());
           auto location = result->mapStatus->location;
