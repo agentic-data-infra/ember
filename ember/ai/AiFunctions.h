@@ -13,8 +13,11 @@
 // the task. A null prompt gives a null row. A batch's distinct prompts go out
 // concurrently, and the driver thread waits for their answers.
 //
-// Nondeterministic: answers are not cached yet, so stages that call it are
-// never reused.
+// Deterministic, so stages that call it get stage keys and are reused like
+// any other: a rerun of an unchanged program makes no calls. The keys include
+// the endpoint's kind, url and model (AiEndpoint.h). Models do not keep the
+// promise: a recomputed lost map output may get different answers than the
+// ones downstream already read, and a reused stage keeps its failed rows.
 
 #pragma once
 

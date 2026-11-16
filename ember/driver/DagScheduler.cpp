@@ -16,6 +16,7 @@
 #include "ember/FileSerde.h"
 #include "ember/ParquetConnector.h"
 #include "ember/RowPages.h"
+#include "ember/ai/AiEndpoint.h"
 #include "ember/driver/RangeBounds.h"
 #include "ember/shuffle/KilnShuffle.h"
 #include "ember/shuffle/ShuffleConfig.h"
@@ -169,7 +170,7 @@ DagScheduler::DagScheduler(
     }
     if (!key.starts_with("ember.") || key == kMaxSplitBytes ||
         key == kNodeLocalFiles || key == kShuffleSplits ||
-        key == kShuffleSeed) {
+        key == kShuffleSeed || ai::changesAnswers(key)) {
       keyConfig_[key] = value;
     }
   }
