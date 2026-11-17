@@ -28,8 +28,9 @@ queries, so Ember aims for these properties (✅ implemented today, ⬜ planned)
 - ⬜ Elastic scale-out and scale-in of every component.
 
 Ember offers a Dataframe API, uses
-[Axiom](https://github.com/facebookincubator/axiom) for query compilation and
-[Velox](https://github.com/facebookincubator/velox) for query execution. Dataframe
+[Axiom](https://github.com/facebookincubator/axiom) for query optimization and
+distributed planning, and [Velox](https://github.com/facebookincubator/velox)
+for query execution. Dataframe
 programs compile into multi-stage Velox plans that run on a driver and a set of
 workers.
 
