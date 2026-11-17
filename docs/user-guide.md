@@ -436,6 +436,19 @@ stage listeners (`onStageCompleted`).
   buck2 run //examples:threshold_sweep -- docs/ cache     # or nocache
   ```
 
+- `TopicReport.cpp`, `topic_report.py`: an LLM labels FineWeb-Edu style
+  documents with a topic and an "educational" flag (typed output), and
+  summarizes the short ones (`when`/`otherwise`, so long ones make no
+  call); cheap filters run first, and `cache()` keeps the labels so the
+  report and the summaries ask the model once. It prints the model use from
+  `stats()`. Against llama.cpp's `llama-server` on CPU:
+
+  ```
+  llama-server -m qwen2.5-1.5b-instruct-q4_k_m.gguf --parallel 4 --port 8080
+  buck2 run //examples:topic_report -- data.parquet http://localhost:8080/v1 qwen2.5-1.5b-instruct 40
+  python3 examples/topic_report.py data.parquet http://localhost:8080/v1 qwen2.5-1.5b-instruct 40
+  ```
+
 - `SortBenchmark.cpp`: sorts the 100-byte records of
   [sortbenchmark.org](https://sortbenchmark.org)'s gensort by their 10-byte
   key and writes them back, as one merge task or as N range tasks
