@@ -17,6 +17,7 @@ Legend: ✅ supported, 🟡 partial, limited or through a plugin, ⬜ planned,
 | **Python API** | ✅ DataFrame API returning pyarrow tables (Linux x86-64 wheel, CPython 3.10) | ✅ PySpark DataFrame, SQL, pandas API, Spark Connect [8] | ✅ Unchanged PySpark | ✅ Python-first | 🟡 SQL through a DB-API client [19] | 🟡 As Presto |
 | **Shuffle / intermediate store** | ✅ Files on the workers, or Kiln (tiered DRAM/local FS, optional RDMA, survives workers) | Local files + external shuffle service, push-based shuffle, remote shuffle plugins [1] | Columnar shuffle; Celeborn/Uniffle [11] | Ray object store (shared memory, spills to disk) [13] | Pipelined in-memory exchange | As Presto |
 | **Reuse / memoization** | ✅ Content-hashed stages reused within a session; `cache`/`persist`; reuse across programs through Kiln's catalog. ⬜ Across sessions and agents, cost-based materialization | `cache`/`persist`, per session; exchange reuse within a query | As Spark | `materialize()`; no automatic reuse | No user-level memoization | As Presto |
+| **LLM calls** | ✅ `ai.generate` in Dataframe expressions: OpenAI-compatible endpoints, typed output schemas, a failed row gets a status instead of failing the job, calls only on rows that reach them, asynchronous on Velox's RPC operator, stage reuse (d) | 🟡 Python UDFs (pandas or Arrow) that call a model [20] | As Spark | ✅ `ray.data.llm` processors: vLLM or SGLang engines in the pipeline, or hosted endpoints [21] | ❌ | 🟡 Remote scalar functions on a Thrift function server [22]; Velox's async RPC operator for inference [23] |
 | **Memory / spill** | ✅ Velox memory manager and arbitrator, spill on reclaim; shuffle can spill into Kiln | Unified memory manager, spill to disk | Velox memory pools under Spark's memory manager, spill | Streaming executor with backpressure, object spilling [13] | Memory pools, spill for joins, aggregations and sorts | As Presto (Velox spill) |
 | **Elasticity / autoscaling** | ⬜ Planned for every component | ✅ Dynamic allocation [2] | As Spark | ✅ Ray autoscaler, KubeRay | 🟡 No built-in autoscaler | As Presto |
 | **User API** | DataFrame with SQL expressions | SQL + DataFrame | As Spark (unsupported operators fall back to the JVM) | Dataset API | SQL | SQL |
@@ -37,6 +38,10 @@ c. **RDMA:** build Ember with `-c kiln.rdma=true` (see
    [Kiln over RDMA](../README.md#kiln-over-rdma)). RDMA covers Kiln's DRAM
    tier; Kiln's local-FS tier, the default worker shuffle and the
    driver/worker RPC use TCP. Tested so far with Soft-RoCE.
+d. **LLM calls:** Ember does not host models; an endpoint is any
+   OpenAI-compatible server (vLLM, SGLang, llama.cpp, hosted APIs). Cheap
+   filters spare the model rows when they come before the AI column or in
+   the same filter. See [ai-functions.md](ai-functions.md).
 
 ## Sources
 
@@ -59,3 +64,7 @@ c. **RDMA:** build Ember with `-c kiln.rdma=true` (see
 17. GPU-accelerated Presto C++: https://prestodb.io/blog/2026/06/24/gpu-accelerated-presto-c/
 18. Velox and cuDF: https://developer.nvidia.com/blog/accelerating-large-scale-data-analytics-with-gpu-native-velox-and-nvidia-cudf
 19. Presto Python client: https://github.com/prestodb/presto-python-client
+20. PySpark pandas and Arrow UDFs: https://spark.apache.org/docs/latest/api/python/tutorial/sql/arrow_pandas.html
+21. Ray Data, working with LLMs: https://docs.ray.io/en/latest/data/working-with-llms.html
+22. Presto C++ remote functions: https://prestodb.io/docs/current/presto_cpp/features.html
+23. Velox async RPC design: https://github.com/facebookincubator/velox/blob/main/velox/docs/designs/async-rpc.md

@@ -22,7 +22,8 @@ queries, so Ember aims for these properties (✅ implemented today, ⬜ planned)
 - ⬜ Shared scans across concurrent queries.
 - ⬜ Differential execution: compare a baseline with candidates from where they diverge.
 - ⬜ Progressive execution: sampled results with confidence intervals that tighten.
-- ⬜ Model and LLM calls as first-class batched operators.
+- ✅ LLM calls in Dataframe expressions: `ai.generate` with typed outputs, made only on the rows that reach them, asynchronous on Velox's RPC operator, and reused like other stages (see [AI functions](docs/user-guide.md#ai-functions)).
+- ⬜ Models next to the data: node-local or in-process inference on the job's GPUs.
 - ⬜ Lineage and guardrails as queryable tables.
 - ⬜ Elastic scale-out and scale-in of every component.
 
