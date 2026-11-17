@@ -105,3 +105,14 @@ cxx_test(
     # Archives must precede the prebuilt Velox/Axiom libraries they use.
     link_ordering = "topological",
 ) for _ in ([1] if EMBER_STOKE else [])]
+
+cxx_test(
+    name = "rpc_calls_test",
+    srcs = ["RpcCallsTest.cpp"],
+    deps = [
+        "//ember/api:api",
+        "//ember/tests:test_main",
+    ],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+)
