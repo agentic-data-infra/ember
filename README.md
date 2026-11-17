@@ -1,5 +1,5 @@
 # ember
-Large-scale data processing for agents -- not humans!
+Large-scale data processing for agents!
 
 ## Overview
 
