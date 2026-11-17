@@ -15,7 +15,10 @@
 
 #include <filesystem>
 
+#include "ember/ai.h"
+#include "ember/ai/tests/MockChatServer.h"
 #include "ember/driver/DagScheduler.h"
+#include "ember/functions.h"
 #include "ember/shuffle/ShuffleConfig.h"
 #include "ember/tests/WordCountUtil.h"
 #include "kiln/local/LocalCluster.h"
@@ -405,6 +408,58 @@ TEST_F(ClusterTest, driverFailsWithoutWorkers) {
           .config("ember.cluster.registration_timeout_ms", "300")
           .getOrCreate(),
       "0 of 1 workers registered");
+}
+
+// ai.generate runs in the RPC operator on the workers, under when/otherwise
+// and with a groupBy after it; a rerun reuses the AI stage.
+TEST_F(ClusterTest, aiStageRunsOnWorkers) {
+  ai::test::MockChatServer server(
+      [](const std::string& prompt, int) -> ai::test::MockChatServer::Reply {
+        return {200, prompt.size() % 2 == 0 ? "even" : "odd"};
+      });
+  for (int file = 0; file < 4; ++file) {
+    std::ofstream out(dir_ / "input" / fmt::format("part-{}.txt", file));
+    for (int line = 0; line < 50; ++line) {
+      out << std::string(1 + (file * 50 + line) % 7, 'x') << "\n";
+    }
+  }
+  startWorkers(/*count=*/2, /*slots=*/2);
+  auto& session = startDriver(
+      2,
+      nullptr,
+      {{"ember.ai.endpoint.mock.url", server.url()},
+       {"ember.ai.endpoint.mock.model", "test-model"}});
+  using namespace functions;
+  auto program = [&] {
+    return session.read()
+        .text((dir_ / "input").string())
+        .withColumn(
+            "parity",
+            when(length(col("value")) > 1,
+                 ai::generate(col("value"), "mock").getField("result"))
+                .otherwise(lit("short")))
+        .groupBy("parity")
+        .count()
+        .orderBy("parity");
+  };
+  auto rows = program().collect();
+  ASSERT_EQ(rows.size(), 3);
+  std::map<std::string, int64_t> counts;
+  for (const auto& row : rows) {
+    counts[row.getString(0)] = row.getLong(1);
+  }
+  // Lengths 1..7 repeat over the 200 lines; length 1 is short.
+  EXPECT_EQ(counts["short"], 29);
+  EXPECT_EQ(counts["even"], 86);
+  EXPECT_EQ(counts["odd"], 85);
+  // One call per distinct prompt at most in each task, none for short ones.
+  EXPECT_EQ(server.requests("x"), 0);
+  EXPECT_GE(server.requests("xx"), 1);
+  EXPECT_LE(server.requests("xx"), 4);
+  const auto calls = session.stats().at("aiCalls");
+
+  EXPECT_EQ(program().collect(), rows);
+  EXPECT_EQ(session.stats().at("aiCalls"), calls);
 }
 
 TEST_F(ClusterTest, workerTakesAMemoryBudget) {

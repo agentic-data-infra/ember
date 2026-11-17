@@ -1,12 +1,10 @@
 # AI functions
 
-Design for calling LLMs from Dataframe programs. Status: steps 1 to 5 of
+Design for calling LLMs from Dataframe programs. Status: steps 1 to 7 of
 the plan below are implemented (`ai.generate` with and without `output`,
-`getField`, `when`/`otherwise`, stage reuse, statistics; see
-[../ember/ai/README.md](../ember/ai/README.md)). Steps 6 and 7 move the
-calls onto Velox's async RPC path (see
-[Execution on the async RPC path](#execution-on-the-async-rpc-path)); they
-are proposed.
+`getField`, `when`/`otherwise`, stage reuse, statistics, and since step 7
+Velox's async RPC path; see [../ember/ai/README.md](../ember/ai/README.md)
+and [Execution on the async RPC path](#execution-on-the-async-rpc-path)).
 
 Agents in the discovery loop filter, label and score large experiment
 outputs. They should be able to use an LLM like any other function: in
@@ -109,8 +107,8 @@ rows with `severity >= 8` reach `carbon`; the rest go to `hydrogen`.
 
 ## Why a function, not an operator
 
-In steps 1 to 5, `ai.generate` is a Velox vector function. Velox's
-expression evaluation already gives the semantics programs rely on:
+In steps 1 to 5, `ai.generate` was a Velox vector function. Velox's
+expression evaluation gives the semantics programs rely on:
 
 - **Conditionals:** `when`/`otherwise` (`SwitchExpr`) evaluates each branch
   only on the rows that take it.
@@ -125,9 +123,9 @@ Axiom plans it as an ordinary function call, so the optimizer needs no
 changes. A dedicated operator would have to pull the calls out of their
 expressions and reimplement the conditional masking.
 
-That operator now exists upstream, and steps 6 and 7 move to it. The API
-stays a function: the planner pulls the calls out, and Ember keeps the
-masking with a rewrite of its own (see
+That operator exists upstream, and since step 7 `ai.generate` runs on it.
+The API stays a function: the planner pulls the calls out, and Ember keeps
+the masking with a rewrite of its own (see
 [Execution on the async RPC path](#execution-on-the-async-rpc-path)).
 
 The return type must be known when the plan is built. The API turns the
@@ -146,12 +144,11 @@ type, and parses the answers with Velox's cast from JSON to `ROW`
 (`try_cast`, fields matched by name), so there is no parser of its own; an
 answer the cast rejects gets null fields and a status.
 
-Rows vs batches: a vector function receives a batch of rows (about 1000).
-For `ai.generate` that is a batch of independent prompts, sent as
-concurrent requests. Rows are never packed into one prompt; GPU batching is
-the inference server's job, and Ember's job is to keep enough requests in
-flight. In steps 1 to 5 the driver thread waits for its batch; step 7
-removes that wait.
+Rows vs batches: each row is an independent prompt, sent as its own
+request. Rows are never packed into one prompt; GPU batching is the
+inference server's job, and Ember's job is to keep enough requests in
+flight. No driver thread waits for an answer: the RPC operator holds rows
+until their answers arrive, and the thread runs other work meanwhile.
 
 ## Endpoints
 
@@ -182,17 +179,12 @@ logs and stage keys.
   schema, the request carries it as a JSON schema (`response_format`). Retries with backoff on 429, 5xx, timeouts and connection errors. Each
   attempt times out after 120 s; worker heartbeats run on their own thread,
   so a slow model never makes a worker look lost. `max_concurrency` and `qps` limit each process.
-- **Per batch.** The function takes the rows Velox selects, drops duplicate
-  prompts, sends the rest concurrently, waits, and fills the result vector.
-- **Planning.** Axiom's optimizer treats `ai_generate` as nondeterministic
-  (its own function metadata), while Velox treats it as deterministic (see
-  Reuse). So the optimizer neither moves nor copies the call. Otherwise it
-  would push a filter on an answer into the table scan with the call copied
-  into it, and the projection above would call the model again: two calls
-  per row, whose answers could disagree. Cheaper conditions of the same
-  filter still go into the scan, so their rows never reach the model. On
-  the async RPC path (step 7) the RPC node gives the same result and the
-  metadata goes away.
+- **Per input.** The RPC operator hands the function its input rows. The
+  function sends one request per distinct prompt and returns a future per
+  row; the operator emits rows as their answers arrive.
+- **Planning.** Axiom's optimizer lifts each call into an RPC plan node and
+  never copies it, so a filter on an answer does not call the model twice.
+  Ember's rewrite (below) keeps the calls on the rows that reach them.
 
 ## Execution on the async RPC path
 
@@ -235,18 +227,22 @@ A throwaway echo `AsyncRPCFunction`, registered in Ember and run in
 
 ### Design
 
-1. **`ai_generate` becomes an `AsyncRPCFunction`**, registered in Velox's
-   async RPC function registry with the same two signatures; the vector
-   function and its Axiom metadata go away. `HttpBackend` stays as it is:
-   `dispatchPerRow` returns its futures directly, one per distinct prompt
-   (duplicate rows share a future). `buildOutput` builds the same
-   `ROW(..., status)` as today. It gets no evaluation context, so the
-   function builds its own for the JSON cast. A null prompt gets an
-   immediate null-input response and never reaches the model.
+1. **`ai_generate` is an `AsyncRPCFunction`**, registered in Velox's async
+   RPC function registry with the same two signatures; the vector function
+   and its Axiom metadata are gone. `HttpBackend` returns a future per
+   prompt, and `dispatchPerRow` returns one per distinct prompt (duplicate
+   rows share it). `buildOutput` builds the same `ROW(..., status)` as
+   before. It gets no evaluation context, so the function builds its own
+   for the JSON cast. A null prompt gets an immediate null-input response
+   and never reaches the model.
 2. **Filter split.** Ember splits a filter's top-level `&` into a filter of
    the conditions without AI calls, followed by a filter of the rest. The
    optimizer then pushes the cheap filter into the scan as before, and the
-   model sees only its rows.
+   model sees only its rows. Axiom also keeps every condition above an RPC
+   node, even one that does not read the answer. So a filter after a
+   `withColumn` that computes a column with AI calls puts its conditions
+   that do not read the column before the `withColumn`, through any number
+   of such steps.
 3. **Guards.** Before Ember hands a projection or filter to Axiom, it
    rewrites every AI call that is still under a condition. The call moves into
    a projection of its own, and its prompt is wrapped as
@@ -268,9 +264,9 @@ A throwaway echo `AsyncRPCFunction`, registered in Ember and run in
    conditions run after the cheap ones, in a fixed order; Velox's adaptive
    reordering of `AND` no longer applies to them. `try` stays unsupported:
    a failed call is already a status, not an error.
-4. **Admission.** `admissionKey()` is the endpoint name and
+4. **Admission.** `admissionKey()` identifies the endpoint and
    `configuredCeiling()` is its `max_concurrency`, so all operators of a
-   process share one limit per endpoint. A 429 answer reports
+   process share one limit per endpoint. A 429 answer or a timeout reports
    `kOverloaded`, so the operator's window backs off; `qps` stays in
    `HttpBackend`. Retries stay in `HttpBackend` and are reported through
    `numRetriesAttempted()`.
@@ -291,8 +287,7 @@ The API, the endpoint config, stage keys and reuse do not change.
   reaches Ember only when the pin moves.
 - The guard rewrite is Ember's own planner code: an expression walk over
   `when`, `and`, `or` and `coalesce`, about the size of the stage-key code.
-- Not yet checked: workers in separate processes (step 7 adds a cluster
-  test).
+- A cluster test runs an AI stage on separate worker processes.
 
 ## Reuse
 

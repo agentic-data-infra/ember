@@ -241,10 +241,49 @@ Dataframe Dataframe::selectExpr(const std::vector<std::string>& sqls) const {
   return select(columns);
 }
 
-// A condition with RPC calls is split: the conjuncts without them filter
-// first, so the optimizer can push them into the scan and the calls see only
-// their rows.
+namespace {
+
+// Whether 'expr' may read column 'name'.
+bool mayRead(const facebook::velox::core::ExprPtr& expr, const std::string& name) {
+  using Kind = facebook::velox::core::IExpr::Kind;
+  if (expr->is(Kind::kSubquery) ||
+      (expr->is(Kind::kFieldAccess) &&
+       expr->as<facebook::velox::core::FieldAccessExpr>()->name() == name)) {
+    return true;
+  }
+  return std::any_of(
+      expr->inputs().begin(), expr->inputs().end(), [&](const auto& input) {
+        return mayRead(input, name);
+      });
+}
+
+} // namespace
+
+// The optimizer keeps every condition above an RPC call, so the conjuncts
+// that do not read a column computed with RPC calls go before the
+// withColumn() that computes it; otherwise the call would see their rows. A
+// condition with RPC calls is split too: the conjuncts without them filter
+// first, so the optimizer can push them into the scan.
 Dataframe Dataframe::filter(const Column& condition) const {
+  if (step_->rpcColumn_.has_value()) {
+    std::vector<lp::ExprApi> conjuncts;
+    addConjuncts(condition.expr().expr(), conjuncts);
+    std::vector<lp::ExprApi> before;
+    std::vector<lp::ExprApi> after;
+    for (auto& conjunct : conjuncts) {
+      (mayRead(conjunct.expr(), *step_->rpcColumn_) ? after : before)
+          .push_back(std::move(conjunct));
+    }
+    if (!before.empty()) {
+      const Dataframe filtered = Dataframe(session_, step_->parent_)
+                                     .filter(Column(allOf(before)));
+      const Dataframe computed(
+          session_,
+          std::make_shared<const PlanStep>(
+              filtered.step_, step_->apply_, nullptr, step_->rpcColumn_));
+      return after.empty() ? computed : computed.filter(Column(allOf(after)));
+    }
+  }
   return then([predicate = condition.expr()](auto& builder, const auto&) {
     if (!callsRpc(predicate.expr())) {
       builder.filter(predicate);
@@ -278,7 +317,7 @@ Dataframe Dataframe::filter(const std::string& condition) const {
 
 Dataframe Dataframe::withColumn(const std::string& name, const Column& column)
     const {
-  return then([name, expr = column.expr()](auto& builder, const auto&) {
+  auto apply = [name, expr = column.expr()](auto& builder, const auto&) {
     const bool rpc = callsRpc(expr.expr());
     if (!builder.hasColumn(name) && !rpc) {
       builder.with({expr.as(name)});
@@ -296,7 +335,14 @@ Dataframe Dataframe::withColumn(const std::string& name, const Column& column)
       projections.push_back(value.as(name));
     }
     builder.project(projections);
-  });
+  };
+  return Dataframe(
+      session_,
+      std::make_shared<const PlanStep>(
+          step_,
+          std::move(apply),
+          nullptr,
+          callsRpc(column.expr().expr()) ? std::optional(name) : std::nullopt));
 }
 
 Dataframe Dataframe::withColumnRenamed(

@@ -5,17 +5,18 @@
 
 #include <fmt/format.h>
 #include <folly/container/F14Map.h>
-#include <folly/coro/BlockingWait.h>
-#include <folly/coro/Collect.h>
+#include <folly/executors/InlineExecutor.h>
+#include <folly/futures/SharedPromise.h>
 
-#include "axiom/optimizer/FunctionRegistry.h"
 #include "ember/ai/AiBackend.h"
 #include "ember/ai/OutputSchema.h"
 #include "velox/common/base/RuntimeMetrics.h"
 #include "velox/core/Expressions.h"
-#include "velox/expression/DecodedArgs.h"
+#include "velox/core/QueryCtx.h"
 #include "velox/expression/Expr.h"
-#include "velox/expression/VectorFunction.h"
+#include "velox/expression/FunctionSignature.h"
+#include "velox/expression/rpc/AsyncRPCFunction.h"
+#include "velox/expression/rpc/AsyncRPCFunctionRegistry.h"
 #include "velox/functions/prestosql/types/JsonType.h"
 
 namespace ember::ai {
@@ -23,7 +24,7 @@ namespace ember::ai {
 namespace velox = facebook::velox;
 namespace core = facebook::velox::core;
 namespace exec = facebook::velox::exec;
-namespace optimizer = facebook::axiom::optimizer;
+namespace rpc = facebook::velox::exec::rpc;
 
 namespace {
 
@@ -32,120 +33,205 @@ constexpr size_t kQuotedBytes = 300;
 
 using StringVector = velox::FlatVector<velox::StringView>;
 
-// ai_generate(prompt, endpoint[, output]). With 'output', a typed null whose
-// type is resultType(schema), the answers are JSON objects of the schema,
-// parsed by Velox's cast from JSON. Not default-null: that null argument
-// would null every row.
-class GenerateFunction : public exec::VectorFunction {
+// A successful answer's text, as the payload of its response.
+struct AnswerPayload {
+  velox::BufferPtr text;
+
+  int64_t retainedBytes() const noexcept {
+    return text->capacity();
+  }
+};
+
+// ai_generate(prompt, endpoint[, output]) as an async RPC function: Velox's
+// RPC operator dispatches the rows and holds them until their answers
+// arrive, without blocking the driver thread. With 'output', a typed null
+// whose type is resultType(schema), the answers are JSON objects of the
+// schema, parsed by Velox's cast from JSON.
+class GenerateFunction : public rpc::AsyncRPCFunction {
  public:
-  void apply(
-      const velox::SelectivityVector& rows,
-      std::vector<velox::VectorPtr>& args,
-      const velox::TypePtr& outputType,
-      exec::EvalCtx& context,
-      velox::VectorPtr& result) const override {
+  void initialize(
+      const core::QueryConfig& config,
+      const std::vector<velox::TypePtr>& inputTypes,
+      const std::vector<velox::VectorPtr>& constantInputs,
+      rpc::RPCStreamingMode /*mode*/) override {
+    const auto& name = constantInputs.at(1);
     VELOX_USER_CHECK(
-        args[1]->isConstantEncoding() && !args[1]->isNullAt(0),
+        name != nullptr && !name->isNullAt(0),
         "{}: the endpoint must be a constant",
         kGenerateFunction);
-    const auto name = args[1]
-                          ->as<velox::ConstantVector<velox::StringView>>()
-                          ->valueAt(0)
-                          .str();
-    auto& backend = backendFor(AiEndpoint::fromConfig(
-        name, context.execCtx()->queryCtx()->queryConfig()));
-    const auto schema =
-        args.size() == 3 ? schemaOf(outputType->asRow()) : nullptr;
+    endpoint_ = AiEndpoint::fromConfig(
+        name->as<velox::ConstantVector<velox::StringView>>()->valueAt(0).str(),
+        config);
+    backend_ = backendFor(endpoint_);
+    if (inputTypes.size() == 3) {
+      type_ = inputTypes[2];
+      schema_ = schemaOf(type_->asRow());
+    }
+  }
 
-    // One call per distinct prompt; a null prompt gives a null row.
-    exec::DecodedArgs decoded(rows, {args[0]}, context);
-    const auto* prompts = decoded.at(0);
-    folly::F14FastMap<velox::StringView, int32_t> calls;
-    std::vector<int32_t> callOfRow(rows.end(), -1);
-    // The tasks read their prompts when they run. A short StringView holds
-    // its characters inline, so the prompts stay here, never reallocated.
-    std::vector<velox::StringView> distinct;
-    distinct.reserve(rows.countSelected());
-    std::vector<folly::coro::Task<AiAnswer>> tasks;
+  std::string name() const override {
+    return kGenerateFunction;
+  }
+
+  velox::TypePtr resultType() const override {
+    return type_;
+  }
+
+  bool requiresRowInspectionBeforeAdmission() const override {
+    return false;
+  }
+
+  // Operators that call one endpoint share its limit of requests in flight.
+  std::string admissionKey() const override {
+    return endpoint_.key();
+  }
+
+  int64_t configuredCeiling() const override {
+    return endpoint_.maxConcurrency;
+  }
+
+  int64_t numRetriesAttempted() const override {
+    return counts_->retries.total;
+  }
+
+  // One request per distinct prompt; rows with the same prompt share its
+  // answer. A null prompt makes no request.
+  std::vector<
+      std::pair<velox::vector_size_t, folly::SemiFuture<rpc::RPCResponse>>>
+  dispatchPerRow(
+      const velox::SelectivityVector& rows,
+      const std::vector<velox::VectorPtr>& args) override {
+    velox::DecodedVector prompts(*args[0], rows);
+    folly::F14FastMap<
+        std::string_view,
+        std::shared_ptr<folly::SharedPromise<AiAnswer>>>
+        calls;
+    std::vector<
+        std::pair<velox::vector_size_t, folly::SemiFuture<rpc::RPCResponse>>>
+        responses;
+    responses.reserve(rows.countSelected());
     rows.applyToSelected([&](velox::vector_size_t row) {
-      if (prompts->isNullAt(row)) {
+      if (prompts.isNullAt(row)) {
+        responses.emplace_back(
+            row,
+            folly::makeSemiFuture(rpc::RPCResponse::failed(
+                row, velox::rpc::RPCErrorKind::kNullInput, "")));
         return;
       }
-      const auto prompt = prompts->valueAt<velox::StringView>(row);
-      auto [it, inserted] = calls.try_emplace(prompt, distinct.size());
-      if (inserted) {
-        const auto& stable = distinct.emplace_back(prompt);
-        tasks.push_back(backend.generate(
-            std::string_view(stable.data(), stable.size()), schema));
+      const auto prompt = prompts.valueAt<velox::StringView>(row);
+      auto& answer = calls[std::string_view(prompt.data(), prompt.size())];
+      if (answer == nullptr) {
+        answer = std::make_shared<folly::SharedPromise<AiAnswer>>();
+        ++counts_->calls.total;
+        // The answer may arrive after the operator is gone, so the callback
+        // holds what it writes.
+        backend_
+            ->generate(std::string_view(prompt.data(), prompt.size()), schema_)
+            .via(&folly::InlineExecutor::instance())
+            .thenTry([counts = counts_, answer](folly::Try<AiAnswer> value) {
+              if (value.hasException()) {
+                value.emplace(AiAnswer{
+                    .error = value.exception().what().toStdString()});
+              }
+              counts->add(*value);
+              answer->setValue(std::move(*value));
+            });
       }
-      callOfRow[row] = it->second;
+      responses.emplace_back(
+          row, answer->getSemiFuture().deferValue([row](AiAnswer value) {
+            return toResponse(row, std::move(value));
+          }));
     });
-    auto answers =
-        folly::coro::blockingWait(folly::coro::collectAllRange(std::move(tasks)));
+    return responses;
+  }
 
+  velox::VectorPtr buildOutput(
+      const std::vector<rpc::RPCResponse>& responses,
+      velox::memory::MemoryPool* pool) const override {
+    const auto size = static_cast<velox::vector_size_t>(responses.size());
     // The answers' text (JSON with a schema), and their statuses.
-    auto* pool = context.pool();
     auto texts = velox::BaseVector::create<StringVector>(
-        schema == nullptr ? velox::VARCHAR() : velox::JSON(), rows.end(), pool);
-    auto statuses = velox::BaseVector::create<StringVector>(
-        velox::VARCHAR(), rows.end(), pool);
-    velox::SelectivityVector answered(rows.end(), false);
-    rows.applyToSelected([&](velox::vector_size_t row) {
+        schema_ == nullptr ? velox::VARCHAR() : velox::JSON(), size, pool);
+    auto statuses =
+        velox::BaseVector::create<StringVector>(velox::VARCHAR(), size, pool);
+    velox::SelectivityVector answered(size, false);
+    for (velox::vector_size_t row = 0; row < size; ++row) {
+      const auto& response = responses[row];
       statuses->set(row, velox::StringView());
-      if (callOfRow[row] < 0 || answers[callOfRow[row]].text == nullptr) {
+      if (response.hasError()) {
         texts->setNull(row, true);
-        if (callOfRow[row] >= 0) {
-          statuses->set(
-              row, velox::StringView(answers[callOfRow[row]].error));
-        }
-        return;
+        statuses->set(row, velox::StringView(response.error().message));
+        continue;
       }
-      const auto& text = answers[callOfRow[row]].text;
+      const auto& text = rpc::responseAs<AnswerPayload>(response).text;
       texts->set(row, velox::StringView(text->as<char>(), text->size()));
       answered.setValid(row, true);
-    });
+    }
     answered.updateBounds();
 
     std::vector<velox::VectorPtr> fields;
-    if (schema == nullptr) {
+    if (schema_ == nullptr) {
       fields.push_back(texts);
     } else {
-      fields = parse(texts, schema, answered, *statuses, context)->children();
+      fields = parse(texts, schema_, answered, *statuses, pool)->children();
     }
+    fields.push_back(statuses);
+    auto output = std::make_shared<velox::RowVector>(
+        pool, type_, nullptr, size, std::move(fields));
     int64_t failed = 0;
-    rows.applyToSelected([&](velox::vector_size_t row) {
-      failed += statuses->valueAt(row).size() > 0;
-    });
-    int64_t retries = 0;
-    int64_t inputTokens = 0;
-    int64_t outputTokens = 0;
-    for (const auto& answer : answers) {
-      retries += std::max(answer.attempts - 1, 0);
-      inputTokens += answer.inputTokens;
-      outputTokens += answer.outputTokens;
+    for (velox::vector_size_t row = 0; row < size; ++row) {
+      if (responses[row].errorKind() == velox::rpc::RPCErrorKind::kNullInput) {
+        output->setNull(row, true);
+      } else {
+        failed += statuses->valueAt(row).size() > 0;
+      }
     }
+    reportStats(failed);
+    return output;
+  }
+
+  CongestionSignal evaluateCongestion(
+      const std::vector<rpc::RPCResponse>& responses) const override {
+    for (const auto& response : responses) {
+      const auto kind = response.errorKind();
+      if (kind == velox::rpc::RPCErrorKind::kRateLimited ||
+          kind == velox::rpc::RPCErrorKind::kTimeout) {
+        return CongestionSignal::kOverloaded;
+      }
+    }
+    return CongestionSignal::kSuccess;
+  }
+
+ private:
+  static rpc::RPCResponse toResponse(velox::vector_size_t row, AiAnswer answer) {
+    if (answer.text != nullptr) {
+      rpc::RPCResponse response;
+      response.rowId = row;
+      response.setPayload(AnswerPayload{std::move(answer.text)});
+      return response;
+    }
+    return rpc::RPCResponse::failed(
+        row,
+        answer.overloaded ? velox::rpc::RPCErrorKind::kRateLimited
+                          : velox::rpc::RPCErrorKind::kBackendError,
+        std::move(answer.error));
+  }
+
+  // Adds the counts since the last call to the operator's runtime stats. Runs
+  // on the driver thread, where they reach the operator.
+  void reportStats(int64_t failedRows) const {
     for (const auto& [name, value] :
-         {std::pair{kCallsStat, static_cast<int64_t>(answers.size())},
-          std::pair{kRetriesStat, retries},
-          std::pair{kFailedRowsStat, failed},
-          std::pair{kInputTokensStat, inputTokens},
-          std::pair{kOutputTokensStat, outputTokens}}) {
+         {std::pair{kCallsStat, counts_->calls.take()},
+          std::pair{kRetriesStat, counts_->retries.take()},
+          std::pair{kFailedRowsStat, failedRows},
+          std::pair{kInputTokensStat, counts_->inputTokens.take()},
+          std::pair{kOutputTokensStat, counts_->outputTokens.take()}}) {
       if (value > 0) {
         velox::addThreadLocalRuntimeStat(name, velox::RuntimeCounter(value));
       }
     }
-    fields.push_back(statuses);
-    auto output = std::make_shared<velox::RowVector>(
-        pool, outputType, nullptr, rows.end(), std::move(fields));
-    rows.applyToSelected([&](velox::vector_size_t row) {
-      if (callOfRow[row] < 0) {
-        output->setNull(row, true);
-      }
-    });
-    context.moveOrCopyResult(output, rows, result);
   }
 
- private:
   // The 'answered' rows of 'texts' cast to 'schema'. Other rows, and answers
   // that do not fit, have null fields; the latter get a status.
   static velox::RowVectorPtr parse(
@@ -153,8 +239,7 @@ class GenerateFunction : public exec::VectorFunction {
       const velox::RowTypePtr& schema,
       const velox::SelectivityVector& answered,
       StringVector& statuses,
-      exec::EvalCtx& context) {
-    auto* pool = context.pool();
+      velox::memory::MemoryPool* pool) {
     auto fields = velox::BaseVector::create<velox::RowVector>(
         schema, texts->size(), pool);
     for (const auto& child : fields->children()) {
@@ -173,14 +258,17 @@ class GenerateFunction : public exec::VectorFunction {
         nullptr,
         texts->size(),
         std::vector<velox::VectorPtr>{texts});
+    // The cast reads no query config, so one empty query context serves all.
+    static const auto queryCtx = core::QueryCtx::create();
+    core::ExecCtx execCtx(pool, queryCtx.get());
     exec::ExprSet cast(
         {std::make_shared<core::CastTypedExpr>(
             schema,
             std::make_shared<core::FieldAccessTypedExpr>(
                 velox::JSON(), "answer"),
             /*isTryCast=*/true)},
-        context.execCtx());
-    exec::EvalCtx castContext(context.execCtx(), &cast, input.get());
+        &execCtx);
+    exec::EvalCtx castContext(&execCtx, &cast, input.get());
     std::vector<velox::VectorPtr> parsed(1);
     cast.eval(answered, castContext, parsed);
 
@@ -202,6 +290,43 @@ class GenerateFunction : public exec::VectorFunction {
     fields->copy(parsed[0].get(), fit, nullptr);
     return fields;
   }
+
+  // A count added up on the backend's threads and reported on the driver
+  // thread.
+  struct Counter {
+    std::atomic<int64_t> total{0};
+    int64_t reported{0};
+
+    // The count since the last call.
+    int64_t take() {
+      const int64_t now = total;
+      const auto value = now - reported;
+      reported = now;
+      return value;
+    }
+  };
+
+  struct Counts {
+    Counter calls;
+    Counter retries;
+    Counter inputTokens;
+    Counter outputTokens;
+
+    // Runs on the backend's thread as each answer arrives.
+    void add(const AiAnswer& answer) {
+      retries.total += std::max(answer.attempts - 1, 0);
+      inputTokens.total += answer.inputTokens;
+      outputTokens.total += answer.outputTokens;
+    }
+  };
+
+  AiEndpoint endpoint_;
+  std::shared_ptr<AiBackend> backend_;
+  velox::TypePtr type_{velox::ROW(
+      {"result", "status"}, {velox::VARCHAR(), velox::VARCHAR()})};
+  // The output schema, or null for free text.
+  velox::RowTypePtr schema_;
+  const std::shared_ptr<Counts> counts_{std::make_shared<Counts>()};
 };
 
 } // namespace
@@ -209,8 +334,11 @@ class GenerateFunction : public exec::VectorFunction {
 void registerAiFunctions() {
   static std::once_flag once;
   std::call_once(once, [] {
-    exec::registerVectorFunction(
+    // Deterministic, so stages that call it are reused. Not default-null: the
+    // typed null 'output' argument would null every row.
+    VELOX_CHECK(rpc::AsyncRPCFunctionRegistry::registerFunction(
         kGenerateFunction,
+        [] { return std::make_shared<GenerateFunction>(); },
         {exec::FunctionSignatureBuilder()
              .returnType("row(result varchar, status varchar)")
              .argumentType("varchar")
@@ -223,21 +351,10 @@ void registerAiFunctions() {
              .constantArgumentType("varchar")
              .argumentType("T")
              .build()},
-        std::make_unique<GenerateFunction>(),
         exec::VectorFunctionMetadataBuilder()
             .deterministic(true)
             .defaultNullBehavior(false)
-            .build());
-    // Velox sees a deterministic function, so stages that call it are
-    // reused. Axiom's optimizer sees a nondeterministic one, so it neither
-    // moves nor copies the call: inlined into a filter it pushes into a scan,
-    // the call would run twice per row, and the answers could disagree.
-    auto metadata = std::make_unique<optimizer::FunctionMetadata>();
-    metadata->functionSet = optimizer::FunctionSet(
-        optimizer::FunctionSet::kNonDeterministic |
-        optimizer::FunctionSet::kNonDefaultNullBehavior);
-    VELOX_CHECK(optimizer::FunctionRegistry::instance()->registerFunction(
-        kGenerateFunction, std::move(metadata)));
+            .build()));
   });
 }
 

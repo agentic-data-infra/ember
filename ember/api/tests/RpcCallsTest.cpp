@@ -238,6 +238,24 @@ TEST_F(RpcCallsTest, filterWithCallsInSeveralConjuncts) {
   EXPECT_EQ(calls(), (Prompts{"a", "b", "b?", "c", "c?"}));
 }
 
+TEST_F(RpcCallsTest, filterGoesBeforeWithColumn) {
+  auto df = lines()
+                .withColumn("answer", echo(col("value")))
+                .withColumn("again", echo(col("answer")))
+                .filter(col("value") != "a" && col("answer") == "echo: b");
+  EXPECT_EQ(column(df, "again"), (Strings{"echo: echo: b"}));
+  // "a" never reaches either call; "c" reaches only the first.
+  EXPECT_EQ(calls(), (Prompts{"b", "c", "echo: b"}));
+}
+
+TEST_F(RpcCallsTest, filterOnReplacedColumnStaysAfter) {
+  auto df = lines()
+                .withColumn("value", echo(col("value")))
+                .filter(col("value") != "echo: a");
+  EXPECT_EQ(column(df, "value"), (Strings{"echo: b", "echo: c"}));
+  EXPECT_EQ(calls(), (Prompts{"a", "b", "c"}));
+}
+
 TEST_F(RpcCallsTest, selectAndReplaceColumn) {
   auto df = lines()
                 .withColumn("value", when(col("value") != "b", echo(col("value"))))

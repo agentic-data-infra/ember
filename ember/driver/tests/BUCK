@@ -16,6 +16,7 @@ cxx_test(
     name = "cluster_test",
     srcs = ["ClusterTest.cpp"],
     deps = [
+        "//ember/ai/tests:mock_chat_server",
         "//ember/api:api",
         "//ember/tests:test_main",
         "//ember/tests:wordcount_util",
