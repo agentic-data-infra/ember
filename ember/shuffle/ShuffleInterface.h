@@ -46,6 +46,10 @@ struct MapStatus {
   std::string location;
   /// Bytes of each reduce partition, per segment.
   std::vector<std::vector<int64_t>> segments;
+  /// The executor whose loss loses the output: the one that holds its files.
+  /// Unique per executor, so a worker restarted at the same location has a
+  /// new one. Empty for an output in Kiln, which outlives its executor.
+  std::string executorId;
 
   /// Bytes of each reduce partition, over all segments.
   std::vector<int64_t> partitionLengths() const;

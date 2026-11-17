@@ -17,11 +17,10 @@ class SchedulerBackend {
  public:
   using ResultCallback = std::function<void(std::string taskResult)>;
 
-  /// Called with an executor's location (its shuffle outputs' location) when
-  /// it joins or is lost, on any thread.
+  /// Called with an executor's id (MapStatus::executorId) when it is lost,
+  /// on any thread.
   struct ExecutorListener {
-    std::function<void(const std::string& location)> onExecutorAdded;
-    std::function<void(const std::string& location)> onExecutorLost;
+    std::function<void(const std::string& executorId)> onExecutorLost;
   };
 
   virtual ~SchedulerBackend() = default;

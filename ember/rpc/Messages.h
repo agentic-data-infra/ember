@@ -11,6 +11,9 @@ namespace ember::rpc {
 
 /// A worker offers its task slots to the driver.
 struct RegisterWorkerRequest {
+  /// The id of the worker's executor for this driver, new each time the
+  /// worker registers, so that the driver can tell a restarted worker from
+  /// the one it replaced at the same address.
   std::string workerId;
   /// "host:port" of the worker's server. The driver connects back there to
   /// launch tasks; other workers fetch shuffle blocks there. Also the

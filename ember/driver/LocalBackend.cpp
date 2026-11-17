@@ -21,6 +21,7 @@ LocalBackend::LocalBackend(LocalBackendOptions options)
       fmt::format("local-{}-{}", ::getpid(), ++backendCounter);
   executor_ = std::make_unique<Executor>(ExecutorOptions{
       .location = location,
+      .id = location,
       .shuffleDirectory = fmt::format("{}/{}", options_.localDirectory, location),
       .numThreads = options_.numThreads});
   slots_ = std::make_unique<folly::CPUThreadPoolExecutor>(options_.numSlots);

@@ -47,10 +47,14 @@ namespace fs = std::filesystem;
 namespace runner = facebook::axiom::runner;
 namespace velox = facebook::velox;
 
-// Wraps a backend: counts launches and fails the attempts 'fail' picks.
+// Wraps a backend: counts launches and fails the attempts 'fail' picks. Its
+// executor can be lost and come back as a new one at the same location, as a
+// restarted worker would: file outputs carry the id of the executor's current
+// incarnation.
 class FlakyBackend : public SchedulerBackend {
  public:
   using FailIf = std::function<bool(const TaskDescription&)>;
+  using AfterResult = std::function<void(const TaskResult&, FlakyBackend&)>;
 
   FlakyBackend(std::shared_ptr<SchedulerBackend> backend, FailIf fail)
       : backend_{std::move(backend)}, fail_{std::move(fail)} {}
@@ -76,7 +80,29 @@ class FlakyBackend : public SchedulerBackend {
       onResult(result.serialize());
       return;
     }
-    backend_->launchTask(std::move(task), node, std::move(onResult));
+    backend_->launchTask(
+        std::move(task),
+        node,
+        [this, onResult = std::move(onResult)](std::string bytes) {
+          auto result = TaskResult::deserialize(bytes);
+          AfterResult afterResult;
+          if (result.mapStatus.has_value() &&
+              !result.mapStatus->executorId.empty()) {
+            std::lock_guard<std::mutex> l(mutex_);
+            result.mapStatus->executorId = executorIdLocked();
+            afterResult = afterResult_;
+          }
+          onResult(result.serialize());
+          if (afterResult != nullptr) {
+            afterResult(result, *this);
+          }
+        });
+  }
+
+  /// Calls 'afterResult' after each map task's result is delivered.
+  void setAfterResult(AfterResult afterResult) {
+    std::lock_guard<std::mutex> l(mutex_);
+    afterResult_ = std::move(afterResult);
   }
 
   std::vector<std::string> nodes() const override {
@@ -99,15 +125,18 @@ class FlakyBackend : public SchedulerBackend {
     backend_->removeShuffle(shuffleId);
   }
 
-  /// Reports the executor at 'location' lost, then back, as if it restarted.
-  void restartExecutor(const std::string& location) {
+  /// Reports the executor lost; it comes back at the same location as a new
+  /// one, as if its worker restarted on the same port.
+  void restartExecutor() {
     ExecutorListener listener;
+    std::string lost;
     {
       std::lock_guard<std::mutex> l(mutex_);
       listener = listener_;
+      lost = executorIdLocked();
+      ++incarnation_;
     }
-    listener.onExecutorLost(location);
-    listener.onExecutorAdded(location);
+    listener.onExecutorLost(lost);
   }
 
   void stop() override {
@@ -132,8 +161,14 @@ class FlakyBackend : public SchedulerBackend {
   const std::shared_ptr<SchedulerBackend> backend_;
   const FailIf fail_;
   std::mutex mutex_;
+  std::string executorIdLocked() const {
+    return fmt::format("executor-{}", incarnation_);
+  }
+
   std::map<int32_t, int32_t> launches_;
   ExecutorListener listener_;
+  int32_t incarnation_{0};
+  AfterResult afterResult_;
 };
 
 class SchedulerTest : public testing::Test {
@@ -457,7 +492,8 @@ TEST_F(SchedulerTest, taskMessagesRoundTrip) {
   result.state = TaskState::kFailed;
   result.error = "boom";
   result.userError = true;
-  result.mapStatus = shuffle::MapStatus{"executor-1", {{10, 0, 7}, {1, 2, 0}}};
+  result.mapStatus =
+      shuffle::MapStatus{"host:7078", {{10, 0, 7}, {1, 2, 0}}, "executor-1"};
   result.resultPages = {"page one", std::string("\0binary\0", 8)};
   result.outputRows = 42;
   result.stats = {{"aiCalls", 5}, {"aiFailedRows", 3}};
@@ -466,7 +502,8 @@ TEST_F(SchedulerTest, taskMessagesRoundTrip) {
   EXPECT_EQ(resultCopy.state, TaskState::kFailed);
   EXPECT_EQ(resultCopy.error, "boom");
   EXPECT_TRUE(resultCopy.userError);
-  EXPECT_EQ(resultCopy.mapStatus->location, "executor-1");
+  EXPECT_EQ(resultCopy.mapStatus->location, "host:7078");
+  EXPECT_EQ(resultCopy.mapStatus->executorId, "executor-1");
   EXPECT_EQ(resultCopy.mapStatus->segments, result.mapStatus->segments);
   EXPECT_EQ(resultCopy.resultPages, result.resultPages);
   EXPECT_EQ(resultCopy.outputRows, 42);
@@ -740,7 +777,7 @@ TEST_F(SchedulerTest, recomputesOutputsOfALostExecutor) {
         attempts.push_back(info);
         if (attempts.size() == 1) {
           ASSERT_EQ(info.outputLocations.size(), 2);
-          backend.restartExecutor(info.outputLocations.at(0));
+          backend.restartExecutor();
         }
       });
   EXPECT_EQ(toStrings(dag->runJob(*df.physicalPlan(), pool_.get())), expected);
@@ -748,6 +785,52 @@ TEST_F(SchedulerTest, recomputesOutputsOfALostExecutor) {
   const auto plan = dag->stagePlan(*df.physicalPlan());
   EXPECT_EQ(backend->launches(plan.stages[0].stageId), 2 * 2);
   EXPECT_EQ(backend->launches(plan.stages[1].stageId), 4);
+  for (const auto& attempt : attempts) {
+    EXPECT_TRUE(attempt.fetchFailures.empty());
+  }
+}
+
+// An executor lost while its map stage still runs, after some of its tasks
+// finished, and back at the same location as a new one (a worker restarted
+// on the same port). The outputs of the lost executor count as lost, though
+// their results arrive after it is gone, and only those maps run again;
+// outputs of the new one at the same location are kept.
+TEST_F(SchedulerTest, ignoresOutputsOfAnExecutorLostMidStage) {
+  auto path = writeCorpus(6, 200);
+  auto df = wordCount(path);
+  auto expected = toStrings(df.collectBatches());
+
+  std::vector<StageAttemptInfo> attempts;
+  auto [dag, backend] = scheduler(
+      {}, nullptr, [&](const StageAttemptInfo& info, FlakyBackend&) {
+        attempts.push_back(info);
+      });
+  bool restarted = false;
+  backend->setAfterResult([&](const TaskResult&, FlakyBackend& backend) {
+    if (!restarted) {
+      restarted = true;
+      backend.restartExecutor();
+    }
+  });
+  EXPECT_EQ(toStrings(dag->runJob(*df.physicalPlan(), pool_.get())), expected);
+
+  const auto mapStage = dag->stagePlan(*df.physicalPlan()).stages[0].stageId;
+  ASSERT_GE(attempts.size(), 2);
+  const auto& first = attempts[0];
+  const auto& rerun = attempts[1];
+  ASSERT_EQ(first.stageId, mapStage);
+  ASSERT_EQ(rerun.stageId, mapStage);
+  EXPECT_EQ(rerun.attempt, 1);
+  // At least the first map's output was the lost executor's, and the rest
+  // were kept.
+  EXPECT_LT(first.outputLocations.size(), first.partitions.size());
+  EXPECT_FALSE(first.outputLocations.empty());
+  EXPECT_EQ(
+      rerun.partitions.size(),
+      first.partitions.size() - first.outputLocations.size());
+  for (const auto p : rerun.partitions) {
+    EXPECT_FALSE(first.outputLocations.contains(p)) << p;
+  }
   for (const auto& attempt : attempts) {
     EXPECT_TRUE(attempt.fetchFailures.empty());
   }
@@ -863,7 +946,7 @@ TEST_F(SchedulerTest, recomputesLostStoredOutputs) {
   const auto launches = backend->totalLaunches();
   ASSERT_FALSE(location.empty());
 
-  backend->restartExecutor(location);
+  backend->restartExecutor();
   EXPECT_EQ(toStrings(dag->runJob(*plan, pool_.get())), expected);
   EXPECT_EQ(backend->totalLaunches(), 2 * launches);
 
@@ -967,15 +1050,11 @@ TEST_F(SchedulerTest, recomputesLostCachedOutput) {
   auto df = cached.groupBy("upper").count();
   auto expected = sorted(toStrings(df.collectBatches()));
 
-  std::map<int32_t, std::string> locations;
   std::map<std::string, int32_t> ranTasks;
   auto [dag, backend] = scheduler(
       {}, nullptr, [&](const StageAttemptInfo& info, FlakyBackend&) {
         if (info.stageKey.has_value()) {
           ranTasks[*info.stageKey] += info.partitions.size();
-        }
-        for (const auto& [map, location] : info.outputLocations) {
-          locations[map] = location;
         }
       });
   const auto plan = df.physicalPlan();
@@ -985,7 +1064,7 @@ TEST_F(SchedulerTest, recomputesLostCachedOutput) {
   EXPECT_EQ(ranTasks[*cutKey], 3);
 
   // The local backend has one executor: all outputs are lost.
-  backend->restartExecutor(locations.begin()->second);
+  backend->restartExecutor();
   EXPECT_EQ(sorted(toStrings(dag->runJob(*plan, pool_.get()))), expected);
   EXPECT_EQ(ranTasks[*cutKey], 6);
   EXPECT_EQ(sorted(toStrings(dag->runJob(*plan, pool_.get()))), expected);
@@ -1167,9 +1246,10 @@ TEST(MapOutputTrackerTest, kilnOutputsOutliveTheirExecutor) {
   MapOutputTracker tracker;
   tracker.registerShuffle(0, 2);
   const auto kiln = shuffle::kilnLocation("meta:7000", "abc");
-  ASSERT_TRUE(tracker.registerMapOutput(0, 0, {"executor-1", {{10, 20}}}));
+  ASSERT_TRUE(tracker.registerMapOutput(
+      0, 0, {"host:7078", {{10, 20}}, "executor-1"}));
   ASSERT_TRUE(tracker.registerMapOutput(0, 1, {kiln, {{10, 20}}}));
-  EXPECT_EQ(tracker.markLocationLost("executor-1"), 1);
+  EXPECT_EQ(tracker.markExecutorLost("executor-1"), 1);
   EXPECT_EQ(tracker.missingMaps(0), (std::vector<int32_t>{0}));
   // Reported by a task on the lost executor, but held in Kiln.
   tracker.registerShuffle(1, 1);
@@ -1196,6 +1276,21 @@ TEST(MapOutputTrackerTest, kilnOutputsOutliveTheirExecutor) {
   EXPECT_EQ(tracker.partitionSizes(2), (std::vector<int64_t>{15, 7}));
   // A failed fetch drops that output only.
   EXPECT_EQ(tracker.removeOutputsAt(0, kiln), 1);
+}
+
+// Outputs reported by a lost executor after it is gone are ignored, also when
+// a new executor serves at its location.
+TEST(MapOutputTrackerTest, lostExecutorStaysLostAtItsLocation) {
+  MapOutputTracker tracker;
+  tracker.registerShuffle(0, 3);
+  ASSERT_TRUE(tracker.registerMapOutput(0, 0, {"host:7078", {{10}}, "a"}));
+  EXPECT_EQ(tracker.markExecutorLost("a"), 1);
+  // A task that finished on "a" before it died.
+  EXPECT_FALSE(tracker.registerMapOutput(0, 1, {"host:7078", {{10}}, "a"}));
+  // Its successor at the same address.
+  EXPECT_TRUE(tracker.registerMapOutput(0, 2, {"host:7078", {{10}}, "b"}));
+  EXPECT_EQ(tracker.missingMaps(0), (std::vector<int32_t>{0, 1}));
+  EXPECT_EQ(tracker.markExecutorLost("a"), 0);
 }
 
 // Each scheduler stands for a program of its own: a later one finds the

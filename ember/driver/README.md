@@ -10,9 +10,9 @@ Turns an optimized plan into stages and runs them.
 | `KilnMemo` | With `ember.reuse.kiln`: stored outputs in Kiln's catalog, by stage key, for later programs (below). |
 | `TaskScheduler` | Launches a stage's tasks on the backend and waits. Retries a failed task up to `maxTaskAttempts` (4) times; errors from the user's program fail at once. A task that cannot fetch its input is not retried: the task set returns its fetch failure. |
 | `MapOutputTracker` | Records each map task's `MapStatus` (location, bytes per partition) and gives reduce task `p` the URLs of its non-empty blocks. Forgets outputs whose executor is lost or could not be fetched from. |
-| `SchedulerBackend` | Where tasks run: `launchTask(bytes, callback)`, `totalSlots`, `removeShuffle`, and an executor listener told when executors join or are lost. |
+| `SchedulerBackend` | Where tasks run: `launchTask(bytes, callback)`, `totalSlots`, `removeShuffle`, and an executor listener told when executors are lost. |
 | `LocalBackend` | `local[N]`: one in-process executor with N task slots. Tasks still go through serialized bytes. |
-| `ClusterBackend` | `ember://host:port`: serves `DriverService` on the port; workers register there with their address and slots, and the backend sends each task to the worker with the most free slots as a `launchTask` call, whose reply is the task result. A worker whose connection breaks or that misses heartbeats (`ember.cluster.heartbeat_timeout_ms`) is dropped: its running tasks fail and are retried elsewhere, and the listener reports its location lost. |
+| `ClusterBackend` | `ember://host:port`: serves `DriverService` on the port; workers register there with their address and slots, and the backend sends each task to the worker with the most free slots as a `launchTask` call, whose reply is the task result. A worker whose connection breaks or that misses heartbeats (`ember.cluster.heartbeat_timeout_ms`) is dropped: its running tasks fail and are retried elsewhere, and the listener reports its executor lost. Each registration is a new executor with an id of its own; a worker that registers at the address of another replaces it. |
 
 Source stages run one task per split; other stages run as many tasks as the
 shuffle they read has partitions; the result stage runs one task, unless a
@@ -61,8 +61,11 @@ A map output lives on the worker that wrote it, so it is lost with that
 worker. The driver learns of it in two ways:
 
 - The backend drops the worker (broken connection, missed heartbeats) and
-  reports its location lost. The tracker forgets every output there and
-  ignores outputs reported from it until a worker registers there again.
+  reports its executor lost. The tracker forgets every output it wrote and
+  ignores outputs reported from it later, by tasks that finished before it
+  died. Each map output carries the id of the executor that wrote it, new
+  each time a worker registers, so a worker restarted at the same address
+  does not bring back its predecessor's outputs.
 - A reduce task fails to fetch a block (the worker is gone, hangs past the
   workers' fetch timeout, or lost the file). The shuffle read tags the error
   with the block, the task result carries it as a fetch failure, and the

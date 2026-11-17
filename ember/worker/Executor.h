@@ -30,8 +30,11 @@ class MemoryPool;
 namespace ember {
 
 struct ExecutorOptions {
-  /// Identifies the executor; readers fetch its shuffle blocks by it.
+  /// Where readers fetch the executor's shuffle blocks.
   std::string location;
+  /// Identifies this executor to the driver, unlike 'location' also across
+  /// restarts there. Goes into the MapStatus of each file output.
+  std::string id;
   /// Holds shuffle files, and spill files under spill/. Created if missing,
   /// removed with the executor.
   std::string shuffleDirectory;

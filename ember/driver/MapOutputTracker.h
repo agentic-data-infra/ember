@@ -1,11 +1,11 @@
 // Tracks where each map task's shuffle output lives. Reduce tasks get their
 // inputs from it as block URLs.
 //
-// Outputs are lost with the executor that holds them; outputs in Kiln are
-// not (their location names a chunk, not an executor). Once a location is
-// marked lost, its outputs count as missing, and outputs reported from it
-// later (by tasks that finished just before it died) are ignored, until an
-// executor registers at that location again.
+// Outputs are lost with the executor that holds them (MapStatus::executorId);
+// outputs in Kiln are not. Once an executor is marked lost, its outputs count
+// as missing, and outputs reported from it later (by tasks that finished just
+// before it died) are ignored. Executor ids are unique, so this holds even
+// when a new executor serves at the lost one's location.
 
 #pragma once
 
@@ -25,7 +25,7 @@ class MapOutputTracker {
   void registerShuffle(int32_t shuffleId, int32_t numMaps);
 
   /// Records a map task's output. Returns false, recording nothing, if its
-  /// location is lost.
+  /// executor is lost.
   bool registerMapOutput(
       int32_t shuffleId,
       int32_t mapId,
@@ -44,13 +44,9 @@ class MapOutputTracker {
   /// task could not fetch from it. Returns the number of outputs removed.
   int32_t removeOutputsAt(int32_t shuffleId, const std::string& location);
 
-  /// The executor at 'location' is gone: forget all its outputs, and ignore
-  /// outputs reported from it until markLocationAvailable(). Returns the
-  /// number of outputs removed.
-  int32_t markLocationLost(const std::string& location);
-
-  /// An executor serves at 'location' again.
-  void markLocationAvailable(const std::string& location);
+  /// Executor 'executorId' is gone: forget all its outputs, and ignore
+  /// outputs reported from it later. Returns the number of outputs removed.
+  int32_t markExecutorLost(const std::string& executorId);
 
   /// Block URLs of reduce partition 'reduceId' across all map outputs,
   /// skipping empty blocks.
@@ -77,7 +73,7 @@ class MapOutputTracker {
       std::vector<std::optional<shuffle::MapStatus>>& maps,
       const std::string& location);
 
-  std::set<std::string> lostLocations_;
+  std::set<std::string> lostExecutors_;
 };
 
 } // namespace ember::driver
