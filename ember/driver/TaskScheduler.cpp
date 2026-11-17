@@ -30,17 +30,20 @@ struct TaskSet {
 
 } // namespace
 
-TaskSetResult TaskScheduler::runTaskSet(std::vector<TaskDescription> tasks) {
+TaskSetResult TaskScheduler::runTaskSet(
+    std::vector<TaskDescription> tasks,
+    std::function<bool()> inputsLost) {
   auto set = std::make_shared<TaskSet>();
   set->tasks = std::move(tasks);
   set->result.results.resize(set->tasks.size());
   set->pending = set->tasks.size();
 
-  std::function<void(size_t)> launch = [this, set, &launch](size_t index) {
+  std::function<void(size_t)> launch = [this, set, &launch, &inputsLost](
+                                           size_t index) {
     backend_->launchTask(
         set->tasks[index].serialize(),
         set->tasks[index].node,
-        [this, set, index, &launch](std::string bytes) {
+        [this, set, index, &launch, &inputsLost](std::string bytes) {
           auto result = TaskResult::deserialize(bytes);
           bool relaunch = false;
           {
@@ -53,6 +56,13 @@ TaskSetResult TaskScheduler::runTaskSet(std::vector<TaskDescription> tasks) {
               LOG(WARNING) << "Task " << result.taskId
                            << " lost its input: " << result.error;
               set->result.fetchFailures.push_back(*result.fetchFailure);
+              --set->pending;
+            } else if (!result.userError && inputsLost()) {
+              // A retry would read the lost inputs; the DagScheduler
+              // recomputes them and runs the task again.
+              LOG(WARNING) << "Task " << result.taskId
+                           << " failed after its inputs were lost: "
+                           << result.error;
               --set->pending;
             } else if (
                 // An error in the user's program fails the same way again.

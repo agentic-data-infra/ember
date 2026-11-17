@@ -821,6 +821,17 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
     return tasks;
   };
 
+  // Whether an executor lost since the tasks were made took some of their
+  // inputs with it.
+  auto inputsLost = [&]() {
+    return std::any_of(
+        stage.shuffleInputs.begin(),
+        stage.shuffleInputs.end(),
+        [&](const auto& input) {
+          return !mapOutputTracker_.isComplete(input.shuffleId);
+        });
+  };
+
   auto removeFailedOutputs = [&](const auto& failures) {
     for (const auto& failure : failures) {
       // The executor may be alive, but its outputs of this shuffle are not
@@ -849,9 +860,16 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
     if (!tasks.has_value()) {
       return std::nullopt;
     }
-    auto taskSet = taskScheduler_.runTaskSet(std::move(*tasks));
+    auto taskSet = taskScheduler_.runTaskSet(std::move(*tasks), inputsLost);
     if (!taskSet.fetchFailures.empty()) {
       removeFailedOutputs(taskSet.fetchFailures);
+      return std::nullopt;
+    }
+    // Split points need a sample of every task's input.
+    if (std::any_of(
+            taskSet.results.begin(), taskSet.results.end(), [](const auto& r) {
+              return !r.has_value();
+            })) {
       return std::nullopt;
     }
     const auto type = sampleRowType();
@@ -956,7 +974,7 @@ void DagScheduler::runStage(StageState& state, JobContext& job) {
         .shuffleId = stage.shuffleId,
         .partitions = partitions};
     if (tasks.has_value()) {
-      auto taskSet = taskScheduler_.runTaskSet(std::move(*tasks));
+      auto taskSet = taskScheduler_.runTaskSet(std::move(*tasks), inputsLost);
       for (size_t i = 0; i < partitions.size(); ++i) {
         auto& result = taskSet.results[i];
         if (!result.has_value()) {
