@@ -790,6 +790,45 @@ TEST_F(SchedulerTest, recomputesOutputsOfALostExecutor) {
   }
 }
 
+// An executor lost while a reduce task runs, taking the task and the map
+// outputs with it. The task is not retried with the blocks of the lost
+// outputs: the map tasks run again first, then the reduce task.
+TEST_F(SchedulerTest, doesNotRetryTasksWhoseInputsAreLost) {
+  auto path = writeCorpus(2, 200);
+  auto df = wordCount(path);
+  auto expected = toStrings(df.collectBatches());
+
+  int32_t reduceStage = -1;
+  FlakyBackend* flaky = nullptr;
+  bool lost = false;
+  std::vector<StageAttemptInfo> attempts;
+  auto [dag, backend] = scheduler(
+      {},
+      [&](const TaskDescription& task) {
+        if (task.stageId != reduceStage || lost) {
+          return false;
+        }
+        lost = true;
+        flaky->restartExecutor();
+        return true;
+      },
+      [&](const StageAttemptInfo& info, FlakyBackend&) {
+        attempts.push_back(info);
+      });
+  flaky = backend.get();
+  const auto plan = dag->stagePlan(*df.physicalPlan());
+  reduceStage = plan.stages[1].stageId;
+  EXPECT_EQ(toStrings(dag->runJob(*df.physicalPlan(), pool_.get())), expected);
+
+  // The map stage ran twice; the failed reduce task once more, not retried
+  // before the map stage reran.
+  EXPECT_EQ(backend->launches(plan.stages[0].stageId), 2 * 2);
+  EXPECT_EQ(backend->launches(reduceStage), 4 + 1);
+  for (const auto& attempt : attempts) {
+    EXPECT_TRUE(attempt.fetchFailures.empty());
+  }
+}
+
 // An executor lost while its map stage still runs, after some of its tasks
 // finished, and back at the same location as a new one (a worker restarted
 // on the same port). The outputs of the lost executor count as lost, though

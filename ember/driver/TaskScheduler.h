@@ -3,10 +3,13 @@
 // it has failed 'maxTaskAttempts' times. Errors in the user's program are not
 // retried. Neither are fetch failures: a task that cannot read a shuffle block
 // would fail again until the block's map output is recomputed, which is the
-// DagScheduler's job, so the task set reports them instead.
+// DagScheduler's job, so the task set reports them instead. For the same
+// reason a failed task is not retried once its inputs are lost (e.g. with the
+// executor that held them): it would read from where they were.
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -17,7 +20,8 @@
 namespace ember::driver {
 
 struct TaskSetResult {
-  /// Per task, in partition order; empty for a task that hit a fetch failure.
+  /// Per task, in partition order; empty for a task that hit a fetch failure
+  /// or failed after its inputs were lost.
   std::vector<std::optional<TaskResult>> results;
   /// The lost blocks, one per failed task.
   std::vector<shuffle::FetchFailure> fetchFailures;
@@ -28,10 +32,14 @@ class TaskScheduler {
   TaskScheduler(std::shared_ptr<SchedulerBackend> backend, int32_t maxTaskAttempts);
 
   /// Runs 'tasks' and returns their results in the same order, with the
-  /// fetch failures of those that could not read their input. Throws once a
-  /// task fails 'maxTaskAttempts' times, after the tasks still running have
-  /// finished.
-  TaskSetResult runTaskSet(std::vector<TaskDescription> tasks);
+  /// fetch failures of those that could not read their input. A task that
+  /// fails, other than by a user error, while 'inputsLost' returns true is
+  /// not retried and has no result.
+  /// Throws once a task fails 'maxTaskAttempts' times, after the tasks still
+  /// running have finished.
+  TaskSetResult runTaskSet(
+      std::vector<TaskDescription> tasks,
+      std::function<bool()> inputsLost);
 
   SchedulerBackend& backend() {
     return *backend_;
