@@ -33,3 +33,12 @@ cxx_binary(
     # Archives must precede the prebuilt Velox/Axiom libraries they use.
     link_ordering = "topological",
 )
+
+cxx_binary(
+    name = "topic_report",
+    srcs = ["TopicReport.cpp"],
+    headers = ["EnvConfig.h"],
+    deps = ["//ember/api:api"],
+    # Archives must precede the prebuilt Velox/Axiom libraries they use.
+    link_ordering = "topological",
+)
