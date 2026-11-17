@@ -349,7 +349,12 @@ docs.filter(judged.getField("educational")).groupBy(judged.getField("topic")).co
 ```
 
 AI calls take part in reuse like any other expression, and a stage with
-failed calls is not kept. Endpoints, output schemas, failures and reuse are
+failed calls is not kept. Inside `when`/`otherwise`, `&`, `|` and
+`coalesce`, a call is made only on the rows that reach it. Put cheap filters
+before AI columns, in the same filter as the call, or directly after the
+`withColumn` that adds the AI column: then they run first and spare the
+model their rows. A filter after a `select`, join or aggregation that
+follows the AI column runs after the calls. Endpoints, output schemas, failures and reuse are
 in [ai-functions.md](ai-functions.md).
 
 ## Statistics

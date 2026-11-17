@@ -403,6 +403,7 @@ class Client : public folly::AsyncTimeout {
     bool retry = false;
     if (code != CURLE_OK) {
       retry = retryable(code);
+      answer.overloaded = code == CURLE_OPERATION_TIMEDOUT;
       answer.error = transfer->curlError[0] != '\0'
           ? std::string(transfer->curlError)
           : std::string(curl_easy_strerror(code));
@@ -410,6 +411,7 @@ class Client : public folly::AsyncTimeout {
       answer = parse(*transfer);
     } else {
       retry = status == 429 || status >= 500;
+      answer.overloaded = status == 429;
       answer.error = fmt::format(
           "HTTP {}: {}", status, transfer->body().substr(0, kQuotedBytes));
     }
@@ -492,7 +494,7 @@ class HttpBackend : public AiBackend {
   explicit HttpBackend(const AiEndpoint& endpoint)
       : client_{std::make_unique<Client>(endpoint, *rpc::nextIoEventBase())} {}
 
-  folly::coro::Task<AiAnswer> generate(
+  folly::SemiFuture<AiAnswer> generate(
       std::string_view prompt,
       velox::RowTypePtr schema) override {
     auto transfer = std::make_unique<Transfer>();
@@ -503,7 +505,7 @@ class HttpBackend : public AiBackend {
         client_->pool());
     auto answer = transfer->promise.getSemiFuture();
     client_->submit(std::move(transfer));
-    co_return co_await std::move(answer);
+    return answer;
   }
 
  private:

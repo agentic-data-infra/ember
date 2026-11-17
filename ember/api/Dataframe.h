@@ -12,6 +12,7 @@
 #include <iosfwd>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -91,10 +92,12 @@ class PlanStep {
   PlanStep(
       std::shared_ptr<const PlanStep> parent,
       Apply apply,
-      std::shared_ptr<const CachedTable> cached = nullptr)
+      std::shared_ptr<const CachedTable> cached = nullptr,
+      std::optional<std::string> rpcColumn = std::nullopt)
       : parent_{std::move(parent)},
         apply_{std::move(apply)},
-        cached_{std::move(cached)} {}
+        cached_{std::move(cached)},
+        rpcColumn_{std::move(rpcColumn)} {}
 
   const std::shared_ptr<const PlanStep>& parent() const {
     return parent_;
@@ -111,6 +114,8 @@ class PlanStep {
   const Apply apply_;
   // The table a cache() step scans.
   const std::shared_ptr<const CachedTable> cached_;
+  // The column a withColumn() step computes with RPC calls (RpcCalls.h).
+  const std::optional<std::string> rpcColumn_;
 
   mutable std::mutex mutex_;
   // Logical plan and schema only.
