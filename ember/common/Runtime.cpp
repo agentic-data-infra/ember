@@ -31,6 +31,7 @@
 #include "velox/core/PlanNode.h"
 #include "velox/exec/Exchange.h"
 #include "velox/exec/PartitionFunction.h"
+#include "velox/exec/rpc/RPCPlanNodeTranslator.h"
 #include "velox/serializers/PrestoSerializer.h"
 #include "velox/type/Type.h"
 
@@ -121,6 +122,8 @@ void initializeRuntime(int64_t memoryBytes) {
     }
     registerFunctions();
     ai::registerAiFunctions();
+    // Async RPC functions run in RPC plan nodes (see ember/api/RpcCalls.h).
+    velox::exec::rpc::registerRPCPlanNodeTranslator();
 
     // Plan fragments, expressions and splits travel as JSON.
     velox::Type::registerSerDe();

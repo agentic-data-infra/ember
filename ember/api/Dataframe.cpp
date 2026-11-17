@@ -9,6 +9,7 @@
 #include "ember/CachedConnector.h"
 #include "ember/CachedTable.h"
 #include "ember/DataframeWriter.h"
+#include "ember/RpcCalls.h"
 #include "ember/Session.h"
 #include "ember/functions.h"
 
@@ -34,6 +35,38 @@ std::vector<lp::ExprApi> columnRefs(const velox::RowTypePtr& type) {
     result.push_back(lp::Col(name));
   }
   return result;
+}
+
+// Adds projections for the RPC calls taken out of 'exprs' (see RpcCalls.h)
+// and returns the expressions that read them.
+std::vector<lp::ExprApi> addRpcCalls(
+    lp::PlanBuilder& builder,
+    const std::vector<lp::ExprApi>& exprs) {
+  auto calls = takeOutRpcCalls(exprs);
+  for (const auto& level : calls.levels) {
+    builder.with(level);
+  }
+  return std::move(calls.exprs);
+}
+
+// The conjuncts of a condition: the inputs of nested "and"s.
+void addConjuncts(
+    const facebook::velox::core::ExprPtr& condition,
+    std::vector<lp::ExprApi>& conjuncts) {
+  const auto* call = condition->is(facebook::velox::core::IExpr::Kind::kCall)
+      ? condition->as<facebook::velox::core::CallExpr>()
+      : nullptr;
+  if (call != nullptr && call->name() == "and") {
+    for (const auto& input : call->inputs()) {
+      addConjuncts(input, conjuncts);
+    }
+    return;
+  }
+  conjuncts.emplace_back(condition);
+}
+
+lp::ExprApi allOf(const std::vector<lp::ExprApi>& conjuncts) {
+  return conjuncts.size() == 1 ? conjuncts[0] : lp::Call("and", conjuncts);
 }
 
 lp::JoinType joinType(const std::string& how) {
@@ -175,7 +208,7 @@ Dataframe Dataframe::select(const std::vector<Column>& columns) const {
 
   if (numExplodes == 0) {
     return then([projections = exprs(columns)](auto& builder, const auto&) {
-      builder.project(projections);
+      builder.project(addRpcCalls(builder, projections));
     });
   }
 
@@ -194,7 +227,8 @@ Dataframe Dataframe::select(const std::vector<Column>& columns) const {
     }
   }
   return then([unnested, projections](auto& builder, const auto&) {
-    builder.unnest({*unnested}).project(projections);
+    builder.unnest({*unnested});
+    builder.project(addRpcCalls(builder, projections));
   });
 }
 
@@ -207,9 +241,31 @@ Dataframe Dataframe::selectExpr(const std::vector<std::string>& sqls) const {
   return select(columns);
 }
 
+// A condition with RPC calls is split: the conjuncts without them filter
+// first, so the optimizer can push them into the scan and the calls see only
+// their rows.
 Dataframe Dataframe::filter(const Column& condition) const {
   return then([predicate = condition.expr()](auto& builder, const auto&) {
-    builder.filter(predicate);
+    if (!callsRpc(predicate.expr())) {
+      builder.filter(predicate);
+      return;
+    }
+    std::vector<lp::ExprApi> conjuncts;
+    addConjuncts(predicate.expr(), conjuncts);
+    std::vector<lp::ExprApi> cheap;
+    std::vector<lp::ExprApi> rpc;
+    for (auto& conjunct : conjuncts) {
+      (callsRpc(conjunct.expr()) ? rpc : cheap).push_back(std::move(conjunct));
+    }
+    if (!cheap.empty()) {
+      builder.filter(allOf(cheap));
+    }
+    std::vector<lp::ExprApi> columns;
+    for (const auto& input : builder.findOrAssignOutputNames()) {
+      columns.push_back(input.toCol().as(input.outputName()));
+    }
+    builder.filter(addRpcCalls(builder, {allOf(rpc)})[0]);
+    builder.project(columns);
   });
 }
 
@@ -223,15 +279,21 @@ Dataframe Dataframe::filter(const std::string& condition) const {
 Dataframe Dataframe::withColumn(const std::string& name, const Column& column)
     const {
   return then([name, expr = column.expr()](auto& builder, const auto&) {
-    if (!builder.hasColumn(name)) {
+    const bool rpc = callsRpc(expr.expr());
+    if (!builder.hasColumn(name) && !rpc) {
       builder.with({expr.as(name)});
       return;
     }
+    const auto inputs = builder.findOrAssignOutputNames();
+    const auto value = rpc ? addRpcCalls(builder, {expr})[0] : expr;
     std::vector<lp::ExprApi> projections;
-    for (const auto& input : builder.findOrAssignOutputNames()) {
+    for (const auto& input : inputs) {
       projections.push_back(
-          input.outputName() == name ? expr.as(name)
+          input.outputName() == name ? value.as(name)
                                      : input.toCol().as(input.outputName()));
+    }
+    if (!builder.hasColumn(name)) {
+      projections.push_back(value.as(name));
     }
     builder.project(projections);
   });
