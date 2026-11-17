@@ -242,7 +242,11 @@ A throwaway echo `AsyncRPCFunction`, registered in Ember and run in
    node, even one that does not read the answer. So a filter after a
    `withColumn` that computes a column with AI calls puts its conditions
    that do not read the column before the `withColumn`, through any number
-   of such steps.
+   of such steps. Only `withColumn` steps: a filter after a `select`, join
+   or aggregation that follows the AI column stays above the calls. The
+   clean fix is in Axiom's pushdown pass (push the conditions that do not
+   read an inference node's result below it); Ember does not change Axiom
+   for it, so the user guide asks for cheap filters before AI columns.
 3. **Guards.** Before Ember hands a projection or filter to Axiom, it
    rewrites every AI call that is still under a condition. The call moves into
    a projection of its own, and its prompt is wrapped as
