@@ -186,16 +186,12 @@ DagScheduler::DagScheduler(
       fmt::format("ember_driver_{}_{}", options_.appName, ++schedulerCounter));
   planPool_ = rootPool_->addLeafChild("plans");
   taskScheduler_.backend().setExecutorListener(SchedulerBackend::ExecutorListener{
-      .onExecutorAdded =
-          [this](const std::string& location) {
-            mapOutputTracker_.markLocationAvailable(location);
-          },
       .onExecutorLost =
-          [this](const std::string& location) {
-            const auto removed = mapOutputTracker_.markLocationLost(location);
+          [this](const std::string& executorId) {
+            const auto removed = mapOutputTracker_.markExecutorLost(executorId);
             if (removed > 0) {
-              LOG(WARNING) << "Lost " << removed << " map outputs at "
-                           << location;
+              LOG(WARNING) << "Lost " << removed << " map outputs of executor "
+                           << executorId;
             }
           }});
 }

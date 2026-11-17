@@ -7,8 +7,10 @@
 //
 // A worker that misses heartbeats for 'heartbeatTimeout', or whose connection
 // breaks, is dropped: its running tasks fail and the TaskScheduler retries
-// them elsewhere, and the executor listener hears that its location is lost,
-// so the DagScheduler recomputes the shuffle outputs it held.
+// them elsewhere, and the executor listener hears that its executor is lost,
+// so the DagScheduler recomputes the shuffle outputs it held. Each
+// registration is a new executor, with an id of its own: a worker restarted
+// at the same address replaces the old one there.
 //
 // Workers report the node (machine) they run on. A task for a node waits for
 // a free slot on one of its workers, and fails if the node has no worker for

@@ -237,6 +237,10 @@ std::string Executor::runTask(const std::string& bytes) {
                   plan)) {
         result.mapStatus =
             blockStore_->mapStatus(write->shuffleId(), description.partition);
+        // Files die with this executor; an output in Kiln does not.
+        if (!shuffle::isKilnLocation(result.mapStatus->location)) {
+          result.mapStatus->executorId = options_.id;
+        }
       }
       int64_t spilledBytes = 0;
       for (const auto& [id, stats] : exec::toPlanStats(task->taskStats())) {

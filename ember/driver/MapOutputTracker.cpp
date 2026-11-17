@@ -18,7 +18,8 @@ bool MapOutputTracker::registerMapOutput(
   std::lock_guard<std::mutex> l(mutex_);
   auto& maps = outputs_.at(shuffleId);
   VELOX_CHECK_LT(mapId, maps.size());
-  if (lostLocations_.contains(status.location)) {
+  if (!status.executorId.empty() &&
+      lostExecutors_.contains(status.executorId)) {
     return false;
   }
   maps[mapId] = std::move(status);
@@ -45,12 +46,18 @@ int32_t MapOutputTracker::removeOutputsAt(
   return it == outputs_.end() ? 0 : removeOutputsAtLocked(it->second, location);
 }
 
-int32_t MapOutputTracker::markLocationLost(const std::string& location) {
+int32_t MapOutputTracker::markExecutorLost(const std::string& executorId) {
+  VELOX_CHECK(!executorId.empty());
   std::lock_guard<std::mutex> l(mutex_);
-  lostLocations_.insert(location);
+  lostExecutors_.insert(executorId);
   int32_t removed = 0;
   for (auto& [shuffleId, maps] : outputs_) {
-    removed += removeOutputsAtLocked(maps, location);
+    for (auto& status : maps) {
+      if (status.has_value() && status->executorId == executorId) {
+        status.reset();
+        ++removed;
+      }
+    }
   }
   return removed;
 }
@@ -66,11 +73,6 @@ int32_t MapOutputTracker::removeOutputsAtLocked(
     }
   }
   return removed;
-}
-
-void MapOutputTracker::markLocationAvailable(const std::string& location) {
-  std::lock_guard<std::mutex> l(mutex_);
-  lostLocations_.erase(location);
 }
 
 std::optional<int32_t> MapOutputTracker::numMaps(int32_t shuffleId) const {

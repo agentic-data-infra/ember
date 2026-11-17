@@ -88,7 +88,8 @@ class Worker {
   // Serves one driver from registration until it is done. Returns false if
   // the driver could not be reached.
   bool serveDriver(std::chrono::milliseconds connectTimeout);
-  void startExecutor();
+  // Returns the new executor's id.
+  std::string startExecutor();
   void stopExecutor();
 
   // Serves the driver's and other workers' calls.

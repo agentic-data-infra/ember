@@ -73,13 +73,15 @@ rpc::RegisterWorkerResponse ClusterBackend::registerWorker(
       worker->client->close();
       VELOX_FAIL("Driver of {} is stopping", options_.appName);
     }
-    if (auto it = workers_.find(worker->id); it != workers_.end()) {
-      removeWorkerLocked(it->second, "registered again");
+    // Only one process serves at an address: one registered there before
+    // is gone, even if its connection does not show it yet.
+    for (auto it = workers_.begin(); it != workers_.end();) {
+      auto old = (it++)->second;
+      if (old->address == worker->address) {
+        removeWorkerLocked(old, "a new worker registered at its address");
+      }
     }
     workers_[worker->id] = worker;
-    if (listener_.onExecutorAdded) {
-      listener_.onExecutorAdded(worker->address);
-    }
   }
   LOG(INFO) << "Worker " << worker->address << " on node " << worker->node
             << " registered with " << worker->slots << " slots";
@@ -255,7 +257,7 @@ void ClusterBackend::removeWorkerLocked(
   // Fails the worker's running tasks.
   worker->client->close();
   if (listener_.onExecutorLost) {
-    listener_.onExecutorLost(worker->address);
+    listener_.onExecutorLost(worker->id);
   }
   if (workers_.empty()) {
     noWorkersSince_ = std::chrono::steady_clock::now();

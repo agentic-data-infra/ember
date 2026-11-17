@@ -92,7 +92,7 @@ std::string TaskResult::serialize() const {
       segments.push_back(folly::dynamic::array(segment.begin(), segment.end()));
     }
     obj["mapStatus"] = folly::dynamic::object("location", mapStatus->location)(
-        "segments", std::move(segments));
+        "segments", std::move(segments))("executorId", mapStatus->executorId);
   }
   obj["numPages"] = resultPages.size();
   obj["outputRows"] = outputRows;
@@ -136,6 +136,7 @@ TaskResult TaskResult::deserialize(const std::string& bytes) {
   if (obj.count("mapStatus")) {
     shuffle::MapStatus status;
     status.location = obj["mapStatus"]["location"].asString();
+    status.executorId = obj["mapStatus"]["executorId"].asString();
     for (const auto& segment : obj["mapStatus"]["segments"]) {
       auto& lengths = status.segments.emplace_back();
       for (const auto& length : segment) {

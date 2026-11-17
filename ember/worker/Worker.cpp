@@ -2,6 +2,7 @@
 
 #include <unistd.h>
 
+#include <folly/Random.h>
 #include <folly/coro/BlockingWait.h>
 #include <folly/coro/Timeout.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
@@ -176,11 +177,11 @@ bool Worker::serveDriver(std::chrono::milliseconds connectTimeout) {
     }
   }
 
-  startExecutor();
+  const auto executorId = startExecutor();
   rpc::RegisterWorkerResponse reply;
   try {
     rpc::RegisterWorkerRequest request{
-        .workerId = address_,
+        .workerId = executorId,
         .address = address_,
         .slots = options_.slots,
         .node = options_.node.empty() ? rpc::localHostName() : options_.node};
@@ -210,7 +211,7 @@ bool Worker::serveDriver(std::chrono::milliseconds connectTimeout) {
     }
     try {
       if (!folly::coro::blockingWait(folly::coro::timeout(
-              driver->co_heartbeat(address_), kCallTimeout))) {
+              driver->co_heartbeat(executorId), kCallTimeout))) {
         LOG(WARNING) << "Driver no longer knows this worker";
         break;
       }
@@ -225,7 +226,10 @@ bool Worker::serveDriver(std::chrono::milliseconds connectTimeout) {
   return true;
 }
 
-void Worker::startExecutor() {
+std::string Worker::startExecutor() {
+  // Random, as a restarted process may have the same address and pid (e.g.
+  // pid 1 in a container).
+  auto id = fmt::format("{}/{:016x}", address_, folly::Random::rand64());
   auto directory = fmt::format(
       "{}/worker-{}-{}-{}",
       options_.localDirectory,
@@ -234,6 +238,7 @@ void Worker::startExecutor() {
       ++registrations_);
   auto executor = std::make_shared<Executor>(ExecutorOptions{
       .location = address_,
+      .id = id,
       .shuffleDirectory = std::move(directory),
       .numThreads = numThreads_,
       .slots = options_.slots,
@@ -243,6 +248,7 @@ void Worker::startExecutor() {
   executor_ = std::move(executor);
   slots_ = std::move(slots);
   driverDone_ = false;
+  return id;
 }
 
 void Worker::stopExecutor() {
