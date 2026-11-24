@@ -79,22 +79,30 @@ rebuilding them.
 ### Updating Axiom and Velox
 
 Ember builds with [our fork of Axiom](https://github.com/agentic-data-infra/axiom):
-upstream Axiom plus the commits of the branch `ember`, each a candidate upstream
-pull request, and Velox at the commit Axiom's `velox` submodule pins. The
-Axiom version is set at the top of `scripts/build_deps.sh`. To update:
+upstream Axiom plus a few small commits, and Velox at the commit Axiom's `velox`
+submodule pins. The fork is rebased onto upstream every couple of weeks:
+
+- Each rebase is a new branch `ember-YYYYMMDD` (the date it was cut from
+  upstream `main`). Branches are never force-pushed.
+- Each version Ember builds with is an annotated tag `ember-YYYYMMDD-N` on that
+  branch, `-1` first and a higher number for later commits such as fixes.
+- `AXIOM_REF` at the top of `scripts/build_deps.sh` is always a tag. Old
+  branches and tags stay, so that older Ember commits still build.
+
+`scripts/bump_axiom.sh` does a rebase in separate trees, by default
+`~/source/axiom-next` and `~/source/velox-next` (`AXIOM_SRC`, `VELOX_SRC`), from
+an Ember checkout on a new branch:
 
 ```
-cd ~/source/axiom
-git fetch https://github.com/facebookincubator/axiom.git main
-git rebase FETCH_HEAD ember
-git tag ember-YYYYMMDD
-git push --force-with-lease origin ember ember-YYYYMMDD
-git ls-tree HEAD velox      # the Velox commit
+scripts/bump_axiom.sh
 ```
 
-Then set `AXIOM_REF`, check out the Velox commit in `~/source/velox`, run
-`scripts/build_deps.sh` and `buck2 clean`, and run the tests. Old tags stay, so
-that older Ember commits still build.
+It creates today's branch from upstream `main`, cherry-picks the fork commits
+of the previous `ember-YYYYMMDD` branch, moves Velox to Axiom's pin, runs
+`scripts/build_deps.sh`, and runs the Axiom and Ember tests. On a conflict or
+a failure it stops; fix it (in Axiom or in Ember) and run it again. It does not
+push or tag: at the end it prints the commands that do and that set
+`AXIOM_REF` to the tag.
 
 ## Running locally
 
