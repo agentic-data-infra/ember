@@ -158,7 +158,6 @@ class StokeConnectorMetadata
       const facebook::axiom::connector::ConnectorSessionPtr& session,
       const facebook::axiom::connector::TablePtr& table,
       facebook::axiom::connector::WriteKind kind,
-      const facebook::velox::connector::ConnectorTableHandlePtr& scanHandle,
       bool explain) override;
 
   facebook::axiom::connector::RowsFuture finishWrite(

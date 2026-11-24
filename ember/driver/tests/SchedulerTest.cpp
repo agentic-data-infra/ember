@@ -14,6 +14,7 @@
 
 #include <folly/coro/BlockingWait.h>
 
+#include "axiom/connectors/ConnectorMetadataRegistry.h"
 #include "axiom/runner/LocalRunner.h"
 #include "ember/Session.h"
 #include "ember/TaskId.h"
@@ -400,7 +401,8 @@ class SchedulerTest : public testing::Test {
         queryId,
         "test",
         axiom_connector::ConnectorProperties{},
-        axiom_connector::ConnectorContext::noopStatWriterProvider());
+        axiom_connector::ConnectorContext::noopStatWriterProvider(),
+        axiom_connector::ConnectorMetadataRegistry::global());
     auto localRunner = std::make_shared<runner::LocalRunner>(
         std::make_shared<runner::RunnerSession>(
             connectorContext,

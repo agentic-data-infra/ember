@@ -40,7 +40,7 @@ Column column(const std::string& name) {
 }
 
 Column expr(const std::string& sql) {
-  lp::ExprApi parsed = lp::Sql(sql);
+  lp::ExprApi parsed = lp::DuckSql(sql);
   // explode(...) in SQL text is a generator, as in selectExpr.
   const auto* call =
       dynamic_cast<const core::CallExpr*>(parsed.expr().get());

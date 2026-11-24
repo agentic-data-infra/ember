@@ -5,7 +5,9 @@
 #include <folly/container/F14Set.h>
 
 
+#include "axiom/functions/prestosql/PrestoFunctions.h"
 #include "axiom/optimizer/FunctionRegistry.h"
+#include "axiom/optimizer/QueryGraph.h"
 #include "velox/functions/FunctionRegistry.h"
 #include "velox/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "velox/functions/prestosql/registration/RegistrationFunctions.h"
@@ -16,6 +18,7 @@
 namespace ember {
 
 namespace lp = facebook::axiom::logical_plan;
+namespace optimizer = facebook::axiom::optimizer;
 namespace velox = facebook::velox;
 
 namespace {
@@ -23,14 +26,13 @@ namespace {
 // Functions Axiom's optimizer gives a meaning to (comparisons, boolean logic,
 // subscripts, ...). These stay Presto so the optimizer keeps recognizing them.
 folly::F14FastSet<std::string> optimizerFunctions() {
-  auto* registry = facebook::axiom::optimizer::FunctionRegistry::instance();
+  const auto& registry = optimizerFunctionRegistry();
   folly::F14FastSet<std::string> names{
       registry->equality(), registry->negation(), "in", "neq"};
   for (const auto& name :
        {registry->elementAt(),
         registry->subscript(),
         registry->cardinality(),
-        registry->bigintAddition(),
         registry->lessThan(),
         registry->lessThanOrEqual(),
         registry->greaterThan(),
@@ -43,9 +45,6 @@ folly::F14FastSet<std::string> optimizerFunctions() {
     if (name.has_value()) {
       names.insert(*name);
     }
-  }
-  for (const auto& [_, name] : registry->specialForms()) {
-    names.insert(name);
   }
   for (const auto& [name, reverse] : registry->reversibleFunctions()) {
     names.insert(name);
@@ -65,8 +64,14 @@ void registerFunctions() {
     velox::functions::sparksql::registerFunctions(kFunctionPrefix);
     velox::functions::aggregate::sparksql::registerAggregateFunctions(
         kFunctionPrefix);
-    facebook::axiom::optimizer::FunctionRegistry::registerPrestoFunctions();
   });
+}
+
+const std::shared_ptr<const optimizer::FunctionRegistry>&
+optimizerFunctionRegistry() {
+  static const std::shared_ptr<const optimizer::FunctionRegistry> registry =
+      facebook::axiom::functions::prestosql::PrestoFunctions::makeRegistry();
+  return registry;
 }
 
 lp::ExprResolver::FunctionRewriteHook functionRewriteHook() {
@@ -76,7 +81,8 @@ lp::ExprResolver::FunctionRewriteHook functionRewriteHook() {
   return [keepPresto](
              const std::string& name,
              const std::vector<lp::ExprPtr>& args) -> lp::ExprPtr {
-    if (keepPresto->contains(name)) {
+    if (keepPresto->contains(name) ||
+        optimizer::SpecialFormCallNames::tryFromVeloxName(name) != nullptr) {
       return nullptr;
     }
     auto prefixedName = kFunctionPrefix + name;

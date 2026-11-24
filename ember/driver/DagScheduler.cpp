@@ -9,8 +9,9 @@
 #include <folly/coro/BlockingWait.h>
 #include <glog/logging.h>
 
+#include "axiom/connectors/ConnectorContext.h"
 #include "axiom/connectors/ConnectorMetadata.h"
-#include "axiom/runner/LocalRunner.h"
+#include "axiom/connectors/ConnectorMetadataRegistry.h"
 #include "ember/CachedConnector.h"
 #include "ember/CachedTable.h"
 #include "ember/FileSerde.h"
@@ -36,7 +37,6 @@ namespace core = facebook::velox::core;
 namespace file = facebook::axiom::connector::file;
 namespace hive = facebook::velox::connector::hive;
 namespace optimizer = facebook::axiom::optimizer;
-namespace runner = facebook::axiom::runner;
 namespace velox = facebook::velox;
 
 namespace {
@@ -130,7 +130,7 @@ struct DagScheduler::JobContext {
   std::shared_ptr<core::QueryCtx> queryCtx;
   std::shared_ptr<velox::memory::MemoryPool> pool;
   std::unique_ptr<velox::exec::SimpleExpressionEvaluator> evaluator;
-  runner::RunnerSessionPtr session;
+  axiom_connector::ConnectorContextPtr connectorContext;
   // Stages by the shuffle they write.
   std::map<int32_t, StageState*> producers;
 };
@@ -485,8 +485,19 @@ DagScheduler::scanSplits(
 std::vector<rpc::FileInfo> DagScheduler::listFiles(
     const core::TableScanNode& scan,
     JobContext& job) {
-  auto source = runner::ConnectorSplitSourceFactory().splitSourceForScan(
-      job.session, scan, *job.evaluator, nullptr, std::nullopt);
+  const auto& handle = scan.tableHandle();
+  const auto& connectorId = handle->connectorId();
+  auto* splitManager = job.connectorContext->metadataRegistry()
+                           .get(connectorId)
+                           ->splitManager();
+  auto session = job.connectorContext->sessionFor(connectorId);
+  auto source = splitManager->getSplitSource(
+      session,
+      handle,
+      folly::coro::blockingWait(
+          splitManager->co_listPartitions(session, handle, *job.evaluator)),
+      /*partitionType=*/nullptr,
+      /*samplePercentage=*/std::nullopt);
   std::vector<rpc::FileInfo> files;
   std::exception_ptr error;
   try {
@@ -565,14 +576,12 @@ DagScheduler::JobResult DagScheduler::runStages(
   job.pool = job.queryCtx->pool()->addLeafChild("splits");
   job.evaluator = std::make_unique<velox::exec::SimpleExpressionEvaluator>(
       job.queryCtx.get(), job.pool.get());
-  job.session = std::make_shared<runner::RunnerSession>(
-      std::make_shared<axiom_connector::ConnectorContext>(
-          job.jobId,
-          options_.appName,
-          axiom_connector::ConnectorProperties{},
-          axiom_connector::ConnectorContext::noopStatWriterProvider()),
-      std::make_shared<velox::NoopRuntimeStatWriter>(),
-      runner::Properties{});
+  job.connectorContext = std::make_shared<axiom_connector::ConnectorContext>(
+      job.jobId,
+      options_.appName,
+      axiom_connector::ConnectorProperties{},
+      axiom_connector::ConnectorContext::noopStatWriterProvider(),
+      axiom_connector::ConnectorMetadataRegistry::global());
 
   // Cached tables this job reads are stored first; their placeholder
   // shuffle ids become the ids of the shuffles that hold them.

@@ -182,6 +182,7 @@ class CachedTableLayout : public axiom_connector::TableLayout {
   // Takes no filters: they stay above the scan.
   velox::connector::ConnectorTableHandlePtr createTableHandle(
       const axiom_connector::ConnectorSessionPtr& /*session*/,
+      int32_t /*tableReferenceId*/,
       std::vector<velox::connector::ColumnHandlePtr> /*columnHandles*/,
       velox::core::ExpressionEvaluator& /*evaluator*/,
       std::vector<velox::core::TypedExprPtr> filters,

@@ -67,17 +67,17 @@ void collectInputs(
 }
 
 void visit(
-    const optimizer::ExecutableFragment& fragment,
-    const std::map<int32_t, const optimizer::ExecutableFragment*>& byId,
+    const core::MultiStagePlan& plan,
+    const core::Stage& stage,
     std::set<int32_t>& visited,
-    std::vector<const optimizer::ExecutableFragment*>& order) {
-  if (!visited.insert(fragment.fragmentId).second) {
+    std::vector<const core::Stage*>& order) {
+  if (!visited.insert(stage.id).second) {
     return;
   }
-  for (const auto& input : fragment.inputStages) {
-    visit(*byId.at(input.producerFragmentId), byId, visited, order);
+  for (const auto& input : stage.inputs) {
+    visit(plan, plan.stage(input.producerStageId), visited, order);
   }
-  order.push_back(&fragment);
+  order.push_back(&stage);
 }
 
 // Makes the last stage of 'plan' write its output to a shuffle, one partition
@@ -117,87 +117,71 @@ StagePlan planStages(
     const CachedKeyResolver& cachedKey,
     bool materialize,
     const shuffle::ShuffleTarget& target) {
-  const auto& fragments = plan.fragments();
-  VELOX_CHECK(!fragments.empty());
-
-  std::map<int32_t, const optimizer::ExecutableFragment*> byId;
-  std::map<int32_t, const optimizer::ExecutableFragment*> consumers;
-  for (const auto& fragment : fragments) {
+  VELOX_CHECK(!plan.empty());
+  const auto& stagePlan = plan.stagePlan();
+  for (const auto& stage : stagePlan.stages()) {
+    const auto& scans = plan.scans(stage.id);
     VELOX_USER_CHECK(
-        fragment.groupedNodes.empty(),
-        "Grouped execution is not supported yet");
+        scans.groupedNodes.empty(), "Grouped execution is not supported yet");
     VELOX_USER_CHECK(
-        fragment.sampledScans.empty(), "Sampled scans are not supported yet");
-    byId[fragment.fragmentId] = &fragment;
-    for (const auto& input : fragment.inputStages) {
-      VELOX_CHECK(
-          consumers.emplace(input.producerFragmentId, &fragment).second,
-          "Fragment {} has more than one consumer",
-          input.producerFragmentId);
-    }
+        scans.sampledScans.empty(), "Sampled scans are not supported yet");
   }
 
-  auto numTasks =
-      [](const optimizer::ExecutableFragment& f) -> std::optional<int32_t> {
-    if (f.numRemotePartitions.has_value()) {
-      return *f.numRemotePartitions;
+  auto numTasks = [](const core::Stage& stage) -> std::optional<int32_t> {
+    if (stage.numRemotePartitions.has_value()) {
+      return *stage.numRemotePartitions;
     }
-    if (f.type == optimizer::FragmentType::kSource) {
+    if (stage.type == core::StageType::kSource) {
       return std::nullopt;
     }
     return 1;
   };
 
-  // The result fragment is last; everything it needs comes before it.
+  // The root stage is last; everything it needs comes before it.
   std::set<int32_t> visited;
-  std::vector<const optimizer::ExecutableFragment*> order;
-  visit(fragments.back(), byId, visited, order);
+  std::vector<const core::Stage*> order;
+  visit(stagePlan, stagePlan.root(), visited, order);
   VELOX_CHECK_EQ(
-      order.size(), fragments.size(), "Fragments unreachable from the result");
+      order.size(),
+      stagePlan.stages().size(),
+      "Stages unreachable from the result");
 
   StagePlan result;
   int32_t lastPlaceholder = 0;
-  for (const auto* fragment : order) {
+  for (const auto* axiomStage : order) {
     Stage stage;
-    stage.stageId = fragment->fragmentId;
-    stage.numTasks = numTasks(*fragment);
+    stage.stageId = axiomStage->id;
+    stage.numTasks = numTasks(*axiomStage);
 
     std::map<core::PlanNodeId, ReadInfo> reads;
-    for (const auto& input : fragment->inputStages) {
-      const auto& producer = *byId.at(input.producerFragmentId);
-      const auto* output = producer.fragment.planNode
-                               ->as<core::PartitionedOutputNode>();
+    for (const auto& input : axiomStage->inputs) {
+      const auto* output = stagePlan.stage(input.producerStageId)
+                               .plan->as<core::PartitionedOutputNode>();
       VELOX_CHECK_NOT_NULL(
-          output, "Fragment {} does not end in an output", producer.fragmentId);
-      reads[input.consumerNodeId] = {
-          input.producerFragmentId, output->isBroadcast()};
-      stage.parents.push_back(input.producerFragmentId);
+          output, "Stage {} does not end in an output", input.producerStageId);
+      reads[input.exchangeId] = {input.producerStageId, output->isBroadcast()};
+      stage.parents.push_back(input.producerStageId);
     }
 
-    const auto& root = fragment->fragment.planNode;
+    const auto& root = axiomStage->plan;
     const auto* output = root->as<core::PartitionedOutputNode>();
     // With remote output (a range-sorted result), the scheduler collects the
     // rows of each task.
     auto plan = output != nullptr ? output->sources()[0] : root;
     collectInputs(plan, reads, cachedKey, lastPlaceholder, stage);
-    if (auto it = consumers.find(fragment->fragmentId); it != consumers.end()) {
+    if (const auto* consumer = stagePlan.consumer(axiomStage->id)) {
       VELOX_CHECK_NOT_NULL(output);
       int32_t numPartitions = output->numPartitions();
       if (output->isArbitrary()) {
-        auto consumerTasks = numTasks(*it->second);
+        auto consumerTasks = numTasks(*consumer);
         VELOX_USER_CHECK(
             consumerTasks.has_value(),
             "Arbitrary output into a source fragment is not supported");
         numPartitions = *consumerTasks;
       }
-      stage.shuffleId = fragment->fragmentId;
+      stage.shuffleId = axiomStage->id;
       plan = shuffle::ShuffleWriteNode::fromPartitionedOutput(
           *output, *stage.shuffleId, numPartitions, target);
-    } else {
-      VELOX_USER_CHECK(
-          fragment == order.back(),
-          "Fragment {} has no consumer",
-          fragment->fragmentId);
     }
 
     stage.fragment = plan->serialize();

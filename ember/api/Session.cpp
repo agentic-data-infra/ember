@@ -8,7 +8,7 @@
 #include "axiom/connectors/SchemaResolver.h"
 #include "axiom/optimizer/OptimizerSession.h"
 #include "axiom/optimizer/QueryGraphContext.h"
-#include "axiom/optimizer/v2/Optimize.h"
+#include "axiom/optimizer/Optimize.h"
 #include "ember/FunctionRegistry.h"
 #include "ember/Runtime.h"
 #include "ember/axiom-extension/RangePartitionType.h"
@@ -159,6 +159,12 @@ SessionState::SessionState(
   resultPool_ = rootPool_->addLeafChild("results");
   optimizerPool_ = rootPool_->addLeafChild("optimizer");
   functionHook_ = functionRewriteHook();
+  planConnectorContext_ = std::make_shared<axiom_connector::ConnectorContext>(
+      appName_,
+      appName_,
+      axiom_connector::ConnectorProperties{},
+      axiom_connector::ConnectorContext::noopStatWriterProvider(),
+      axiom_connector::ConnectorMetadataRegistry::global());
 }
 
 SessionState::~SessionState() {
@@ -172,6 +178,7 @@ const std::string& SessionState::fileConnectorId() {
 
 lp::PlanBuilder::Context SessionState::planContext() const {
   lp::PlanBuilder::Context context{fileConnectorId()};
+  context.connectorContext = planConnectorContext_;
   context.hook = functionHook_;
   // Implicit casts, e.g. bigint_column > 60 compares as bigint.
   context.coercer = &velox::functions::prestosql::typeCoercer();
@@ -211,7 +218,8 @@ QueryEnv makeQueryEnv(
       queryId,
       user,
       std::move(connectorProperties),
-      axiom_connector::ConnectorContext::noopStatWriterProvider());
+      axiom_connector::ConnectorContext::noopStatWriterProvider(),
+      axiom_connector::ConnectorMetadataRegistry::global());
   env.statsWriter = std::make_shared<velox::NoopRuntimeStatWriter>();
   return env;
 }
@@ -235,8 +243,11 @@ optimizer::PlanAndStats optimizePlan(
     const std::shared_ptr<velox::memory::MemoryPool>& pool,
     const axiom_connector::TablePtr& target = nullptr) {
   velox::HashStringAllocator allocator(pool.get());
+  const auto& functions = optimizerFunctionRegistry();
   optimizer::QueryGraphContext context(
-      allocator, optimizer::OptimizerOptions::kMaxPlanObjectsDefault);
+      allocator,
+      optimizer::OptimizerOptions::kMaxPlanObjectsDefault,
+      functions);
   optimizer::queryCtx() = &context;
   SCOPE_EXIT {
     optimizer::queryCtx() = nullptr;
@@ -253,6 +264,7 @@ optimizer::PlanAndStats optimizePlan(
   }
   optimizer::OptimizerSession session(
       env.connectorContext,
+      functions,
       env.statsWriter,
       axiom_connector::Properties{},
       optimizer::OptimizerOptions{});
@@ -273,7 +285,7 @@ optimizer::PlanAndStats optimizePlan(
     options.sortPartitioner =
         axiom_extension::rangeSortPartitioner(rangeSortPartitions);
   }
-  return optimizer::v2::Optimizer(
+  return optimizer::Optimizer(
              *plan, schemaResolver, session, evaluator, env.queryCtx)
       .optimize(options);
 }

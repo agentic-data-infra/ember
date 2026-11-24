@@ -18,7 +18,7 @@ NUM_THREADS="${NUM_THREADS:-$(nproc)}"
 # The Axiom version Ember builds with, set only here; it pins Velox's. See
 # "Updating Axiom and Velox" in README.md.
 AXIOM_REPO=https://github.com/agentic-data-infra/axiom.git
-AXIOM_REF=ember-20261105-3
+AXIOM_REF=ember-20261124-1
 VELOX_REPO=https://github.com/facebookincubator/velox.git
 
 # Clones 'repo' at 'ref' into 'dir' if it is missing, and fails if 'dir' sits

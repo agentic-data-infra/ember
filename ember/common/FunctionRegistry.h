@@ -10,18 +10,27 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 
 #include "axiom/logical_plan/ExprResolver.h"
+
+namespace facebook::axiom::optimizer {
+class FunctionRegistry;
+}
 
 namespace ember {
 
 inline constexpr const char* kFunctionPrefix = "ember_";
 
-/// Registers Presto scalar, aggregate and window functions, sparksql scalar
-/// and aggregate functions (prefixed), and Axiom's function metadata. Safe to
-/// call more than once.
+/// Registers Presto scalar, aggregate and window functions and sparksql
+/// scalar and aggregate functions (prefixed) with Velox. Safe to call more
+/// than once.
 void registerFunctions();
+
+/// The Presto function semantics Axiom's optimizer plans with.
+const std::shared_ptr<const facebook::axiom::optimizer::FunctionRegistry>&
+optimizerFunctionRegistry();
 
 /// Rewrites a call to 'name' into a call to the sparksql function of the
 /// same name, when it is registered and accepts the arguments.

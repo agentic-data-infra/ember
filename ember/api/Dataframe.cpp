@@ -4,8 +4,9 @@
 #include <iostream>
 #include <sstream>
 
+#include "axiom/logical_plan/NameMappings.h"
 #include "axiom/logical_plan/PlanPrinter.h"
-#include "axiom/optimizer/ToVelox.h"
+#include "axiom/optimizer/PlanAndStats.h"
 #include "ember/CachedConnector.h"
 #include "ember/CachedTable.h"
 #include "ember/DataframeWriter.h"
@@ -125,6 +126,12 @@ std::string cellString(const velox::BaseVector& vector, velox::vector_size_t i) 
     return "NULL";
   }
   return vector.toString(i);
+}
+
+// Whether 'builder's output has a column 'name', not looking at outer scopes.
+bool hasColumn(const lp::PlanBuilder& builder, const std::string& name) {
+  const auto* names = builder.outputMapping();
+  return names != nullptr && names->lookup(name).has_value();
 }
 
 } // namespace
@@ -319,7 +326,7 @@ Dataframe Dataframe::withColumn(const std::string& name, const Column& column)
     const {
   auto apply = [name, expr = column.expr()](auto& builder, const auto&) {
     const bool rpc = callsRpc(expr.expr());
-    if (!builder.hasColumn(name) && !rpc) {
+    if (!hasColumn(builder, name) && !rpc) {
       builder.with({expr.as(name)});
       return;
     }
@@ -331,7 +338,7 @@ Dataframe Dataframe::withColumn(const std::string& name, const Column& column)
           input.outputName() == name ? value.as(name)
                                      : input.toCol().as(input.outputName()));
     }
-    if (!builder.hasColumn(name)) {
+    if (!hasColumn(builder, name)) {
       projections.push_back(value.as(name));
     }
     builder.project(projections);

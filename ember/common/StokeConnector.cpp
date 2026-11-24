@@ -266,6 +266,7 @@ class StokeTableLayout : public axiom_connector::TableLayout {
 
   velox::connector::ConnectorTableHandlePtr createTableHandle(
       const axiom_connector::ConnectorSessionPtr& /*session*/,
+      int32_t /*tableReferenceId*/,
       std::vector<velox::connector::ColumnHandlePtr> /*columnHandles*/,
       velox::core::ExpressionEvaluator& /*evaluator*/,
       std::vector<velox::core::TypedExprPtr> /*filters*/,
@@ -445,7 +446,6 @@ axiom_connector::ConnectorWriteHandlePtr StokeConnectorMetadata::beginWrite(
     const axiom_connector::ConnectorSessionPtr& session,
     const axiom_connector::TablePtr& table,
     axiom_connector::WriteKind kind,
-    const velox::connector::ConnectorTableHandlePtr& /*scanHandle*/,
     bool explain) {
   VELOX_USER_CHECK(
       kind == axiom_connector::WriteKind::kInsert,

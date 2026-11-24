@@ -240,7 +240,6 @@ TEST_F(StokeConnectorTest, beginsWritesIntoOpenStreams) {
                {std::string(kStokeChunkBytes), "4096"}}),
       table,
       axiom_connector::WriteKind::kInsert,
-      nullptr,
       /*explain=*/false);
   const auto* insert =
       handle->veloxHandle()->asChecked<StokeInsertTableHandle>();
@@ -255,18 +254,16 @@ TEST_F(StokeConnectorTest, beginsWritesIntoOpenStreams) {
                {std::string(kStokePackBatch), "32"}}),
       table,
       axiom_connector::WriteKind::kInsert,
-      nullptr,
       false));
 
   // No Kiln cluster.
   EXPECT_ANY_THROW(metadata.beginWrite(
-      session({}), table, axiom_connector::WriteKind::kInsert, nullptr, false));
+      session({}), table, axiom_connector::WriteKind::kInsert, false));
   // No such stream.
   EXPECT_ANY_THROW(metadata.beginWrite(
       session({{std::string(kStokeKilnMetadata), this->metadata()}}),
       metadata.findTable({"default", "missing"}),
       axiom_connector::WriteKind::kInsert,
-      nullptr,
       false));
   // A sealed stream.
   blockingWait(registry_->co_seal(std::string(kStream)));
@@ -274,7 +271,6 @@ TEST_F(StokeConnectorTest, beginsWritesIntoOpenStreams) {
       session({{std::string(kStokeKilnMetadata), this->metadata()}}),
       table,
       axiom_connector::WriteKind::kInsert,
-      nullptr,
       false));
 }
 
@@ -286,7 +282,7 @@ TEST_F(StokeConnectorTest, finishesWritesWithTheirRowCount) {
 
   auto open = session({{std::string(kStokeKilnMetadata), this->metadata()}});
   auto handle = metadata.beginWrite(
-      open, table, axiom_connector::WriteKind::kInsert, nullptr, false);
+      open, table, axiom_connector::WriteKind::kInsert, false);
   EXPECT_EQ(
       metadata.finishWrite(open, handle, {result, result}, nullptr, {}).get(),
       6);
