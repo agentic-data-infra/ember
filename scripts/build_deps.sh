@@ -66,4 +66,5 @@ cmake -S "$AXIOM_SRC" -B "$BUILD_DIR" -GNinja \
 
 ninja -C "$BUILD_DIR" -j "$NUM_THREADS"
 
-"$EMBER_DIR/scripts/gen_third_party.py" --prefix "$PREFIX" --axiom-src "$AXIOM_SRC" --axiom-build "$BUILD_DIR"
+"$EMBER_DIR/scripts/gen_third_party.py" --prefix "$PREFIX" --axiom-src "$AXIOM_SRC" \
+  --axiom-build "$BUILD_DIR" --velox-src "$VELOX_SRC"
