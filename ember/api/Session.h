@@ -151,6 +151,8 @@ class SessionState {
   std::shared_ptr<facebook::velox::memory::MemoryPool> optimizerPool_;
   facebook::axiom::logical_plan::ExprResolver::FunctionRewriteHook
       functionHook_;
+  // Where plans being built look up tables.
+  facebook::axiom::connector::ConnectorContextPtr planConnectorContext_;
   std::atomic<int64_t> queryCounter_{0};
 };
 

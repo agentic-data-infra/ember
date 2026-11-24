@@ -48,8 +48,11 @@ optimizer::MultiFragmentPlan::SortPartitioner rangeSortPartitioner(
         keyType.kind() != velox::TypeKind::VARBINARY) {
       return nullptr;
     }
+    auto type = keyType.kind() == velox::TypeKind::VARCHAR
+        ? velox::TypePtr(velox::VARCHAR())
+        : velox::TypePtr(velox::VARBINARY());
     return std::make_shared<RangePartitionType>(
-        numPartitions, ascending, nullsFirst);
+        numPartitions, std::move(type), ascending, nullsFirst);
   };
 }
 

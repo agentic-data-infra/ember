@@ -18,7 +18,7 @@ NUM_THREADS="${NUM_THREADS:-$(nproc)}"
 # The Axiom version Ember builds with, set only here; it pins Velox's. See
 # "Updating Axiom and Velox" in README.md.
 AXIOM_REPO=https://github.com/agentic-data-infra/axiom.git
-AXIOM_REF=ember-20261105-3
+AXIOM_REF=ember-20261124-1
 VELOX_REPO=https://github.com/facebookincubator/velox.git
 
 # Clones 'repo' at 'ref' into 'dir' if it is missing, and fails if 'dir' sits
@@ -66,4 +66,5 @@ cmake -S "$AXIOM_SRC" -B "$BUILD_DIR" -GNinja \
 
 ninja -C "$BUILD_DIR" -j "$NUM_THREADS"
 
-"$EMBER_DIR/scripts/gen_third_party.py" --prefix "$PREFIX" --axiom-src "$AXIOM_SRC" --axiom-build "$BUILD_DIR"
+"$EMBER_DIR/scripts/gen_third_party.py" --prefix "$PREFIX" --axiom-src "$AXIOM_SRC" \
+  --axiom-build "$BUILD_DIR" --velox-src "$VELOX_SRC"

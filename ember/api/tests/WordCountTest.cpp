@@ -126,7 +126,7 @@ TEST_F(WordCountTest, planHasMapAndReduceStages) {
   auto plan = df.physicalPlan();
   // Scan, split, unnest and partial aggregation, then the final aggregation
   // after a shuffle on 'word', then the sort.
-  EXPECT_GE(plan->fragments().size(), 2) << plan->toString();
+  EXPECT_GE(plan->stages().size(), 2) << plan->toString();
   LOG(INFO) << df.explainString();
 }
 

@@ -10,8 +10,13 @@ namespace ember::axiom_extension {
 
 class RangePartitionType : public facebook::axiom::connector::PartitionType {
  public:
-  RangePartitionType(int32_t numPartitions, bool ascending, bool nullsFirst)
+  RangePartitionType(
+      int32_t numPartitions,
+      facebook::velox::TypePtr keyType,
+      bool ascending,
+      bool nullsFirst)
       : numPartitions_{numPartitions},
+        keyTypes_{std::move(keyType)},
         ascending_{ascending},
         nullsFirst_{nullsFirst} {}
 
@@ -32,6 +37,10 @@ class RangePartitionType : public facebook::axiom::connector::PartitionType {
     return numPartitions_;
   }
 
+  const std::vector<facebook::velox::TypePtr>& keyTypes() const override {
+    return keyTypes_;
+  }
+
   int32_t numGroups() const override {
     return numPartitions_;
   }
@@ -40,6 +49,7 @@ class RangePartitionType : public facebook::axiom::connector::PartitionType {
 
  private:
   const int32_t numPartitions_;
+  const std::vector<facebook::velox::TypePtr> keyTypes_;
   const bool ascending_;
   const bool nullsFirst_;
 };

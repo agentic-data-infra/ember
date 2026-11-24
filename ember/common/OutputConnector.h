@@ -132,7 +132,6 @@ class OutputConnectorMetadata
       const facebook::axiom::connector::ConnectorSessionPtr& session,
       const facebook::axiom::connector::TablePtr& table,
       facebook::axiom::connector::WriteKind kind,
-      const facebook::velox::connector::ConnectorTableHandlePtr& scanHandle,
       bool explain) override;
 
   /// Adds up the rows written. Writes _SUCCESS into a local or shared
